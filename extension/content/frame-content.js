@@ -1,5 +1,6 @@
 import { MSG } from '../lib/messages.js';
 import { classifyUrl } from '../lib/media-detection.js';
+import { uint8ArrayToBase64 } from '../lib/base64.js';
 
 // Runs at document_start in every http(s) frame. Guard against frames whose
 // protocol slipped past the manifest match (data:, blob:, javascript:).
@@ -75,6 +76,19 @@ if (/^https?:$/.test(location.protocol)) {
     }
   });
 
+  // PROXY_FETCH handler — the SW asks us (from inside the iframe origin
+  // that the player runs in) to fetch a URL on its behalf, so the request
+  // goes out with the right Origin/Referer/cookies for signed-URL CDNs.
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type !== MSG.PROXY_FETCH) return false;
+    handleProxyFetch(msg.payload ?? {})
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ ok: false, error: String(err?.message ?? err), status: 0 }),
+      );
+    return true; // async sendResponse
+  });
+
   // Lifecycle ping (kept from v0.1 for SW visibility).
   try {
     chrome.runtime
@@ -86,4 +100,30 @@ if (/^https?:$/.test(location.protocol)) {
   } catch {
     // ignore
   }
+}
+
+async function handleProxyFetch({ url, headers, responseType }) {
+  if (typeof url !== 'string') return { ok: false, error: 'missing url', status: 0 };
+  // credentials: 'same-origin' (the default for content-script fetches) is
+  // required here. Content scripts in MV3 enforce the page's CORS rules —
+  // an `include` credentials mode against a cross-origin URL whose server
+  // sends `Access-Control-Allow-Origin: *` is rejected as a TypeError.
+  // Hotmart's CDN sends `*`, and its auth is URL-based (hdntl token), so
+  // omitting cookies costs nothing. Adapters that need cookies for cross-
+  // origin segment fetches will need a more invasive path (declarativeNet-
+  // Request, or fetching from the top frame).
+  const res = await fetch(url, {
+    credentials: 'same-origin',
+    headers: headers ?? {},
+    redirect: 'follow',
+  });
+  if (!res.ok) {
+    return { ok: false, status: res.status, error: `fetch ${res.status}` };
+  }
+  if (responseType === 'arrayBuffer') {
+    const buf = await res.arrayBuffer();
+    return { ok: true, status: res.status, body: uint8ArrayToBase64(new Uint8Array(buf)) };
+  }
+  const text = await res.text();
+  return { ok: true, status: res.status, body: text };
 }

@@ -164,20 +164,22 @@ Goal: the quality dropdown shows real HLS variants from the master playlist.
 
 Goal: clicking Download produces a playable `.ts` file (not MP4 yet) saved to disk, for any HLS stream.
 
-- [ ] Add `lib/errors.js` with `TokenExpiredError`, `ManifestParseError`, `DecryptionError`, `RemuxError`, `DRMProtectedError`, `UnsupportedFormatError`.
-- [ ] Implement `chrome.offscreen.createDocument` spawning from the SW with reason `BLOBS` + `WORKERS`.
-- [ ] In `offscreen.js`, on receiving `START_DOWNLOAD`:
-  - Fetch the chosen variant playlist using `credentials: 'include'` + any captured `headers` (some sites use `Authorization: Bearer ...`).
+- [x] Add `lib/errors.js` with `TokenExpiredError`, `ManifestParseError`, `DecryptionError`, `RemuxError`, `DRMProtectedError`, `UnsupportedFormatError`. (Stub from v0.1; v0.6 wires the three HLS-relevant ones into `offscreen/downloader.js`.)
+- [x] Implement `chrome.offscreen.createDocument` spawning from the SW with reason `BLOBS` + `WORKERS`. (`ensureOffscreen()` memoizes; document stays alive across downloads so Blob URLs survive the download window.)
+- [x] In `offscreen.js`, on receiving `START_DOWNLOAD`:
+  - Fetch the chosen variant playlist using `credentials: 'include'` + any captured `headers` (some sites use `Authorization: Bearer ...`). (Routed through frame proxy — `credentials: 'same-origin'` in the content-script context, since cross-origin Akamai CDNs send `Access-Control-Allow-Origin: *` and reject `include`.)
   - Extract AES key URL + IV (derive from sequence number when `IV=` is absent).
-  - Fetch the key (16 bytes) once.
+  - Fetch the key (16 bytes) once. (Cached per key URL in case of mid-stream rotation.)
   - Fetch segments with a concurrency limit of 4, applying the same headers.
   - Decrypt each segment with Web Crypto `AES-CBC` using key + per-segment IV.
-  - Concatenate decrypted segments into a `Blob` (in memory for <500 MB; OPFS-backed otherwise).
-- [ ] Send `DOWNLOAD_PROGRESS` after each segment with `{ stage: 'fetch'|'decrypt', current, total }`.
-- [ ] On completion, hand back a Blob URL to the SW, which calls `chrome.downloads.download({ url, filename, saveAs: false })`.
-- [ ] Filename comes from the matched adapter's `deriveFilename({ pageMeta, url, mediaEntry })` + `.ts`.
-- [ ] Detect 403 responses and throw `TokenExpiredError`; popup shows "reload the page" message.
-- [ ] Verify on Hotmart: download a short lesson; resulting `.ts` plays in VLC with correct video and audio.
+  - Concatenate decrypted segments into a `Blob` (in memory for <500 MB; OPFS-backed otherwise). (In-memory for v0.6; OPFS path deferred until first user hits a multi-GB lesson.)
+- [x] Send `DOWNLOAD_PROGRESS` after each segment with `{ stage: 'fetch'|'decrypt', current, total }`. (Plumbed; popup rendering lands in v0.8.)
+- [x] On completion, hand back a Blob URL to the SW, which calls `chrome.downloads.download({ url, filename, saveAs: false })`.
+- [x] Filename comes from the matched adapter's `deriveFilename({ pageMeta, url, mediaEntry })` + `.ts`.
+- [x] Detect 403 responses and throw `TokenExpiredError`; popup shows "reload the page" message. (Mapping is in `offscreen/downloader.js` `throwFromReply`; user-visible message is v0.8.)
+
+Architectural addition (didn't survive contact with reality): all segment / key / variant-playlist fetches go through the **frame proxy** (`PROXY_FETCH` to the content script in the player's iframe origin) — SW fetches from `chrome-extension://…` origin get 403'd by signed-URL CDNs (Hotmart, etc.). The same body-capture pattern from v0.5's manifest detection now applies here through a deliberate fetch from the right origin.
+- [x] Verify on Hotmart: download a short lesson; resulting `.ts` plays in VLC with correct video and audio.
 - [ ] Verify on a public HLS test stream (unencrypted): downloads to `.ts` and plays.
 
 **Ship criterion:** any HLS stream downloads end-to-end as a decrypted `.ts` and plays in VLC.

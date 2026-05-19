@@ -5,6 +5,7 @@ import { classifyUrl, isPrimary, WEBREQUEST_PATTERNS } from '../lib/media-detect
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { parseManifest } from '../lib/m3u8.js';
 import { fetchManifest } from '../lib/manifest-fetch.js';
+import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import {
   addEntry,
   clearTab,
@@ -85,6 +86,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     void handleDetection({
       url: details.url,
       tabId: details.tabId,
+      frameId: details.frameId,
       kind,
       source: 'webRequest',
     });
@@ -107,6 +109,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     void handleDetection({
       url: details.url,
       tabId: details.tabId,
+      frameId: details.frameId,
       kind,
       source: 'webRequest-ct',
     });
@@ -156,6 +159,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       void handleDetection({
         url: p.url,
         tabId,
+        frameId: sender.frameId ?? 0,
         kind,
         headers: p.headers,
         pageUrl: sender.tab?.url || '',
@@ -190,6 +194,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     }
+    case MSG.START_DOWNLOAD: {
+      const p = msg.payload ?? {};
+      if (typeof p.mediaId !== 'string') {
+        sendResponse({ ok: false, error: 'missing mediaId' });
+        return false;
+      }
+      handleStartDownload(p)
+        .then((res) => sendResponse({ ok: true, ...res }))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+      return true; // async
+    }
+    case MSG.PROXY_FETCH: {
+      const p = msg.payload ?? {};
+      if (typeof p.url !== 'string' || typeof p.tabId !== 'number') {
+        sendResponse({ ok: false, error: 'missing url/tabId' });
+        return false;
+      }
+      handleProxyFetch(p)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+      return true; // async
+    }
+    case MSG.DOWNLOAD_PROGRESS: {
+      // Offscreen → popup forwarder. v0.6 just logs; v0.8 wires the popup.
+      log.debug('download progress', msg.payload);
+      sendResponse({ ok: true });
+      return false;
+    }
+    case MSG.DOWNLOAD_DONE: {
+      // Offscreen has produced a Blob URL; trigger the actual save.
+      handleDownloadDone(msg.payload).catch((err) => log.warn('downloads.download failed', err));
+      sendResponse({ ok: true });
+      return false;
+    }
+    case MSG.DOWNLOAD_ERROR: {
+      log.warn('download error', msg.payload);
+      sendResponse({ ok: true });
+      return false;
+    }
     case MSG.GET_TAB_STATE: {
       const reqTab = msg.payload?.tabId ?? sender.tab?.id;
       if (reqTab == null) {
@@ -211,7 +254,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ---------- Detection pipeline ----------
 
-async function handleDetection({ url, tabId, kind, headers, pageUrl, source }) {
+async function handleDetection({ url, tabId, frameId, kind, headers, pageUrl, source }) {
   // For v0.2 only primary kinds populate the user-visible list. We still log
   // segment/key observations so dev sanity-checks have something to read.
   if (!isPrimary(kind)) {
@@ -246,6 +289,10 @@ async function handleDetection({ url, tabId, kind, headers, pageUrl, source }) {
     pageUrl: resolvedPageUrl,
     adapterId: adapter.id,
     capturedAt: Date.now(),
+    // frameId is what we'll route PROXY_FETCH requests to in v0.6+ — the
+    // frame that originated the manifest fetch has the right Origin/Referer
+    // for the CDN's signed-URL check.
+    frameId: typeof frameId === 'number' ? frameId : 0,
     ...(headers ? { headers } : {}),
   };
 
@@ -309,6 +356,177 @@ async function ensureParsed(tabId, entry) {
     inFlightParses.delete(key);
   }
   await broadcastTabState(tabId);
+}
+
+// ---------- Download orchestration ----------
+
+const OFFSCREEN_URL = chrome.runtime.getURL('offscreen/offscreen.html');
+let ensureOffscreenPromise = null;
+
+async function ensureOffscreen() {
+  // Memoize while creating; subsequent calls during creation share the
+  // promise. After creation completes, future calls find the document
+  // already open via getContexts and return cheaply.
+  if (ensureOffscreenPromise) return ensureOffscreenPromise;
+  ensureOffscreenPromise = (async () => {
+    try {
+      const contexts = await chrome.runtime.getContexts({
+        contextTypes: ['OFFSCREEN_DOCUMENT'],
+      });
+      if (contexts.some((c) => c.documentUrl === OFFSCREEN_URL)) return;
+      await chrome.offscreen.createDocument({
+        url: OFFSCREEN_URL,
+        reasons: ['BLOBS', 'WORKERS'],
+        justification: 'Decrypt + concatenate HLS segments and host the Blob URL for download.',
+      });
+    } finally {
+      // Allow re-checking on a later download in case the document was
+      // closed between calls.
+      ensureOffscreenPromise = null;
+    }
+  })();
+  return ensureOffscreenPromise;
+}
+
+async function handleStartDownload(payload) {
+  const { mediaId, variantUrl } = payload;
+  const tabState = await Promise.resolve(); // no-op; documents the await chain below
+  void tabState;
+  // Find the MediaEntry across all tabs.
+  let entry = null;
+  let entryTabId = null;
+  const states = popupPortsTabs();
+  for (const tabId of states) {
+    const s = await getTabState(tabId);
+    const found = s.entries.find((e) => e.id === mediaId);
+    if (found) {
+      entry = found;
+      entryTabId = tabId;
+      break;
+    }
+  }
+  if (!entry) {
+    // Fallback: scan every tab we know about. (popupPortsTabs only covers
+    // tabs with an open popup — narrower than tabState.)
+    const allTabIds = await listTrackedTabs();
+    for (const tabId of allTabIds) {
+      const s = await getTabState(tabId);
+      const found = s.entries.find((e) => e.id === mediaId);
+      if (found) {
+        entry = found;
+        entryTabId = tabId;
+        break;
+      }
+    }
+  }
+  if (!entry) throw new Error(`unknown mediaId: ${mediaId}`);
+
+  if (entry.kind !== 'hls') {
+    throw new Error(`v0.6 supports HLS only; this entry is ${entry.kind}`);
+  }
+
+  const adapter = getAdapter(entry.adapterId);
+  const meta = entry.meta ?? {};
+  const baseName = adapter.deriveFilename({
+    pageMeta: meta,
+    url: entry.url,
+    mediaEntry: entry,
+  });
+  const filename = sanitizeFilename(baseName, { fallback: 'video' });
+
+  const requestId = crypto.randomUUID();
+  const finalVariantUrl = variantUrl && /^https?:/.test(variantUrl) ? variantUrl : entry.url;
+
+  await ensureOffscreen();
+  // SW → offscreen uses RUN_DOWNLOAD so it doesn't collide with the
+  // popup→SW START_DOWNLOAD message on the broadcast bus.
+  void chrome.runtime
+    .sendMessage({
+      type: MSG.RUN_DOWNLOAD,
+      payload: {
+        requestId,
+        variantUrl: finalVariantUrl,
+        tabId: entryTabId,
+        frameId: entry.frameId ?? 0,
+        headers: entry.headers,
+        filename,
+      },
+    })
+    .catch((err) => log.warn('forward RUN_DOWNLOAD to offscreen failed', err));
+
+  log.info('download started', {
+    requestId,
+    mediaId,
+    tabId: entryTabId,
+    frameId: entry.frameId ?? 0,
+    adapter: entry.adapterId,
+    filename: `${filename}.ts`,
+  });
+  return { requestId, filename: `${filename}.ts` };
+}
+
+async function handleProxyFetch({ tabId, frameId, url, headers, responseType }) {
+  // Forward to the content script in the target frame. Its fetch goes out
+  // with the page's Origin/Referer + cookies, which signed-URL CDNs check.
+  try {
+    const reply = await chrome.tabs.sendMessage(
+      tabId,
+      { type: MSG.PROXY_FETCH, payload: { url, headers, responseType } },
+      { frameId: typeof frameId === 'number' ? frameId : 0 },
+    );
+    return reply;
+  } catch (err) {
+    // Frame may have closed / navigated away. Surface as an explicit error.
+    return { ok: false, error: `proxy unreachable: ${err?.message ?? err}` };
+  }
+}
+
+async function handleDownloadDone(payload) {
+  if (!payload || typeof payload.blobUrl !== 'string') return;
+  const downloadId = await chrome.downloads.download({
+    url: payload.blobUrl,
+    filename: payload.filename,
+    saveAs: false,
+  });
+  log.info('chrome.downloads accepted', {
+    downloadId,
+    filename: payload.filename,
+    bytes: payload.bytes,
+    segments: payload.segments,
+  });
+  // Revoke the offscreen Blob URL once the download lands or is interrupted.
+  const listener = (delta) => {
+    if (delta.id !== downloadId) return;
+    if (delta.state?.current === 'complete' || delta.state?.current === 'interrupted') {
+      chrome.downloads.onChanged.removeListener(listener);
+      // Asking the offscreen to revoke the URL would be ideal; we keep the
+      // doc alive (single shared instance) so it naturally goes away when
+      // the extension reloads.
+    }
+  };
+  chrome.downloads.onChanged.addListener(listener);
+}
+
+// Helper: enumerate tabIds currently subscribed via popup ports. Cheap
+// fast-path for handleStartDownload (the popup is the only context that
+// can call START_DOWNLOAD, so the active tab is almost always covered).
+function popupPortsTabs() {
+  const out = new Set();
+  for (const info of popupPorts.values()) {
+    if (typeof info.tabId === 'number') out.add(info.tabId);
+  }
+  return out;
+}
+
+async function listTrackedTabs() {
+  // chrome.storage.session has the mediaState dump; mining keys is cheaper
+  // than maintaining a parallel index for v0.6.
+  try {
+    const got = await chrome.storage.session.get('mediaState');
+    return got.mediaState ? Object.keys(got.mediaState).map(Number) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function entryIsResolved(tabId, mediaId) {

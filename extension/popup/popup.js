@@ -1,6 +1,7 @@
 import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { redactUrl } from '../lib/log.js';
+import { MSG } from '../lib/messages.js';
 
 const $content = document.getElementById('content');
 const $footer = document.getElementById('footer');
@@ -180,15 +181,35 @@ $content.addEventListener('click', (e) => {
   if (!id) return;
   const entry = entriesById.get(id);
   if (!entry) return;
-  // v0.6 will dispatch START_DOWNLOAD. For now, log so devs can confirm
-  // wiring + see the redacted URL.
+  // Resolve the chosen variant URL from the row's <select>. A real URL
+  // (one of entry.variants[].url) takes precedence; otherwise fall back to
+  // the entry's own URL (single-bitrate / unparsed cases).
+  const sel = row.querySelector('.quality');
+  const chosen = sel?.value;
+  const variantUrl = typeof chosen === 'string' && /^https?:/.test(chosen) ? chosen : entry.url;
+
   // eslint-disable-next-line no-console
   console.log('[VDL] download clicked', {
     mediaId: entry.id,
     adapterId: entry.adapterId,
     kind: entry.kind,
-    url: redactUrl(entry.url),
+    variantUrl: redactUrl(variantUrl),
   });
+
+  chrome.runtime
+    .sendMessage({
+      type: MSG.START_DOWNLOAD,
+      payload: { mediaId: entry.id, variantUrl },
+    })
+    .then((resp) => {
+      // eslint-disable-next-line no-console
+      console.log('[VDL] start ack', resp);
+      // v0.8 will render a progress bar based on DOWNLOAD_PROGRESS pushes.
+    })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn('[VDL] start failed', err);
+    });
 });
 
 // ---------- live subscription via SW port ----------
