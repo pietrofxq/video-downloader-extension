@@ -8,14 +8,23 @@
   <body>
     <header class="header">
       <h1>Video Downloader</h1>
-      <button type="button" class="gear" id="open-options" title="Settings" aria-label="Settings">
+      <button
+        type="button"
+        class="gear"
+        id="open-options"
+        title="Settings"
+        aria-label="Settings"
+      >
         &#9881;
       </button>
     </header>
-    <main id="content" class="empty">
-      <p class="empty-title">No videos detected on this tab.</p>
-      <p class="empty-hint">Press play on a video for ~2&nbsp;seconds, then reopen this popup.</p>
-    </main>
+    <main id="content"></main>
+    <footer class="footer hidden" id="footer">
+      <label>
+        <input type="checkbox" id="include-subtitles" />
+        Include subtitles
+      </label>
+    </footer>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

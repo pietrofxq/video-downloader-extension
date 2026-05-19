@@ -1,5 +1,5 @@
 import { log } from '../lib/log.js';
-import { MSG, envelope } from '../lib/messages.js';
+import { MSG } from '../lib/messages.js';
 import { pickAdapter } from '../adapters/index.js';
 import { classifyUrl, isPrimary, WEBREQUEST_PATTERNS } from '../lib/media-detection.js';
 import {
@@ -268,12 +268,45 @@ async function handlePageMeta(tabId, adapterId, meta) {
   if (changed) await broadcastTabState(tabId);
 }
 
+// ---------- Popup port subscriptions ----------
+//
+// Popups (and any future long-lived listener) open a port named 'popup',
+// SUBSCRIBE to a specific tabId, and receive STATE messages on every
+// change for that tab. Replaces the v0.2 chrome.runtime.sendMessage
+// broadcast — only interested ports get the update.
+
+const popupPorts = new Map(); // port -> { tabId | null }
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'popup') return;
+  popupPorts.set(port, { tabId: null });
+  port.onMessage.addListener(async (msg) => {
+    if (msg?.type !== 'SUBSCRIBE') return;
+    const tabId = typeof msg.tabId === 'number' ? msg.tabId : null;
+    popupPorts.set(port, { tabId });
+    if (tabId == null) return;
+    try {
+      const state = await getTabState(tabId);
+      port.postMessage({ type: 'STATE', state });
+    } catch (err) {
+      log.warn('initial popup SUBSCRIBE state failed', err);
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    popupPorts.delete(port);
+  });
+});
+
 async function broadcastTabState(tabId) {
+  if (popupPorts.size === 0) return;
   const state = await getTabState(tabId);
-  // Fire-and-forget: popup may be closed and the message will reject; that's
-  // fine. We catch to avoid an unhandled rejection.
-  chrome.runtime
-    .sendMessage(envelope(MSG.TAB_STATE_UPDATED, { tabId, state }))
-    .catch(() => {});
+  for (const [port, info] of popupPorts) {
+    if (info.tabId !== tabId) continue;
+    try {
+      port.postMessage({ type: 'STATE', state });
+    } catch {
+      // Port disconnected mid-send; onDisconnect will clean up the entry.
+    }
+  }
 }
 

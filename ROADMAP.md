@@ -128,15 +128,15 @@ Empty state:
 └─────────────────────────────────────────────────┘
 ```
 
-- [ ] Build `popup.html` + `popup.css` matching the layout above (rows, 360–400px wide).
-- [ ] On popup open, send `GET_TAB_STATE` to the SW and render the response.
-- [ ] One row per `MediaEntry`: show title (from adapter meta), source host/section, filename, format badges (HLS / DASH / progressive, AES-128, ClearKey, DRM if flagged), and the **adapter id as a small pill** in the top-right of the row.
-- [ ] Quality dropdown is a placeholder until v0.5 parses the manifest — show a single "auto" option.
-- [ ] "Download" button is wired to a no-op handler that logs the row's `mediaId` + `adapterId`.
-- [ ] If `mediaEntry.drm === true`, disable the Download button and replace it with a "DRM-protected" label.
-- [ ] Settings gear icon opens `options.html` (placeholder page).
-- [ ] When the popup is open, subscribe to SW push updates (`TAB_STATE_UPDATED`) so newly detected videos appear without a manual reopen.
-- [ ] Verify: open Hotmart lesson + a public HLS demo in two tabs; each popup shows the correct rows tagged with the matching adapter.
+- [x] Build `popup.html` + `popup.css` matching the layout above (rows, 360–400px wide).
+- [x] On popup open, send `GET_TAB_STATE` to the SW and render the response. (Implemented as `chrome.runtime.connect({name:'popup'})` + `SUBSCRIBE` — SW replies with the initial state, then pushes on every change. Replaces the v0.2 sendMessage broadcast that fanned out to every listener.)
+- [x] One row per `MediaEntry`: show title (from adapter meta), source host/section, filename, format badges (HLS / DASH / progressive, AES-128, ClearKey, DRM if flagged), and the **adapter id as a small pill** in the top-right of the row.
+- [x] Quality dropdown is a placeholder until v0.5 parses the manifest — show a single "auto" option.
+- [x] "Download" button is wired to a no-op handler that logs the row's `mediaId` + `adapterId`.
+- [x] If `mediaEntry.drm === true`, disable the Download button and replace it with a "DRM-protected" label.
+- [x] Settings gear icon opens `options.html` (placeholder page).
+- [x] When the popup is open, subscribe to SW push updates (`TAB_STATE_UPDATED`) so newly detected videos appear without a manual reopen.
+- [x] Verify: open Hotmart lesson + a public HLS demo in two tabs; each popup shows the correct rows tagged with the matching adapter.
 
 **Ship criterion:** popup shows real metadata for every detected video on the current tab, on any supported site.
 
