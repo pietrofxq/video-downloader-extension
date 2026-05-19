@@ -1,7 +1,15 @@
 const ILLEGAL = /[/\\:*?"<>|\x00-\x1f]/g;
 const DEFAULT_MAX = 200;
 
-export function sanitizeFilename(input, { maxLength = DEFAULT_MAX, fallback = 'video' } = {}) {
+interface SanitizeOpts {
+  maxLength?: number;
+  fallback?: string;
+}
+
+export function sanitizeFilename(
+  input: unknown,
+  { maxLength = DEFAULT_MAX, fallback = 'video' }: SanitizeOpts = {},
+): string {
   if (input == null) return fallback;
   let s = String(input)
     .replace(ILLEGAL, '')

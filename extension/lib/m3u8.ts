@@ -1,6 +1,7 @@
 import { Parser } from 'm3u8-parser';
+import type { HlsAlternate, HlsVariant, ParsedHlsManifest } from './types.ts';
 
-function resolveUri(uri, baseUrl) {
+function resolveUri(uri: string | undefined, baseUrl: string): string {
   try {
     return new URL(uri ?? '', baseUrl).toString();
   } catch {
@@ -8,14 +9,20 @@ function resolveUri(uri, baseUrl) {
   }
 }
 
-/**
- * Pull non-variant rendition URIs out of mediaGroups (#EXT-X-MEDIA).
- * Hotmart and most HLS sources list subtitle / alternate-audio playlists
- * here; the player fetches them, webRequest sees them, and without this
- * extraction they'd show as separate top-level entries in the popup.
- */
-function collectAlternates(mediaGroups, baseUrl) {
-  const out = [];
+// Pull non-variant rendition URIs out of mediaGroups (#EXT-X-MEDIA).
+// Hotmart and most HLS sources list subtitle / alternate-audio playlists
+// here; the player fetches them, webRequest sees them, and without this
+// extraction they'd show as separate top-level entries in the popup.
+function collectAlternates(
+  mediaGroups:
+    | Record<
+        string,
+        Record<string, Record<string, { uri?: string; language?: string; default?: boolean }>>
+      >
+    | undefined,
+  baseUrl: string,
+): HlsAlternate[] {
+  const out: HlsAlternate[] = [];
   if (!mediaGroups || typeof mediaGroups !== 'object') return out;
   for (const groupType of Object.keys(mediaGroups)) {
     const group = mediaGroups[groupType];
@@ -39,19 +46,7 @@ function collectAlternates(mediaGroups, baseUrl) {
   return out;
 }
 
-/**
- * Parse an HLS m3u8 manifest body.
- *
- * @param {string} text     - raw manifest body
- * @param {string} baseUrl  - URL the manifest was fetched from
- * @returns {{
- *   isMaster: boolean,
- *   variants: { url: string, bandwidth: number, resolution: string|null, codecs: string|null }[],
- *   alternates: { url: string, type: string, name: string, language: string|null, default: boolean }[],
- *   segmentCount: number,
- * }}
- */
-export function parseManifest(text, baseUrl) {
+export function parseManifest(text: string, baseUrl: string): ParsedHlsManifest {
   // Reject anything that isn't an HLS manifest up front. m3u8-parser silently
   // returns empty success on DASH/HTML/garbage input, which would mislabel
   // the entry as a media playlist with 0 segments.
@@ -66,7 +61,7 @@ export function parseManifest(text, baseUrl) {
   const segments = Array.isArray(m.segments) ? m.segments : [];
 
   if (playlists.length > 0) {
-    const variants = playlists
+    const variants: HlsVariant[] = playlists
       .map((pl) => {
         const attrs = pl.attributes ?? {};
         const res = attrs.RESOLUTION;

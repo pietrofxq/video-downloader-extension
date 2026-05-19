@@ -3,35 +3,45 @@
 // session. Not exposed directly — SW reads/writes via these helpers and
 // notifies the popup via TAB_STATE_UPDATED messages.
 
-const tabState = new Map(); // tabId -> { entries: MediaEntry[], pageUrl: string, adapterMeta: Record<adapterId, PageMeta> }
-const tabUrls = new Map(); // tabId -> last known url (used to detect navigation)
+import type { MediaEntry, PageMeta } from './types.ts';
 
-let initPromise = null;
+interface TabState {
+  entries: MediaEntry[];
+  pageUrl: string;
+  adapterMeta: Record<string, PageMeta>;
+}
 
-function nextId() {
+const tabState = new Map<number, TabState>();
+const tabUrls = new Map<number, string>();
+
+let initPromise: Promise<void> | null = null;
+
+function nextId(): string {
   // SW context exposes crypto.randomUUID — globally unique, survives SW
   // respawns without needing the seq counter we used before.
   return crypto.randomUUID();
 }
 
-function emptyState(tabId) {
+function emptyState(tabId: number): TabState {
   return { entries: [], pageUrl: tabUrls.get(tabId) ?? '', adapterMeta: {} };
 }
 
-async function init() {
+async function init(): Promise<void> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     try {
       const got = await chrome.storage.session.get(['mediaState', 'tabUrls']);
       if (got.mediaState) {
-        for (const [k, v] of Object.entries(got.mediaState)) {
+        for (const [k, v] of Object.entries(got.mediaState as Record<string, TabState>)) {
           // Backfill adapterMeta on older stored states (pre-v0.3).
           if (!v.adapterMeta) v.adapterMeta = {};
           tabState.set(Number(k), v);
         }
       }
       if (got.tabUrls) {
-        for (const [k, v] of Object.entries(got.tabUrls)) tabUrls.set(Number(k), v);
+        for (const [k, v] of Object.entries(got.tabUrls as Record<string, string>)) {
+          tabUrls.set(Number(k), v);
+        }
       }
     } catch {
       // session storage unavailable — accept empty state
@@ -40,11 +50,11 @@ async function init() {
   return initPromise;
 }
 
-async function persist() {
+async function persist(): Promise<void> {
   try {
-    const mediaState = {};
+    const mediaState: Record<number, TabState> = {};
     for (const [k, v] of tabState.entries()) mediaState[k] = v;
-    const tabUrlsObj = {};
+    const tabUrlsObj: Record<number, string> = {};
     for (const [k, v] of tabUrls.entries()) tabUrlsObj[k] = v;
     await chrome.storage.session.set({ mediaState, tabUrls: tabUrlsObj });
   } catch {
@@ -52,21 +62,24 @@ async function persist() {
   }
 }
 
-export async function ready() {
+export async function ready(): Promise<void> {
   await init();
 }
 
-export async function getTabState(tabId) {
+export async function getTabState(tabId: number): Promise<TabState> {
   await init();
   return tabState.get(tabId) ?? emptyState(tabId);
 }
 
-export async function getTabEntries(tabId) {
+export async function getTabEntries(tabId: number): Promise<MediaEntry[]> {
   const s = await getTabState(tabId);
   return s.entries;
 }
 
-export async function addEntry(tabId, entry) {
+export async function addEntry(
+  tabId: number,
+  entry: Omit<MediaEntry, 'id'>,
+): Promise<MediaEntry | null> {
   await init();
   let s = tabState.get(tabId);
   if (!s) {
@@ -77,22 +90,32 @@ export async function addEntry(tabId, entry) {
   // Inherit any meta the adapter has already published for this tab — so an
   // entry that lands after PAGE_META immediately has its lesson title etc.
   const inherited = s.adapterMeta?.[entry.adapterId];
-  const stored = { id: nextId(), ...entry, ...(inherited ? { meta: inherited } : {}) };
+  const stored: MediaEntry = {
+    id: nextId(),
+    ...entry,
+    ...(inherited ? { meta: inherited } : {}),
+  };
   s.entries.push(stored);
   await persist();
   return stored;
 }
 
-function shallowEqualMeta(a, b) {
+function shallowEqualMeta(a: PageMeta | undefined, b: PageMeta | undefined): boolean {
   if (!a || !b) return false;
   const ka = Object.keys(a);
   const kb = Object.keys(b);
   if (ka.length !== kb.length) return false;
-  for (const k of ka) if (a[k] !== b[k]) return false;
+  for (const k of ka) {
+    if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;
+  }
   return true;
 }
 
-export async function patchEntry(tabId, mediaId, patch) {
+export async function patchEntry(
+  tabId: number,
+  mediaId: string,
+  patch: Partial<MediaEntry>,
+): Promise<MediaEntry | null> {
   await init();
   const s = tabState.get(tabId);
   if (!s) return null;
@@ -103,7 +126,11 @@ export async function patchEntry(tabId, mediaId, patch) {
   return entry;
 }
 
-export async function setAdapterMeta(tabId, adapterId, meta) {
+export async function setAdapterMeta(
+  tabId: number,
+  adapterId: string,
+  meta: PageMeta,
+): Promise<{ changed: boolean }> {
   await init();
   let s = tabState.get(tabId);
   if (!s) {
@@ -130,12 +157,15 @@ export async function setAdapterMeta(tabId, adapterId, meta) {
   return { changed: true };
 }
 
-export async function getAdapterMeta(tabId, adapterId) {
+export async function getAdapterMeta(tabId: number, adapterId: string): Promise<PageMeta | null> {
   await init();
   return tabState.get(tabId)?.adapterMeta?.[adapterId] ?? null;
 }
 
-export async function setTabUrl(tabId, url) {
+export async function setTabUrl(
+  tabId: number,
+  url: string,
+): Promise<{ prev: string | undefined; current: string }> {
   await init();
   const prev = tabUrls.get(tabId);
   tabUrls.set(tabId, url);
@@ -146,7 +176,7 @@ export async function setTabUrl(tabId, url) {
   return { prev, current: url };
 }
 
-export async function clearTab(tabId) {
+export async function clearTab(tabId: number): Promise<boolean> {
   await init();
   const s = tabState.get(tabId);
   const had = s != null && s.entries.length > 0;
@@ -165,14 +195,14 @@ export async function clearTab(tabId) {
   return had;
 }
 
-export async function removeTab(tabId) {
+export async function removeTab(tabId: number): Promise<void> {
   await init();
   tabState.delete(tabId);
   tabUrls.delete(tabId);
   await persist();
 }
 
-export async function getTabUrl(tabId) {
+export async function getTabUrl(tabId: number): Promise<string> {
   await init();
   return tabUrls.get(tabId) ?? '';
 }

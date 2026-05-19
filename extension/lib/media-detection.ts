@@ -4,9 +4,15 @@ export const KINDS = Object.freeze({
   PROGRESSIVE: 'progressive',
   SEGMENT: 'segment',
   KEY: 'key',
-});
+} as const);
 
-export const PRIMARY_KINDS = new Set([KINDS.HLS, KINDS.DASH, KINDS.PROGRESSIVE]);
+export type DetectionKind = (typeof KINDS)[keyof typeof KINDS];
+
+export const PRIMARY_KINDS: Set<DetectionKind> = new Set([
+  KINDS.HLS,
+  KINDS.DASH,
+  KINDS.PROGRESSIVE,
+]);
 
 // webRequest match patterns. Broad-and-filter: the listener calls
 // classifyUrl() to reject false positives like `metakeys.json` or paths
@@ -21,7 +27,7 @@ export const WEBREQUEST_PATTERNS = Object.freeze([
   '*://*/*.key*',
 ]);
 
-const EXT_KIND = new Map([
+const EXT_KIND = new Map<string, DetectionKind>([
   ['.m3u8', KINDS.HLS],
   ['.mpd', KINDS.DASH],
   ['.mp4', KINDS.PROGRESSIVE],
@@ -31,14 +37,14 @@ const EXT_KIND = new Map([
   ['.key', KINDS.KEY],
 ]);
 
-const CT_KIND = [
+const CT_KIND: Array<[RegExp, DetectionKind]> = [
   [/mpegurl/i, KINDS.HLS],
   [/dash\+xml|application\/dash/i, KINDS.DASH],
   [/^video\/mp4/i, KINDS.PROGRESSIVE],
   [/^video\/webm/i, KINDS.PROGRESSIVE],
 ];
 
-function getPathExtension(pathname) {
+function getPathExtension(pathname: string): string {
   // Drop trailing slash, take last segment, lowercase the dot-suffix.
   const last = pathname.replace(/\/+$/, '').split('/').pop() ?? '';
   const dot = last.lastIndexOf('.');
@@ -46,7 +52,7 @@ function getPathExtension(pathname) {
   return last.slice(dot).toLowerCase();
 }
 
-export function classifyUrl(url, contentType) {
+export function classifyUrl(url: string, contentType?: string): DetectionKind | null {
   try {
     const u = new URL(url);
     const ext = getPathExtension(u.pathname);
@@ -63,6 +69,6 @@ export function classifyUrl(url, contentType) {
   return null;
 }
 
-export function isPrimary(kind) {
-  return PRIMARY_KINDS.has(kind);
+export function isPrimary(kind: DetectionKind | null): boolean {
+  return kind !== null && PRIMARY_KINDS.has(kind);
 }

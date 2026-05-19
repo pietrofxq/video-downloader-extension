@@ -1,5 +1,8 @@
+// Sets `err.name` from the constructor so catch sites that map errors
+// by name (popup error label, log filter) don't need a hand-maintained
+// string per subclass.
 class NamedError extends Error {
-  constructor(message, options) {
+  constructor(message?: string, options?: ErrorOptions) {
     super(message, options);
     this.name = this.constructor.name;
   }

@@ -7,9 +7,11 @@
 // Shared by the popup (rendering) and the SW (badge counting) so the two
 // always agree on what counts as a user-visible "row".
 
-export function filterTopLevel(entries) {
+import type { MediaEntry } from './types.ts';
+
+export function filterTopLevel(entries: MediaEntry[]): MediaEntry[] {
   if (!Array.isArray(entries) || entries.length === 0) return [];
-  const hidden = new Set();
+  const hidden = new Set<string>();
   for (const e of entries) {
     if (Array.isArray(e.variants)) for (const v of e.variants) hidden.add(v.url);
     if (Array.isArray(e.alternates)) for (const a of e.alternates) hidden.add(a.url);
