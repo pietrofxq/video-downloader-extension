@@ -381,10 +381,38 @@ function render(state: TabStateMsg | null | undefined): void {
 
 function applyDownloadState(state: DownloadState): void {
   if (!state || typeof state.mediaId !== 'string') return;
+  const prev = downloadsByMediaId.get(state.mediaId);
   downloadsByMediaId.set(state.mediaId, state);
-  // Re-render the current tab state — renderRow consults downloadsByMediaId
-  // when picking the action UI. We don't get a fresh STATE for every progress
-  // message, so re-using the cached one is the load-bearing bit here.
+
+  // Fast path for progress-only updates. Each segment fetch fires a
+  // DOWNLOAD_PROGRESS, and a full innerHTML re-render on every tick
+  // tears down + rebuilds the row's DOM — that's what was making the
+  // hover state blink and discarding any in-flight focus on the
+  // filename input. Patch the progress bar + label in place when the
+  // row's UI shape (status) hasn't changed.
+  const isLiveProgress = (s: DownloadState | undefined): boolean =>
+    !!s && (s.status === 'pending' || s.status === 'progress');
+  if (isLiveProgress(prev) && isLiveProgress(state)) {
+    const row = $content.querySelector<HTMLElement>(
+      `.row[data-media-id="${CSS.escape(state.mediaId)}"]`,
+    );
+    const fill = row?.querySelector<HTMLElement>('.progress-fill');
+    const label = row?.querySelector<HTMLElement>('.progress-label');
+    if (fill && label) {
+      const total = state.total > 0 ? state.total : 0;
+      const current = state.current > 0 ? state.current : 0;
+      const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+      const counter = total > 0 ? `segment ${current}/${total}` : '';
+      const lbl = [stageLabel(state.stage), counter].filter(Boolean).join(' · ');
+      fill.style.width = `${pct}%`;
+      label.textContent = `${pct}% · ${lbl}`;
+      row?.setAttribute('aria-valuenow', String(pct));
+      return;
+    }
+  }
+
+  // Status transition (pending → saved / error, or first state for this
+  // row): the row's structure changes, so a full re-render is needed.
   render(lastTabState);
 }
 
