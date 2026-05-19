@@ -7,6 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(__dirname, 'extension');
 const OUT = path.join(__dirname, 'dist');
 const WATCH = process.argv.includes('--watch');
+const MINIFY = process.env.NODE_ENV === 'production';
 
 const ENTRIES = {
   // Content scripts MUST be IIFE — they're not loaded as modules.
@@ -66,7 +67,8 @@ async function buildOnce() {
       format,
       target: ['chrome120'],
       platform: 'browser',
-      sourcemap: 'inline',
+      sourcemap: MINIFY ? false : 'inline',
+      minify: MINIFY,
       logLevel: 'info',
     }),
   );
@@ -99,7 +101,8 @@ async function watch() {
         format,
         target: ['chrome120'],
         platform: 'browser',
-        sourcemap: 'inline',
+        sourcemap: MINIFY ? false : 'inline',
+        minify: MINIFY,
         logLevel: 'info',
       }),
     ),

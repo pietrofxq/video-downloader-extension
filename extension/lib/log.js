@@ -58,18 +58,39 @@ if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
   refreshLevel();
 }
 
-function emit(level, ...args) {
-  if (LEVELS[level] < cachedLevel) return;
-  const redacted = args.map((a) => (typeof a === 'string' ? redactString(a) : a));
-  console[level === 'debug' ? 'log' : level](...redacted);
-}
+const MAX_REDACT_DEPTH = 3;
 
 function redactString(s) {
+  if (typeof s !== 'string') return s;
   if (s.includes('://')) {
     // Best-effort: redact any URL-like substrings
     return s.replace(/https?:\/\/\S+/g, (m) => redactUrl(m));
   }
   return s;
+}
+
+function redactValue(value, depth = 0) {
+  if (value == null) return value;
+  if (typeof value === 'string') return redactString(value);
+  if (typeof value !== 'object') return value;
+  if (depth >= MAX_REDACT_DEPTH) return value;
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, depth + 1));
+  // Only walk plain objects — avoid traversing class instances (Error, Map, DOM nodes, etc.).
+  if (Object.getPrototypeOf(value) === Object.prototype) {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = redactValue(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+function emit(level, ...args) {
+  if (LEVELS[level] < cachedLevel) return;
+  const redacted = args.map((a) => redactValue(a));
+  // eslint-disable-next-line no-console
+  console[level === 'debug' ? 'log' : level](...redacted);
 }
 
 export const log = {

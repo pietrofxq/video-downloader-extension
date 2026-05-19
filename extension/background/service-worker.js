@@ -8,6 +8,9 @@ chrome.runtime.onInstalled.addListener((details) => {
   log.info('SW installed:', details.reason);
 });
 
+// MV3 message handler contract: return `true` from this listener if you call
+// sendResponse asynchronously, otherwise the channel closes and the sender's
+// promise rejects. Synchronous handlers can return `false` (or nothing).
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return false;
   switch (msg.type) {

@@ -50,7 +50,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["vendor/*", "offscreen/*"],
+      "resources": ["vendor/*"],
       "matches": ["<all_urls>"]
     }
   ]

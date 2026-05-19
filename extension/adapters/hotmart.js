@@ -1,3 +1,5 @@
+import { sanitizeFilename } from '../lib/sanitize-filename.js';
+
 function safeHost(url) {
   try {
     return new URL(url).hostname;
@@ -18,7 +20,8 @@ export default {
   id: 'hotmart',
   matches(pageUrl /* , mediaUrl */) {
     const host = safeHost(pageUrl);
-    if (!host || !host.endsWith('hotmart.com')) return false;
+    if (!host) return false;
+    if (host !== 'hotmart.com' && !host.endsWith('.hotmart.com')) return false;
     return pathOf(pageUrl).includes('/club/');
   },
   scrapePageMeta(document) {
@@ -37,9 +40,11 @@ export default {
   deriveFilename({ pageMeta }) {
     const section = pageMeta?.sectionTitle;
     const lesson = pageMeta?.lessonTitle;
-    if (section && lesson) return `${section} - ${lesson}`;
-    if (lesson) return lesson;
-    return pageMeta?.title || 'hotmart-lesson';
+    let raw;
+    if (section && lesson) raw = `${section} - ${lesson}`;
+    else if (lesson) raw = lesson;
+    else raw = pageMeta?.title;
+    return sanitizeFilename(raw, { fallback: 'hotmart-lesson' });
   },
   transformHeaders(headers) {
     return headers;

@@ -6,16 +6,20 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
+    "build:prod": "NODE_ENV=production node build.mjs",
     "build:watch": "node build.mjs --watch",
     "clean": "rm -rf dist",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
+    "@vitest/web-worker": "^2.1.8",
     "esbuild": "^0.24.0",
     "eslint": "^9.16.0",
     "globals": "^15.13.0",
-    "prettier": "^3.4.2"
+    "prettier": "^3.4.2",
+    "vitest": "^2.1.8"
   }
 }

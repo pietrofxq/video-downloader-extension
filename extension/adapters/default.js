@@ -1,3 +1,5 @@
+import { sanitizeFilename } from '../lib/sanitize-filename.js';
+
 function basenameFromUrl(url) {
   try {
     const u = new URL(url);
@@ -20,6 +22,8 @@ export default {
       title: document.title || '',
       ogTitle: og('og:title'),
       ogVideoTitle: og('og:video:title'),
+      ogDescription: og('og:description'),
+      ogSiteName: og('og:site_name'),
     };
   },
   observe() {
@@ -28,7 +32,8 @@ export default {
   deriveFilename({ pageMeta, url }) {
     const title = pageMeta?.title || pageMeta?.ogTitle || '';
     const basename = basenameFromUrl(url);
-    return title ? `${title} - ${basename}` : basename;
+    const raw = title ? `${title} - ${basename}` : basename;
+    return sanitizeFilename(raw, { fallback: basename || 'video' });
   },
   transformHeaders(headers) {
     return headers;

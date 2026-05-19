@@ -17,7 +17,7 @@ export default [
     },
     rules: {
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
-      'no-console': 'off',
+      'no-console': 'warn',
       eqeqeq: ['error', 'smart'],
       'prefer-const': 'warn',
     },
@@ -28,6 +28,9 @@ export default [
       ecmaVersion: 2022,
       sourceType: 'module',
       globals: { ...globals.node },
+    },
+    rules: {
+      'no-console': 'off',
     },
   },
 ];
