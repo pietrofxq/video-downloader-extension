@@ -138,15 +138,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: false });
         return false;
       }
-      // Use the sender's pageUrl when present (more accurate for SPA frames
-      // than the cached top-frame URL).
-      const pageUrl = p.pageUrl || sender.tab?.url || '';
+      // sender.tab.url is always the top-level tab URL, even when the message
+      // came from a sub-frame. The bridge intentionally does NOT send pageUrl
+      // (which would be the iframe URL) — see frame-content.js.
       void handleDetection({
         url: p.url,
         tabId,
         kind,
         headers: p.headers,
-        pageUrl,
+        pageUrl: sender.tab?.url || '',
         source: `frame:${p.source ?? 'unknown'}`,
       });
       sendResponse({ ok: true });
@@ -194,7 +194,8 @@ async function handleDetection({ url, tabId, kind, headers, pageUrl, source }) {
     try {
       const tab = await chrome.tabs.get(tabId);
       resolvedPageUrl = tab.url ?? '';
-    } catch {
+    } catch (err) {
+      log.warn('chrome.tabs.get failed', { tabId, err: String(err?.message ?? err) });
       resolvedPageUrl = '';
     }
   }
@@ -213,13 +214,7 @@ async function handleDetection({ url, tabId, kind, headers, pageUrl, source }) {
   const stored = await addEntry(tabId, entry);
   if (!stored) return; // dedupe hit
 
-  log.info('media detected', {
-    tabId,
-    kind,
-    adapter: adapter.id,
-    source,
-    url,
-  });
+  log.info('media detected', { tabId, kind, adapter: adapter.id, source, url });
 
   await updateBadge(tabId);
   await broadcastTabState(tabId);

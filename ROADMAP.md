@@ -55,7 +55,7 @@ Goal: when the user presses play on any site, the service worker captures the ma
 - [x] Dedupe by URL within a tab; ignore non-http(s) frames.
 - [x] Update the toolbar badge text to the count of detected media for the active tab; clear it on tab close / navigation.
 - [x] Set badge background color to a distinct color (e.g. `#ff5d2e`) when count > 0.
-- [ ] Verify on Hotmart: play a lesson; badge shows ≥1; SW console shows the manifest URL (`hdntl` redacted) with `adapterId: 'hotmart'`.
+- [x] Verify on Hotmart: play a lesson; badge shows ≥1; SW console shows the manifest URL (`hdntl` redacted) with `adapterId: 'hotmart'`.
 - [ ] Verify elsewhere: open a public HLS test page (e.g. an Mux or HLS.js demo); badge shows ≥1; entry has `adapterId: 'default'` and `kind: 'hls'`.
 - [ ] Verify with DASH: open a DASH-IF reference stream; entry has `kind: 'dash'`.
 

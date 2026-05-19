@@ -21,6 +21,10 @@ if (/^https?:$/.test(location.protocol)) {
     if (seenInFrame.has(url)) return;
     seenInFrame.add(url);
     try {
+      // Deliberately omit pageUrl here. In a sub-frame, location.href is the
+      // iframe's URL (e.g. cf-embed.play.hotmart.com), NOT the tab's URL —
+      // sending it would mislead adapter selection and poison the cache. The
+      // SW reads the authoritative top-level URL from sender.tab.url.
       chrome.runtime
         .sendMessage({
           type: MSG.MEDIA_URL_DETECTED,
@@ -28,7 +32,6 @@ if (/^https?:$/.test(location.protocol)) {
             url,
             kind,
             headers: data.headers,
-            pageUrl: location.href,
             source: data.kind, // 'fetch' | 'xhr'
             frameTop: window.top === window,
           },
