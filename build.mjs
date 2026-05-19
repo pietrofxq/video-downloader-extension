@@ -13,6 +13,7 @@ const ENTRIES = {
   // Content scripts MUST be IIFE — they're not loaded as modules.
   'content/page-content.js': { entry: 'content/page-content.js', format: 'iife' },
   'content/frame-content.js': { entry: 'content/frame-content.js', format: 'iife' },
+  'content/main-world-hooks.js': { entry: 'content/main-world-hooks.js', format: 'iife' },
   // SW is loaded with type: "module" in manifest, so ESM is fine, but we
   // still bundle to a single file for simplicity.
   'background/service-worker.js': { entry: 'background/service-worker.js', format: 'esm' },

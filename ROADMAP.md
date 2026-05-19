@@ -44,17 +44,17 @@ Goal: an unpacked extension Chrome will accept, with all five contexts wired up 
 
 Goal: when the user presses play on any site, the service worker captures the manifest URL and tags it with the matching adapter.
 
-- [ ] In `service-worker.js`, register `chrome.webRequest.onBeforeRequest` matching `*://*/*.m3u8*`, `*://*/*.mpd*`, `*://*/*.mp4*`, `*://*/*.webm*`. Also observe `*.key*` and `*.m4s*` segment requests.
-- [ ] Use `chrome.webRequest.onHeadersReceived` to read `Content-Type` for ambiguous extensions; tag each detection with `kind: 'hls' | 'dash' | 'progressive'`.
-- [ ] Maintain an in-memory `Map<tabId, MediaEntry[]>` where `MediaEntry = { id, kind, url, pageUrl, adapterId, capturedAt, headers?, meta? }`.
-- [ ] Mirror that map to `chrome.storage.session` so it survives SW respawn.
-- [ ] In `frame-content.js`, monkey-patch `window.fetch` and `window.XMLHttpRequest` at `document_start`:
+- [x] In `service-worker.js`, register `chrome.webRequest.onBeforeRequest` matching `*://*/*.m3u8*`, `*://*/*.mpd*`, `*://*/*.mp4*`, `*://*/*.webm*`. Also observe `*.key*` and `*.m4s*` segment requests.
+- [x] Use `chrome.webRequest.onHeadersReceived` to read `Content-Type` for ambiguous extensions; tag each detection with `kind: 'hls' | 'dash' | 'progressive'`.
+- [x] Maintain an in-memory `Map<tabId, MediaEntry[]>` where `MediaEntry = { id, kind, url, pageUrl, adapterId, capturedAt, headers?, meta? }`.
+- [x] Mirror that map to `chrome.storage.session` so it survives SW respawn.
+- [x] In `frame-content.js`, monkey-patch `window.fetch` and `window.XMLHttpRequest` at `document_start`:
   - Forward URLs matching the same patterns via `MEDIA_URL_DETECTED`.
   - Capture custom headers from `XHR.setRequestHeader` and `fetch(init.headers)`; include them in the payload.
-- [ ] In the SW, for every detection call `pickAdapter(pageUrl, mediaUrl)` from `adapters/index.js` and attach the resulting `adapterId` (`'hotmart'` on Hotmart, `'default'` elsewhere).
-- [ ] Dedupe by URL within a tab; ignore non-http(s) frames.
-- [ ] Update the toolbar badge text to the count of detected media for the active tab; clear it on tab close / navigation.
-- [ ] Set badge background color to a distinct color (e.g. `#ff5d2e`) when count > 0.
+- [x] In the SW, for every detection call `pickAdapter(pageUrl, mediaUrl)` from `adapters/index.js` and attach the resulting `adapterId` (`'hotmart'` on Hotmart, `'default'` elsewhere).
+- [x] Dedupe by URL within a tab; ignore non-http(s) frames.
+- [x] Update the toolbar badge text to the count of detected media for the active tab; clear it on tab close / navigation.
+- [x] Set badge background color to a distinct color (e.g. `#ff5d2e`) when count > 0.
 - [ ] Verify on Hotmart: play a lesson; badge shows ≥1; SW console shows the manifest URL (`hdntl` redacted) with `adapterId: 'hotmart'`.
 - [ ] Verify elsewhere: open a public HLS test page (e.g. an Mux or HLS.js demo); badge shows ≥1; entry has `adapterId: 'default'` and `kind: 'hls'`.
 - [ ] Verify with DASH: open a DASH-IF reference stream; entry has `kind: 'dash'`.

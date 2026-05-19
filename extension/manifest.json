@@ -30,6 +30,14 @@
       "all_frames": true,
       "match_about_blank": false,
       "run_at": "document_start"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content/main-world-hooks.js"],
+      "all_frames": true,
+      "match_about_blank": false,
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "action": {

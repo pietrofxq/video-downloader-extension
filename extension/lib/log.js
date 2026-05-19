@@ -1,15 +1,22 @@
 const REDACTED_PARAMS = new Set([
   'hdntl',
+  'hdnts',
   'token',
   'signature',
+  'sig',
   'policy',
   'key-pair-id',
   'x-amz-signature',
   'x-amz-security-token',
   'auth',
+  'auth_token',
   'authorization',
+  'bearer',
   'jwt',
   'jwttoken',
+  'exp',
+  'expires',
+  'nonce',
 ]);
 
 const REDACTION_PLACEHOLDER = '__REDACTED__';
