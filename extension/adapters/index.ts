@@ -1,0 +1,13 @@
+import type { Adapter } from '../lib/types.ts';
+import defaultAdapter from './default.js';
+import hotmart from './hotmart.js';
+
+export const ADAPTERS: readonly Adapter[] = [hotmart, defaultAdapter];
+
+export function pickAdapter(pageUrl: string, mediaUrl: string): Adapter {
+  return ADAPTERS.find((a) => a.matches(pageUrl, mediaUrl)) ?? defaultAdapter;
+}
+
+export function getAdapter(id: string): Adapter {
+  return ADAPTERS.find((a) => a.id === id) ?? defaultAdapter;
+}

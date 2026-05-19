@@ -1,6 +1,7 @@
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
+import type { Adapter, PageMeta } from '../lib/types.ts';
 
-function basenameFromUrl(url) {
+function basenameFromUrl(url: string): string {
   try {
     const u = new URL(url);
     const last = u.pathname.split('/').filter(Boolean).pop() ?? '';
@@ -10,8 +11,8 @@ function basenameFromUrl(url) {
   }
 }
 
-function scrapeDefaultMeta(doc) {
-  const og = (prop) =>
+function scrapeDefaultMeta(doc: Document): PageMeta {
+  const og = (prop: string): string | null =>
     doc.querySelector(`meta[property="${prop}"]`)?.getAttribute('content') ?? null;
   return {
     title: doc.title || '',
@@ -22,7 +23,7 @@ function scrapeDefaultMeta(doc) {
   };
 }
 
-export default {
+const defaultAdapter: Adapter = {
   id: 'default',
   matches() {
     return true;
@@ -55,3 +56,5 @@ export default {
     return headers;
   },
 };
+
+export default defaultAdapter;
