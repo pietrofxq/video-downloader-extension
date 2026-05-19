@@ -97,12 +97,77 @@ function renderEmpty() {
   `;
 }
 
+// Friendly error messages for each typed error from lib/errors.js. The
+// SW forwards err.name (e.g. "TokenExpiredError") as `errorCode`; the
+// popup maps it here so future error types only need one tweak.
+const ERROR_MESSAGES = {
+  TokenExpiredError: 'Token expired. Reload the page and try again.',
+  ManifestParseError: "Couldn't read the video manifest.",
+  DecryptionError: 'Decryption failed. Try reloading the page.',
+  RemuxError: "Couldn't repackage the video.",
+  DRMProtectedError: "This stream is DRM-protected and can't be downloaded.",
+  UnsupportedFormatError: 'Unsupported stream format.',
+};
+
+function friendlyErrorMessage(state) {
+  return (
+    ERROR_MESSAGES[state.errorCode] ||
+    state.errorMessage ||
+    'Download failed. Check the console for details.'
+  );
+}
+
+function stageLabel(stage) {
+  switch (stage) {
+    case 'fetch':
+      return 'fetching';
+    case 'decrypt':
+      return 'decrypting';
+    case 'remux':
+      return 'remuxing';
+    default:
+      return 'preparing';
+  }
+}
+
+function renderActionForDownload(state) {
+  if (state.status === 'saved') {
+    return `
+      <div class="download-result saved">
+        <span class="saved-pill">Saved &#x2713;</span>
+        <button type="button" class="show-in-folder" data-download-id="${state.downloadId}">
+          Show in folder
+        </button>
+      </div>`;
+  }
+  if (state.status === 'error') {
+    return `
+      <div class="download-result error" title="${escapeHtml(state.errorMessage || '')}">
+        <span class="error-label">${escapeHtml(friendlyErrorMessage(state))}</span>
+      </div>`;
+  }
+  // pending / progress
+  const total = state.total > 0 ? state.total : 0;
+  const current = state.current > 0 ? state.current : 0;
+  const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+  const counter = total > 0 ? `segment ${current}/${total}` : '';
+  const label = [stageLabel(state.stage), counter].filter(Boolean).join(' · ');
+  return `
+    <div class="download-progress" role="progressbar"
+         aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+      <div class="progress-bar"><div class="progress-fill" style="width: ${pct}%"></div></div>
+      <div class="progress-label">${pct}% &#x00b7; ${escapeHtml(label)}</div>
+    </div>`;
+}
+
 function renderRow(entry) {
   const title = entryTitle(entry);
   const section = entrySection(entry);
   const filename = entryFilename(entry);
   const badges = entryBadges(entry);
   const isDrm = entry.drm === true;
+  const downloadState = downloadsByMediaId.get(entry.id) || null;
+
   // Master playlists need their variant list parsed before we can pick a
   // concrete media URL. Until then the select shows "Loading…" — clicking
   // would fall back to entry.url (the master) and the downloader rejects
@@ -115,12 +180,23 @@ function renderRow(entry) {
   if (isDrm) {
     action =
       '<span class="drm-label" title="Encrypted with a DRM system the extension cannot decrypt.">DRM-protected</span>';
+  } else if (downloadState) {
+    // A download for this entry is in flight, saved, or errored. Show its
+    // status in place of the Download button.
+    action = renderActionForDownload(downloadState);
   } else if (!isReady) {
     action =
       '<button type="button" class="download" disabled title="Waiting for the manifest to load.">Download &#x2193;</button>';
   } else {
     action = '<button type="button" class="download">Download &#x2193;</button>';
   }
+  // Once a download is under way, the quality picker is locked in and
+  // the select would just compete with the progress UI for row width. We
+  // hide it so the status block (progress bar / saved pill / error) gets
+  // the full action row to itself.
+  const qualitySelect = downloadState
+    ? ''
+    : `<select class="quality" aria-label="Quality">${qualityOptionsHtml(entry)}</select>`;
   return `
     <div class="row" data-media-id="${escapeHtml(entry.id)}">
       <div class="row-header">
@@ -130,9 +206,7 @@ function renderRow(entry) {
       <div class="row-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
       <div class="row-meta">${escapeHtml(filename)}${badges.length ? ' &middot; ' + badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(' &middot; ') : ''}</div>
       <div class="row-actions">
-        <select class="quality" aria-label="Quality">
-          ${qualityOptionsHtml(entry)}
-        </select>
+        ${qualitySelect}
         ${action}
       </div>
     </div>
@@ -141,6 +215,16 @@ function renderRow(entry) {
 
 // Map<id, MediaEntry> for O(1) lookup from the delegated click handler.
 let entriesById = new Map();
+
+// Map<mediaId, DownloadState>. Populated by DOWNLOAD_STATE messages from
+// the SW. `renderRow` consults this Map to swap the Download button for a
+// progress bar / saved pill / error label as the state machine advances.
+const downloadsByMediaId = new Map();
+
+// Last tab state we rendered. DOWNLOAD_STATE arrives independently from
+// STATE — when only a download update lands we still need to redraw the
+// same entry list, so we keep a reference and re-call render() with it.
+let lastTabState = { entries: [] };
 
 // Preserve user selections in <select> elements across re-renders so a
 // quality pick doesn't get wiped by every push update. Captures by
@@ -174,7 +258,8 @@ function restoreSelectState(state) {
 }
 
 function render(state) {
-  const rawEntries = state?.entries ?? [];
+  lastTabState = state ?? { entries: [] };
+  const rawEntries = lastTabState.entries ?? [];
   entriesById = new Map(rawEntries.map((e) => [e.id, e]));
   const visible = filterTopLevel(rawEntries);
   if (visible.length === 0) {
@@ -188,11 +273,32 @@ function render(state) {
   restoreSelectState(selectState);
 }
 
+function applyDownloadState(state) {
+  if (!state || typeof state.mediaId !== 'string') return;
+  downloadsByMediaId.set(state.mediaId, state);
+  // Re-render the current tab state — renderRow consults downloadsByMediaId
+  // when picking the action UI. We don't get a fresh STATE for every progress
+  // message, so re-using the cached one is the load-bearing bit here.
+  render(lastTabState);
+}
+
 // Single delegated click listener — no per-button wiring, no reliance on
 // "the latest render's array reference". Lookup via the Map for O(1).
 $content.addEventListener('click', (e) => {
+  // "Show in folder" on a saved download row.
+  const showBtn = e.target.closest('.show-in-folder');
+  if (showBtn) {
+    const downloadId = Number(showBtn.dataset.downloadId);
+    if (Number.isFinite(downloadId)) {
+      chrome.runtime
+        .sendMessage({ type: MSG.SHOW_IN_FOLDER, payload: { downloadId } })
+        .catch(() => {});
+    }
+    return;
+  }
+
   const btn = e.target.closest('.download');
-  if (!btn) return;
+  if (!btn || btn.disabled) return;
   const row = btn.closest('.row');
   const id = row?.dataset.mediaId;
   if (!id) return;
@@ -270,6 +376,8 @@ function connect(tabId) {
     if (msg?.type === 'STATE') {
       retryCount = 0; // first successful subscription resets the budget
       render(msg.state);
+    } else if (msg?.type === 'DOWNLOAD_STATE') {
+      applyDownloadState(msg.state);
     }
   });
   port.onDisconnect.addListener(() => {

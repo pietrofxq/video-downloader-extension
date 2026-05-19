@@ -67,12 +67,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!isHttpUrl(changeInfo.url)) return;
   const { prev } = await setTabUrl(tabId, changeInfo.url);
   if (prev && prev !== changeInfo.url) {
+    clearDownloadStatesForTab(tabId);
     const had = await clearTab(tabId);
     if (had) await updateBadge(tabId);
   }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  clearDownloadStatesForTab(tabId);
   await removeTab(tabId);
 });
 
@@ -217,19 +219,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true; // async
     }
     case MSG.DOWNLOAD_PROGRESS: {
-      // Offscreen → popup forwarder. v0.6 just logs; v0.8 wires the popup.
-      log.debug('download progress', msg.payload);
+      // Offscreen → SW → popup. Update the in-memory state and broadcast.
+      handleDownloadProgress(msg.payload);
       sendResponse({ ok: true });
       return false;
     }
     case MSG.DOWNLOAD_DONE: {
-      // Offscreen has produced a Blob URL; trigger the actual save.
+      // Offscreen produced a Blob URL; trigger the save AND broadcast.
       handleDownloadDone(msg.payload).catch((err) => log.warn('downloads.download failed', err));
       sendResponse({ ok: true });
       return false;
     }
     case MSG.DOWNLOAD_ERROR: {
-      log.warn('download error', msg.payload);
+      handleDownloadError(msg.payload);
+      sendResponse({ ok: true });
+      return false;
+    }
+    case MSG.SHOW_IN_FOLDER: {
+      const downloadId = msg.payload?.downloadId;
+      if (typeof downloadId === 'number') {
+        try {
+          chrome.downloads.show(downloadId);
+        } catch (err) {
+          log.warn('chrome.downloads.show failed', err);
+        }
+      }
       sendResponse({ ok: true });
       return false;
     }
@@ -435,6 +449,22 @@ async function handleStartDownload(payload) {
   const requestId = crypto.randomUUID();
   const finalVariantUrl = variantUrl && /^https?:/.test(variantUrl) ? variantUrl : entry.url;
 
+  // Seed the per-request state BEFORE forwarding to the offscreen, so the
+  // first DOWNLOAD_PROGRESS message can patch it instead of creating a
+  // race-window where the popup sees progress but no row state.
+  downloadStates.set(requestId, {
+    requestId,
+    mediaId,
+    tabId: entryTabId,
+    filename: `${filename}.mp4`,
+    status: 'pending',
+    stage: null,
+    current: 0,
+    total: 0,
+    startedAt: Date.now(),
+  });
+  broadcastDownloadState(downloadStates.get(requestId));
+
   await ensureOffscreen();
   // SW → offscreen uses RUN_DOWNLOAD so it doesn't collide with the
   // popup→SW START_DOWNLOAD message on the broadcast bus.
@@ -479,9 +509,65 @@ async function handleProxyFetch({ tabId, frameId, url, headers, responseType }) 
   }
 }
 
+// ---------- download-state machine ----------
+//
+// One DownloadState per `requestId`:
+//   { requestId, mediaId, tabId, filename,
+//     status: 'pending'|'progress'|'saved'|'error',
+//     stage, current, total,          // progress fields
+//     downloadId,                      // saved
+//     errorCode, errorMessage }        // error
+//
+// Created when handleStartDownload accepts the request, updated on
+// every offscreen → SW progress / done / error message, then pushed to
+// any popup ports subscribed to the matching tab. The Map lives only in
+// memory — fine because the SW stays warm while a download runs (the
+// offscreen sends a progress message per segment) and because losing
+// the state on SW restart is a cosmetic issue, not a correctness one.
+const downloadStates = new Map();
+
+function setDownloadState(requestId, patch) {
+  const prev = downloadStates.get(requestId);
+  if (!prev) return null;
+  const next = { ...prev, ...patch, updatedAt: Date.now() };
+  downloadStates.set(requestId, next);
+  broadcastDownloadState(next);
+  return next;
+}
+
+function broadcastDownloadState(state) {
+  if (!state || popupPorts.size === 0) return;
+  for (const [port, info] of popupPorts) {
+    if (info.tabId !== state.tabId) continue;
+    try {
+      port.postMessage({ type: 'DOWNLOAD_STATE', state });
+    } catch {
+      // disconnected mid-send; onDisconnect cleans up
+    }
+  }
+}
+
+function handleDownloadProgress(payload) {
+  if (!payload || typeof payload.requestId !== 'string') return;
+  const { requestId, stage, current, total } = payload;
+  setDownloadState(requestId, { status: 'progress', stage, current, total });
+}
+
+function handleDownloadError(payload) {
+  if (!payload || typeof payload.requestId !== 'string') return;
+  const { requestId, code, message } = payload;
+  log.warn('download error', { requestId, code, message });
+  setDownloadState(requestId, {
+    status: 'error',
+    errorCode: typeof code === 'string' ? code : 'Error',
+    errorMessage: typeof message === 'string' ? message : '',
+  });
+}
+
 async function handleDownloadDone(payload) {
   if (!payload || typeof payload.blobUrl !== 'string') return;
   const blobUrl = payload.blobUrl;
+  const requestId = typeof payload.requestId === 'string' ? payload.requestId : null;
   const downloadId = await chrome.downloads.download({
     url: blobUrl,
     filename: payload.filename,
@@ -493,6 +579,14 @@ async function handleDownloadDone(payload) {
     bytes: payload.bytes,
     segments: payload.segments,
   });
+  if (requestId) {
+    setDownloadState(requestId, {
+      status: 'saved',
+      downloadId,
+      filename: payload.filename,
+      bytes: payload.bytes ?? 0,
+    });
+  }
   // Revoke the offscreen Blob URL once the download lands or is interrupted.
   // The offscreen document stays alive across downloads, so without this
   // each Blob URL would pin its underlying buffer in memory forever.
@@ -506,6 +600,12 @@ async function handleDownloadDone(payload) {
     }
   };
   chrome.downloads.onChanged.addListener(listener);
+}
+
+function clearDownloadStatesForTab(tabId) {
+  for (const [requestId, state] of downloadStates) {
+    if (state.tabId === tabId) downloadStates.delete(requestId);
+  }
 }
 
 // Helper: enumerate tabIds currently subscribed via popup ports. Cheap
@@ -627,6 +727,18 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       const state = await getTabState(tabId);
       port.postMessage({ type: 'STATE', state });
+      // Replay any in-flight (or recently-completed) download states for
+      // this tab so a popup reopened mid-download immediately sees the
+      // progress bar / saved pill instead of an empty action area.
+      for (const [, ds] of downloadStates) {
+        if (ds.tabId === tabId) {
+          try {
+            port.postMessage({ type: 'DOWNLOAD_STATE', state: ds });
+          } catch {
+            // disconnected; onDisconnect will clean up
+          }
+        }
+      }
       // Schedule parsing for any HLS entries whose manifest hasn't been
       // fetched yet. Covers SW restart (in-flight Set is empty on cold
       // start, so previously interrupted parses get retried).

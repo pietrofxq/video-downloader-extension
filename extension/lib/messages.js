@@ -12,6 +12,7 @@ export const MSG = Object.freeze({
   DOWNLOAD_ERROR: 'DOWNLOAD_ERROR',
   PROXY_FETCH: 'PROXY_FETCH',
   REVOKE_BLOB: 'REVOKE_BLOB',
+  SHOW_IN_FOLDER: 'SHOW_IN_FOLDER',
 });
 
 export function envelope(type, payload = {}, requestId) {

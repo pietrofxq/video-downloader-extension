@@ -192,8 +192,83 @@ body {
   white-space: nowrap;
 }
 
-.download:hover {
+.download:hover:not(:disabled) {
   background: var(--accent-hover);
+}
+
+.download:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Download in-flight: progress bar with stage + counter underneath. */
+.download-progress {
+  flex: 1;
+  min-width: 0;
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease-out;
+}
+
+.progress-label {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* Saved / errored final state. */
+.download-result {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.saved-pill {
+  display: inline-block;
+  background: #1f6f3a;
+  color: #d6f6dd;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.2px;
+}
+
+.show-in-folder {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.show-in-folder:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.error-label {
+  color: var(--drm);
+  font-size: 11px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .drm-label {
