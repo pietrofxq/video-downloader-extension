@@ -11,36 +11,52 @@ export interface RemuxProgress {
   totalSegs: number;
 }
 
+// Lazy segment source — lets the caller stage segments on OPFS and only
+// hold one in memory at a time. Production downloads (v0.10+) use this
+// path; tests and small downloads can still pass an in-memory array
+// and the helper at remuxTsToMp4's entry will adapt it.
+export interface RemuxSegmentSource {
+  count: number;
+  getSegment(index: number): Promise<RemuxSegment>;
+}
+
 // mux.js writes the OUTPUT MP4 at 90 kHz (the HLS standard movie timescale).
 const HLS_TIMESCALE = 90_000;
 
 /**
- * Remux an array of MPEG-TS segments into a single fragmented MP4 buffer.
+ * Remux MPEG-TS segments into a single fragmented MP4 buffer.
  *
- * mux.js is designed for HLS streaming: each segment is pushed individually
- * with `setBaseMediaDecodeTime(cumulative)` so the resulting moof boxes
- * stitch into one continuous timeline starting at 0. Concatenating all
- * segments and pushing once produces ONE giant moof with the wrong tfdt.
+ * Accepts either an in-memory array (back-compat for tests / small
+ * downloads) or a `RemuxSegmentSource` that yields segments lazily.
+ * The source path is what v0.10's OPFS workspace uses — only one
+ * segment lives in JS heap at a time.
+ *
+ * mux.js is designed for HLS streaming: each segment is pushed
+ * individually with `setBaseMediaDecodeTime(cumulative)` so the
+ * resulting moof boxes stitch into one continuous timeline starting at
+ * 0. Concatenating all segments and pushing once produces ONE giant
+ * moof with the wrong tfdt.
  *
  * mux.js leaves the mvhd/tkhd/mdhd duration fields at the 0xFFFFFFFF
  * sentinel that fragmented MP4 uses for "compute from samples". Some
- * players (VLC) take the sentinel literally → ~13 hours of fake duration
- * and unusable seeking. We patch the moov afterward with the real total
- * duration so progress + seek work everywhere.
+ * players (VLC) take the sentinel literally → ~13 hours of fake
+ * duration and unusable seeking. We patch the moov afterward with the
+ * real total duration so progress + seek work everywhere.
  *
  * Output is fragmented MP4 (fMP4) — H.264 + AAC stream copy.
- *
- * @param {Array<{ bytes: Uint8Array, duration: number }>} segments
- *   In playlist order. `duration` is the EXTINF value in seconds.
- * @param {(p: { done: number, totalSegs: number }) => void} [onProgress]
- * @returns {Promise<Uint8Array>}
  */
 export function remuxTsToMp4(
-  segments: RemuxSegment[],
+  segmentsOrSource: RemuxSegment[] | RemuxSegmentSource,
   onProgress?: (p: RemuxProgress) => void,
 ): Promise<Uint8Array> {
-  if (!Array.isArray(segments) || segments.length === 0) {
-    return Promise.reject(new RemuxError('remuxTsToMp4: expected a non-empty segments array'));
+  const source: RemuxSegmentSource = Array.isArray(segmentsOrSource)
+    ? {
+        count: segmentsOrSource.length,
+        getSegment: (i) => Promise.resolve(segmentsOrSource[i]),
+      }
+    : segmentsOrSource;
+  if (source.count === 0) {
+    return Promise.reject(new RemuxError('remuxTsToMp4: expected at least one segment'));
   }
   return new Promise<Uint8Array>((resolve, reject) => {
     let transmuxer: Transmuxer;
@@ -101,15 +117,16 @@ export function remuxTsToMp4(
     (async () => {
       let cumulative90k = 0;
       try {
-        for (let i = 0; i < segments.length; i += 1) {
+        for (let i = 0; i < source.count; i += 1) {
           if (aborted) return;
-          const seg = segments[i];
+          const seg = await source.getSegment(i);
+          if (aborted) return;
           transmuxer.setBaseMediaDecodeTime(cumulative90k);
           transmuxer.push(seg.bytes);
           await flushSegment();
           const segSecs = seg.duration > 0 ? seg.duration : 6;
           cumulative90k += Math.round(segSecs * HLS_TIMESCALE);
-          onProgress?.({ done: i + 1, totalSegs: segments.length });
+          onProgress?.({ done: i + 1, totalSegs: source.count });
         }
       } catch (err) {
         if (aborted) return;

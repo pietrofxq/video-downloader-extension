@@ -9,7 +9,8 @@ import {
   UnsupportedFormatError,
 } from '../lib/errors.js';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
-import { remuxTsToMp4 } from './remux.js';
+import { remuxTsToMp4, type RemuxSegmentSource } from './remux.js';
+import { OpfsWorkspace } from './storage.js';
 import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
 
 const SEGMENT_CONCURRENCY = 4;
@@ -114,13 +115,16 @@ export async function downloadHlsAsTs(
     return cryptoKey;
   }
 
-  // 3. Fetch + decrypt segments with bounded concurrency. Each task returns
-  //    { bytes, duration } so we preserve the original per-segment boundary
-  //    + duration for the remux step (mux.js needs per-segment pushes).
-  let fetched = 0;
-  let decrypted = 0;
-  const tasks = segments.map(
-    (seg) => async (): Promise<{ bytes: Uint8Array; duration: number }> => {
+  // 3. Fetch + decrypt segments with bounded concurrency. Each task
+  //    stages its decrypted bytes to OPFS at the segment's playlist
+  //    index — only one segment lives in JS heap per worker at a time.
+  //    A 2GB lesson that used to peak at ~2GB of accumulated TS now
+  //    peaks at ~SEGMENT_CONCURRENCY × max-segment-size (~16-32 MB).
+  const workspace = await OpfsWorkspace.open(requestId);
+  try {
+    let fetched = 0;
+    let decrypted = 0;
+    const tasks = segments.map((seg, idx) => async (): Promise<void> => {
       signal?.throwIfAborted();
       const cipher = await fetchArrayBuffer(proxyFetch, {
         tabId,
@@ -155,33 +159,45 @@ export async function downloadHlsAsTs(
         decrypted += 1;
         onProgress({ stage: 'decrypt', current: decrypted, total });
       }
-      return { bytes, duration: seg.duration };
-    },
-  );
+      await workspace.writeSegment(idx, bytes);
+    });
 
-  const decryptedSegments = await runWithConcurrency(tasks, SEGMENT_CONCURRENCY, undefined, signal);
-  signal?.throwIfAborted();
+    await runWithConcurrency(tasks, SEGMENT_CONCURRENCY, undefined, signal);
+    signal?.throwIfAborted();
 
-  // 4. Remux per-segment via mux.js. Pushing each segment with
-  //    setBaseMediaDecodeTime(cumulative) is mux.js's intended VOD pattern;
-  //    pushing one big concatenation produces ONE giant moof with the
-  //    wrong baseMediaDecodeTime (VLC then reports a duration in hundreds
-  //    of hours and plays nothing).
-  onProgress({ stage: 'remux', current: 0, total: decryptedSegments.length });
-  const mp4Bytes = await remuxTsToMp4(decryptedSegments, ({ done, totalSegs }) => {
-    onProgress({ stage: 'remux', current: done, total: totalSegs });
-  });
+    // 4. Stream segments back from OPFS into mux.js. RemuxSegmentSource
+    //    yields one decrypted segment at a time so the array of bytes is
+    //    never held in memory all at once. Per-segment push + flush is
+    //    mux.js's intended VOD pattern (single concatenation produces a
+    //    wrong-tfdt giant moof — see AGENTS.md §8a).
+    onProgress({ stage: 'remux', current: 0, total: segments.length });
+    const segmentSource: RemuxSegmentSource = {
+      count: segments.length,
+      async getSegment(index) {
+        const bytes = await workspace.readSegment(index);
+        return { bytes, duration: segments[index].duration };
+      },
+    };
+    const mp4Bytes = await remuxTsToMp4(segmentSource, ({ done, totalSegs }) => {
+      onProgress({ stage: 'remux', current: done, total: totalSegs });
+    });
 
-  // 5. Make a Blob URL for the SW to hand to chrome.downloads.download.
-  const blob = new Blob([mp4Bytes as Uint8Array<ArrayBuffer>], { type: 'video/mp4' });
-  const blobUrl = URL.createObjectURL(blob);
-  return {
-    requestId,
-    blobUrl,
-    filename: `${filename}.mp4`,
-    bytes: mp4Bytes.length,
-    segments: total,
-  };
+    // 5. Make a Blob URL for the SW to hand to chrome.downloads.download.
+    const blob = new Blob([mp4Bytes as Uint8Array<ArrayBuffer>], { type: 'video/mp4' });
+    const blobUrl = URL.createObjectURL(blob);
+    return {
+      requestId,
+      blobUrl,
+      filename: `${filename}.mp4`,
+      bytes: mp4Bytes.length,
+      segments: total,
+    };
+  } finally {
+    // Dispose unconditionally — on success, error, AND abort. The Blob
+    // URL the SW holds is the in-memory snapshot; cleaning up the OPFS
+    // directory afterward is safe.
+    await workspace.dispose();
+  }
 }
 
 // ---------- helpers ----------

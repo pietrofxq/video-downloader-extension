@@ -1,7 +1,16 @@
 import { MSG, parseExtensionMessage } from '../lib/messages.js';
 import { log, redactUrl } from '../lib/log.js';
 import { downloadHlsAsTs } from './downloader.js';
+import { OpfsWorkspace } from './storage.js';
 import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
+
+// On offscreen startup, sweep any workspaces left behind by a prior
+// extension reload / crash mid-download. Cheap when the directory is
+// empty; idempotent. Fire-and-forget so it doesn't block the first
+// download request.
+void OpfsWorkspace.cleanupAllStale().catch((err) =>
+  log.warn('[offscreen] OPFS stale cleanup failed', err),
+);
 
 // The offscreen document is the long-lived host for download work:
 // - SW spawns it the first time a download is requested.
