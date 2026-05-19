@@ -9,19 +9,33 @@ const OUT = path.join(__dirname, 'dist');
 const WATCH = process.argv.includes('--watch');
 const MINIFY = process.env.NODE_ENV === 'production';
 
+// Each entry's `entry` is a path *without* extension. The build resolves
+// it to whichever file exists (`.ts` first during the v0.9 migration,
+// `.js` as a fallback) — that's how a partially-converted tree keeps
+// building without touching this map every time we rename a module.
+// Output file paths stay `.js` because the manifest + HTML references
+// the bundled output by that name.
 const ENTRIES = {
   // Content scripts MUST be IIFE — they're not loaded as modules.
-  'content/page-content.js': { entry: 'content/page-content.js', format: 'iife' },
-  'content/frame-content.js': { entry: 'content/frame-content.js', format: 'iife' },
-  'content/main-world-hooks.js': { entry: 'content/main-world-hooks.js', format: 'iife' },
+  'content/page-content.js': { entry: 'content/page-content', format: 'iife' },
+  'content/frame-content.js': { entry: 'content/frame-content', format: 'iife' },
+  'content/main-world-hooks.js': { entry: 'content/main-world-hooks', format: 'iife' },
   // SW is loaded with type: "module" in manifest, so ESM is fine, but we
   // still bundle to a single file for simplicity.
-  'background/service-worker.js': { entry: 'background/service-worker.js', format: 'esm' },
+  'background/service-worker.js': { entry: 'background/service-worker', format: 'esm' },
   // Popup uses <script type="module"> — keep as ESM bundle.
-  'popup/popup.js': { entry: 'popup/popup.js', format: 'esm' },
+  'popup/popup.js': { entry: 'popup/popup', format: 'esm' },
   // Offscreen is a stub for v0.1 but treated the same way.
-  'offscreen/offscreen.js': { entry: 'offscreen/offscreen.js', format: 'esm' },
+  'offscreen/offscreen.js': { entry: 'offscreen/offscreen', format: 'esm' },
 };
+
+async function resolveEntry(rel) {
+  for (const ext of ['.ts', '.js']) {
+    const candidate = path.join(SRC, rel + ext);
+    if (await pathExists(candidate)) return candidate;
+  }
+  throw new Error(`build.mjs: entry not found for ${rel} (.ts or .js)`);
+}
 
 const STATIC_FILES = [
   'manifest.json',
@@ -61,17 +75,20 @@ async function buildOnce() {
   await rm(OUT, { recursive: true, force: true });
   await mkdir(OUT, { recursive: true });
 
-  const tasks = Object.entries(ENTRIES).map(([outFile, { entry, format }]) =>
-    esbuild.build({
-      entryPoints: [path.join(SRC, entry)],
-      outfile: path.join(OUT, outFile),
-      bundle: true,
-      format,
-      target: ['chrome120'],
-      platform: 'browser',
-      sourcemap: MINIFY ? false : 'inline',
-      minify: MINIFY,
-      logLevel: 'info',
+  const tasks = await Promise.all(
+    Object.entries(ENTRIES).map(async ([outFile, { entry, format }]) => {
+      const entryPoint = await resolveEntry(entry);
+      return esbuild.build({
+        entryPoints: [entryPoint],
+        outfile: path.join(OUT, outFile),
+        bundle: true,
+        format,
+        target: ['chrome120'],
+        platform: 'browser',
+        sourcemap: MINIFY ? false : 'inline',
+        minify: MINIFY,
+        logLevel: 'info',
+      });
     }),
   );
 
@@ -95,9 +112,10 @@ async function listOutputs(dir, prefix = '') {
 
 async function watch() {
   const contexts = await Promise.all(
-    Object.entries(ENTRIES).map(([outFile, { entry, format }]) =>
-      esbuild.context({
-        entryPoints: [path.join(SRC, entry)],
+    Object.entries(ENTRIES).map(async ([outFile, { entry, format }]) => {
+      const entryPoint = await resolveEntry(entry);
+      return esbuild.context({
+        entryPoints: [entryPoint],
         outfile: path.join(OUT, outFile),
         bundle: true,
         format,
@@ -106,8 +124,8 @@ async function watch() {
         sourcemap: MINIFY ? false : 'inline',
         minify: MINIFY,
         logLevel: 'info',
-      }),
-    ),
+      });
+    }),
   );
   await copyStatic();
   await Promise.all(contexts.map((c) => c.watch()));

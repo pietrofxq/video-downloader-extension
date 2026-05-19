@@ -1,0 +1,43 @@
+{
+  // TypeScript config for the v0.9 migration. We progressively rename
+  // `.js` files to `.ts`; until every module is converted, `allowJs`
+  // keeps the typechecker happy on the as-yet-unconverted files. Strict
+  // flags ramp on at the END of the migration (see ROADMAP v0.9).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    // Source layout
+    "rootDir": ".",
+
+    // We don't emit — esbuild bundles. tsc is purely the checker.
+    "noEmit": true,
+
+    // Allow mixed JS / TS during the conversion. `checkJs` stays off so
+    // unconverted JS doesn't blow up the typechecker; converted .ts
+    // modules still benefit from full inference at the call sites.
+    "allowJs": true,
+    "checkJs": false,
+
+    // Interop with esbuild + npm packages
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+
+    // We'll turn strict on per ROADMAP phase order, but `noImplicitAny`
+    // is the one we want from day one for any code we write in .ts.
+    "strict": false,
+    "noImplicitAny": true,
+
+    // Chrome extension globals. @types/chrome gives us the chrome.*
+    // namespace; chrome120 target ensures the runtime APIs we use exist.
+    "types": ["chrome"]
+  },
+  "include": ["extension/**/*.ts", "extension/**/*.js"],
+  "exclude": ["dist", "node_modules", "scripts", "build.mjs"]
+}
