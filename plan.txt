@@ -1,0 +1,261 @@
+I have everything I need. Here's the full Chrome extension spec based on my analysis.
+
+# Chrome Extension Specification: Hotmart Club Video Downloader
+
+## 1. Overview & Context
+
+### Target Site
+- **Platform**: Hotmart Club (`hotmart.com/*/club/*`)
+- **Use case**: Allow logged-in users (course owners/students) to download lesson videos for offline viewing on their own purchased courses.
+
+### Player Architecture (observed)
+The lesson page embeds the video in a **cross-origin iframe**:
+```
+<iframe id="hotmart-player-embed"
+        src="https://cf-embed.play.hotmart.com/embed/{embedId}?applicationCode=...&userCode=...&jwtToken=...&user=...&autoplay=true&cur={filename}&videoTitle={title}&reference=...&membership=...&metadata=[...]">
+```
+
+Once the player loads, it requests (from inside the iframe, so the parent page cannot inspect them via DOM):
+- **HLS master/variant manifests** at:
+  `https://vod-akm.play.hotmart.com/video/{embedId}/hls/{embedId}-{timestamp}.m3u8?hdntl=...&app=...`
+- **AES-128 encrypted .ts segments** at:
+  `https://vod-akm.play.hotmart.com/video/{embedId}/hls/{embedId}-{timestamp}-audio={ab}-video={vb}-{n}.ts?hdntl=...&app=...`
+- **AES key** at:
+  `https://contentplayer.hotmart.com/video/{embedId}/mp4/key/{embedId}-{timestamp}.key?hdntl=...`
+- **WebVTT subtitle segments** at:
+  `https://vod-akm.play.hotmart.com/video/{embedId}/hls/{embedId}-{timestamp}-textstream_{lang}={br}-{n}.webvtt?hdntl=...`
+
+The `hdntl` query token is a signed Akamai token tied to the user's JWT — it must be reused as-is from real player requests.
+
+### Implication
+Because the player runs in a cross-origin iframe, the extension cannot read the player DOM directly. It must intercept network traffic. The cleanest approach is to capture the `.m3u8` manifest URL (which contains the signed token) from the iframe's requests via `webRequest` / DNR, then use that to download, decrypt, and remux the video.
+
+---
+
+## 2. Extension Architecture
+
+Manifest V3 extension with these components:
+
+```
+extension/
+├── manifest.json
+├── background/service-worker.js     # webRequest capture + download orchestration
+├── content/parent-content.js        # injected into hotmart.com (parent page)
+├── content/iframe-content.js        # injected into cf-embed.play.hotmart.com (iframe)
+├── popup/popup.html + popup.js      # UI: list of detected videos + Download buttons
+├── offscreen/offscreen.html + .js   # runs ffmpeg.wasm / decrypt + remux
+├── vendor/ffmpeg-core.wasm, ffmpeg.js  # bundled ffmpeg.wasm
+└── icons/
+```
+
+### `manifest.json` (key parts)
+```json
+{
+  "manifest_version": 3,
+  "name": "Hotmart Club Video Downloader",
+  "version": "1.0.0",
+  "permissions": [
+    "storage",
+    "downloads",
+    "webRequest",
+    "scripting",
+    "tabs",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://*.hotmart.com/*",
+    "https://vod-akm.play.hotmart.com/*",
+    "https://contentplayer.hotmart.com/*",
+    "https://cf-embed.play.hotmart.com/*"
+  ],
+  "background": { "service_worker": "background/service-worker.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://hotmart.com/*/club/*"],
+      "js": ["content/parent-content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://cf-embed.play.hotmart.com/embed/*"],
+      "js": ["content/iframe-content.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ],
+  "action": { "default_popup": "popup/popup.html" },
+  "web_accessible_resources": [
+    { "resources": ["vendor/*"], "matches": ["<all_urls>"] }
+  ]
+}
+```
+
+---
+
+## 3. Detection Flow (capturing the manifest)
+
+### `background/service-worker.js`
+Maintain an in-memory map `tabId -> { videoTitle, embedId, manifestUrl, keyUrl, capturedAt }`.
+
+Listen with `chrome.webRequest.onBeforeRequest` (or `onCompleted`) on:
+```
+urls: [
+  "https://vod-akm.play.hotmart.com/video/*/hls/*.m3u8*",
+  "https://vod-akm.play.hotmart.com/video/*/hls/*.ts*",
+  "https://contentplayer.hotmart.com/video/*/mp4/key/*.key*"
+]
+```
+
+For every request:
+1. Parse `embedId` from the path: `/video/{embedId}/...`.
+2. If the URL ends in `.m3u8`, store the full URL as `manifestUrl` for that `embedId` keyed by the **parent tab** (use `details.tabId`).
+3. If the URL ends in `.key`, store as `keyUrl` (fallback — the manifest's `#EXT-X-KEY` line also points to it).
+4. If only segment (`.ts`) URLs are seen (because the player keeps the manifest cached), reconstruct the manifest URL by replacing `-audio=...-video=...-N.ts` with `.m3u8`, OR fetch the manifest by sending a HEAD/GET to the player's typical playlist path and storing the response. The safest path is to also capture in the iframe content script (below) by overriding `fetch` / `XMLHttpRequest`.
+
+### `content/iframe-content.js` (cf-embed.play.hotmart.com)
+Because the iframe is cross-origin to the parent but **the extension can inject into it**, hook the player's networking before it runs:
+
+```js
+// Run at document_start
+(function () {
+  const origFetch = window.fetch;
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url && (url.includes('.m3u8') || url.includes('/key/'))) {
+      chrome.runtime.sendMessage({ type: 'HOTMART_NET', url });
+    }
+    return origFetch.apply(this, arguments);
+  };
+
+  const OrigXHR = window.XMLHttpRequest;
+  function PatchedXHR() {
+    const xhr = new OrigXHR();
+    const origOpen = xhr.open;
+    xhr.open = function (method, url) {
+      if (url && (url.includes('.m3u8') || url.includes('/key/'))) {
+        chrome.runtime.sendMessage({ type: 'HOTMART_NET', url });
+      }
+      return origOpen.apply(this, arguments);
+    };
+    return xhr;
+  }
+  window.XMLHttpRequest = PatchedXHR;
+})();
+```
+
+Also extract the iframe URL's query string and forward `videoTitle` / `cur` (filename like `PE-A4.mp4`) to background for default save name.
+
+### `content/parent-content.js`
+- Read the lesson title from the parent DOM:
+  - Primary title: `h1` near "Voltar" (e.g., "Lição 3, Lição 4 e Lição 5").
+  - Section title: the small line above (e.g., "Porta de Entrada").
+- Send `{ tabId, lessonTitle, sectionTitle }` to background.
+- Optionally inject a small "Download" button next to the player.
+
+---
+
+## 4. Download / Decrypt / Remux Pipeline
+
+Triggered from the popup or injected button. Runs in an **offscreen document** (MV3 requirement for using `Worker`/`WebAssembly` + `Blob` without service-worker lifetime issues).
+
+### `offscreen/offscreen.js` steps
+Given `{ manifestUrl, suggestedFilename }`:
+
+1. **Fetch master manifest** (`manifestUrl`) using `fetch(manifestUrl, { credentials: 'include' })`.
+2. Parse with a minimal m3u8 parser (e.g., `m3u8-parser` npm package, bundled). If it's a master playlist:
+   - Pick the highest-bandwidth variant (or let user choose). Resolve its URL relative to the master.
+   - Fetch the variant manifest.
+3. From the variant manifest extract:
+   - `#EXT-X-KEY:METHOD=AES-128,URI="..."` → key URL and `IV` (if present; otherwise derive from segment sequence number per HLS spec).
+   - Ordered list of `.ts` segment URLs.
+4. Fetch the AES key (`GET keyUrl`, 16 bytes).
+5. **Sequentially or with limited concurrency (e.g., 4 parallel)** fetch each `.ts` segment, decrypt with AES-128-CBC using the key and per-segment IV (`IV = BigEndian(sequenceNumber)` if not declared).
+6. Concatenate decrypted segments into a single Blob (MPEG-TS).
+7. **Remux to MP4** using bundled `ffmpeg.wasm`:
+   ```
+   ffmpeg -i input.ts -c copy -bsf:a aac_adtstoasc output.mp4
+   ```
+   (Stream copy — no re-encoding, fast.)
+8. Pass the resulting MP4 Blob back to the service worker (`chrome.runtime.sendMessage` with a transferable, or via `URL.createObjectURL`).
+9. Service worker calls `chrome.downloads.download({ url, filename, saveAs: true })`.
+
+### Subtitle handling (optional)
+If the variant manifest references `#EXT-X-MEDIA:TYPE=SUBTITLES`, also download the `.webvtt` segments, concatenate, fix cue timestamps relative to segment offsets, and offer download of `.vtt` alongside the MP4, or mux it into the MP4 as `mov_text` via ffmpeg.
+
+### Quality selection
+Parse all variants from the master m3u8 and let the user pick (Resolution / Bandwidth). Default to highest.
+
+---
+
+## 5. Popup UI (`popup/popup.html`)
+
+When opened, queries the background for the current tab's detected video state:
+
+```
+┌──────────────────────────────────────┐
+│ Hotmart Club Downloader              │
+├──────────────────────────────────────┤
+│ Lesson: Lição 3, Lição 4 e Lição 5   │
+│ Section: Porta de Entrada            │
+│ Video detected: PE-A4.mp4            │
+│                                      │
+│ Quality: [ 1080p (3241 kbps)   ▼ ]   │
+│ ☐ Include subtitles (pt-BR)          │
+│                                      │
+│ [  Download MP4  ]                   │
+│                                      │
+│ Progress: ███████░░░ 70% (seg 21/30) │
+└──────────────────────────────────────┘
+```
+
+States:
+- **Idle / no video yet** → "Play the video for a second to detect the stream, then come back here."
+- **Detected** → show metadata + Download button.
+- **Downloading** → show progress (segments fetched / total + remux stage).
+- **Done** → "Saved to Downloads."
+
+---
+
+## 6. Key Technical Considerations
+
+### Token expiry (`hdntl=exp=...`)
+The Akamai `hdntl` token has an `exp` (Unix timestamp). The extension must start the download promptly after capture. If expired mid-download, re-trigger capture by reloading the player (the extension can show "Token expired, please reload the lesson and try again").
+
+### Cookies / credentials
+Always send fetches with `credentials: 'include'` so that any cookies set for `play.hotmart.com` / `contentplayer.hotmart.com` accompany the requests. The signed `hdntl` token in the URL is the primary auth though.
+
+### Cross-origin & CORS
+Because `host_permissions` covers `vod-akm.play.hotmart.com` and `contentplayer.hotmart.com`, MV3 fetches from the extension context bypass page CORS. Do all decrypt/fetch work in background or offscreen, **not** in the page's context.
+
+### Concurrency & memory
+For long lessons (e.g., 14+ min the page shows lessons up to 19:00), there can be 100+ segments. Stream segments to disk via `chrome.downloads` is not directly supported for in-memory built blobs, so:
+- Either accumulate in memory if total size < ~2 GB (acceptable for most lessons).
+- Or write to OPFS (Origin Private File System) in the offscreen document and finalize there before triggering `chrome.downloads.download` from a Blob URL.
+
+### Single-video vs batch
+Future enhancement: detect the sidebar lesson list (`Convenções, Lição 1 e Lição 2`, `Lição 3, Lição 4 e Lição 5`, etc.) and allow queued batch downloads by navigating through lessons programmatically. Out of scope for v1.
+
+### Legal / ethical guard
+On first run, show a one-time disclaimer that the user must only download courses they have legitimately purchased / authored. Store acceptance in `chrome.storage.local`.
+
+---
+
+## 7. Edge Cases for the Coding Agent
+
+1. **No manifest captured** → instruct user to press play; rely on iframe fetch hook.
+2. **Manifest is already a media playlist** (not master) → skip variant selection.
+3. **Unencrypted streams** (no `#EXT-X-KEY`) → skip decrypt step.
+4. **Multiple audio renditions** (`#EXT-X-MEDIA:TYPE=AUDIO`) → currently combined audio+video variant URLs (`audio=128304-video=3241000`) suggest muxed segments, so single fetch path works. Handle both shapes.
+5. **Filename sanitization** → default `{sectionTitle} - {lessonTitle}.mp4`, fall back to `cur` query param, sanitize for filesystem.
+6. **Token in URL is sensitive** → never log full URLs to disk; redact `hdntl=...` in any user-visible log.
+
+---
+
+## 8. Acceptance Criteria
+
+- Installing the extension, navigating to a lesson page, pressing play for ~2 seconds, then opening the popup shows the detected video with lesson title.
+- Clicking "Download MP4" produces a playable `.mp4` (H.264 + AAC) saved to the default downloads folder, with no quality loss vs. the streamed source.
+- Works for both HLS master playlists with multiple variants and single-variant playlists.
+- Shows clear progress and error messages (token expired, network failure, etc.).
+- No requests are made to any third-party server other than `*.hotmart.com`.
+
+This spec is sufficient for a coding agent to implement the extension end-to-end. Want me to also draft the actual `m3u8-parser` integration code or the ffmpeg.wasm remux call as a starter?
