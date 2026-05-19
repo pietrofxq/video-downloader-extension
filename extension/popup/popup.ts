@@ -211,6 +211,15 @@ function renderActionForDownload(state: DownloadState): string {
         </button>
       </div>`;
   }
+  if (state.status === 'canceled') {
+    return `
+      <div class="download-result canceled">
+        <span class="canceled-pill">Canceled</span>
+        <button type="button" class="dismiss-download" data-media-id="${escapeHtml(state.mediaId)}" title="Start over">
+          &#x21bb; Again
+        </button>
+      </div>`;
+  }
   // pending / progress
   const total = state.total > 0 ? state.total : 0;
   const current = state.current > 0 ? state.current : 0;
@@ -221,7 +230,12 @@ function renderActionForDownload(state: DownloadState): string {
     <div class="download-progress" role="progressbar"
          aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
       <div class="progress-bar"><div class="progress-fill" style="width: ${pct}%"></div></div>
-      <div class="progress-label">${pct}% &#x00b7; ${escapeHtml(label)}</div>
+      <div class="progress-row">
+        <div class="progress-label">${pct}% &#x00b7; ${escapeHtml(label)}</div>
+        <button type="button" class="cancel-download" data-request-id="${escapeHtml(state.requestId)}" title="Cancel">
+          &#x2715;
+        </button>
+      </div>
     </div>`;
 }
 
@@ -437,6 +451,14 @@ function dismissDownload(mediaId: string): void {
   chrome.runtime.sendMessage({ type: MSG.DISMISS_DOWNLOAD, payload: { mediaId } }).catch(() => {});
 }
 
+function cancelDownload(requestId: string): void {
+  // The SW transitions to 'canceled' synchronously and broadcasts a
+  // DOWNLOAD_STATE update; the row repaints with the canceled UI as
+  // soon as that arrives. No optimistic local mutation here — the
+  // requestId is the canonical key and we want the SW's view to win.
+  chrome.runtime.sendMessage({ type: MSG.CANCEL_DOWNLOAD, payload: { requestId } }).catch(() => {});
+}
+
 // Single delegated click listener — no per-button wiring, no reliance on
 // "the latest render's array reference". Lookup via the Map for O(1).
 $content.addEventListener('click', (e: MouseEvent) => {
@@ -458,6 +480,14 @@ $content.addEventListener('click', (e: MouseEvent) => {
   if (dismissBtn) {
     const mediaId = dismissBtn.dataset.mediaId;
     if (mediaId) dismissDownload(mediaId);
+    return;
+  }
+
+  // "Cancel" on an in-flight progress row.
+  const cancelBtn = target?.closest<HTMLElement>('.cancel-download');
+  if (cancelBtn) {
+    const requestId = cancelBtn.dataset.requestId;
+    if (requestId) cancelDownload(requestId);
     return;
   }
 

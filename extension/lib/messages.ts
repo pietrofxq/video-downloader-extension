@@ -34,6 +34,7 @@ export const MSG = Object.freeze({
   REVOKE_BLOB: 'REVOKE_BLOB',
   SHOW_IN_FOLDER: 'SHOW_IN_FOLDER',
   DISMISS_DOWNLOAD: 'DISMISS_DOWNLOAD',
+  CANCEL_DOWNLOAD: 'CANCEL_DOWNLOAD',
 } as const);
 
 export type MessageType = (typeof MSG)[keyof typeof MSG];
@@ -131,6 +132,14 @@ export interface DismissDownloadMessage extends MessageBase<typeof MSG.DISMISS_D
   payload: { mediaId: string };
 }
 
+// Popup → SW → offscreen: cancel an in-flight download. Keyed by
+// requestId (which the popup has on its DownloadState). The SW marks
+// the state 'canceled' synchronously and forwards to the offscreen,
+// which aborts the AbortController gating that request's fetches.
+export interface CancelDownloadMessage extends MessageBase<typeof MSG.CANCEL_DOWNLOAD> {
+  payload: { requestId: string };
+}
+
 export type ExtensionMessage =
   | PingMessage
   | MediaUrlDetectedMessage
@@ -146,7 +155,8 @@ export type ExtensionMessage =
   | ProxyFetchMessage
   | RevokeBlobMessage
   | ShowInFolderMessage
-  | DismissDownloadMessage;
+  | DismissDownloadMessage
+  | CancelDownloadMessage;
 
 // ---------- popup ↔ SW port wire ----------
 //

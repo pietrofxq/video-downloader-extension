@@ -11,6 +11,12 @@ import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
 // - When done, we reply DOWNLOAD_DONE with a Blob URL. SW hands it to
 //   chrome.downloads.download.
 
+// One AbortController per in-flight download, keyed by requestId. The
+// SW forwards CANCEL_DOWNLOAD here, we abort the matching controller,
+// and downloadHlsAsTs (which has the signal) throws at its next
+// throwIfAborted check.
+const abortControllers = new Map<string, AbortController>();
+
 chrome.runtime.onMessage.addListener(
   (rawMsg: unknown, _sender, sendResponse: (response: unknown) => void) => {
     const msg = parseExtensionMessage(rawMsg);
@@ -24,6 +30,16 @@ chrome.runtime.onMessage.addListener(
         } catch {
           // ignore
         }
+      }
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    if (msg.type === MSG.CANCEL_DOWNLOAD) {
+      const requestId = msg.payload?.requestId;
+      if (typeof requestId === 'string') {
+        const ctrl = abortControllers.get(requestId);
+        if (ctrl) ctrl.abort(new DOMException('canceled', 'AbortError'));
       }
       sendResponse({ ok: true });
       return false;
@@ -72,8 +88,11 @@ async function handleDownload(req: DownloadRequest): Promise<DownloadOutcome> {
       .catch(() => {});
   };
 
+  const ctrl = new AbortController();
+  abortControllers.set(req.requestId, ctrl);
+
   try {
-    const outcome = await downloadHlsAsTs({ proxyFetch, onProgress }, req);
+    const outcome = await downloadHlsAsTs({ proxyFetch, onProgress, signal: ctrl.signal }, req);
     await chrome.runtime
       .sendMessage({
         type: MSG.DOWNLOAD_DONE,
@@ -82,21 +101,33 @@ async function handleDownload(req: DownloadRequest): Promise<DownloadOutcome> {
       .catch(() => {});
     return outcome;
   } catch (err) {
-    const code = err instanceof Error ? err.name : 'Error';
-    const message = err instanceof Error ? err.message : String(err);
+    // AbortError → user-initiated cancel. We still emit DOWNLOAD_ERROR so
+    // the SW gets to see SOMETHING terminal land for this requestId, but
+    // we tag it with code='Canceled' so the SW can resolve to the
+    // 'canceled' state rather than 'error'. The SW already transitioned
+    // to 'canceled' synchronously on the popup click — this is just the
+    // confirmation arriving after the in-flight task unwinds.
+    const isAbort =
+      err instanceof DOMException && (err.name === 'AbortError' || err.name === 'canceled');
+    const code = isAbort ? 'Canceled' : err instanceof Error ? err.name : 'Error';
+    const message = isAbort ? 'canceled by user' : err instanceof Error ? err.message : String(err);
     await chrome.runtime
       .sendMessage({
         type: MSG.DOWNLOAD_ERROR,
         payload: { requestId: req.requestId, code, message },
       })
       .catch(() => {});
-    log.warn('[offscreen] download failed', {
-      requestId: req.requestId,
-      code,
-      message,
-      variantUrl: redactUrl(req.variantUrl),
-    });
+    if (!isAbort) {
+      log.warn('[offscreen] download failed', {
+        requestId: req.requestId,
+        code,
+        message,
+        variantUrl: redactUrl(req.variantUrl),
+      });
+    }
     throw err;
+  } finally {
+    abortControllers.delete(req.requestId);
   }
 }
 

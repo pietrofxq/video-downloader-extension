@@ -108,7 +108,7 @@ export interface DownloadOutcome {
   segments: number;
 }
 
-export type DownloadStatus = 'pending' | 'progress' | 'saved' | 'error';
+export type DownloadStatus = 'pending' | 'progress' | 'saved' | 'error' | 'canceled';
 export type DownloadStage = 'fetch' | 'decrypt' | 'remux' | null;
 
 export interface DownloadState {

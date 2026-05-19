@@ -55,15 +55,23 @@ export interface ParsedMediaPlaylist {
 }
 
 export async function downloadHlsAsTs(
-  io: { proxyFetch: ProxyFetch; onProgress: (p: DownloadProgress) => void },
+  io: {
+    proxyFetch: ProxyFetch;
+    onProgress: (p: DownloadProgress) => void;
+    /** Cancel handle wired through every async boundary in the pipeline. */
+    signal?: AbortSignal;
+  },
   req: DownloadRequest,
 ): Promise<DownloadOutcome> {
-  const { proxyFetch, onProgress } = io;
+  const { proxyFetch, onProgress, signal } = io;
   const { requestId, variantUrl, tabId, frameId, headers, filename } = req;
+
+  signal?.throwIfAborted();
 
   // 1. Fetch + parse the chosen variant playlist. Single-pass parser does
   //    #EXTM3U validation, master detection, and segment extraction.
   const playlistText = await fetchText(proxyFetch, { tabId, frameId, url: variantUrl, headers });
+  signal?.throwIfAborted();
   const { isMaster, segments } = parsePlaylist(playlistText, variantUrl);
 
   if (isMaster) {
@@ -106,12 +114,14 @@ export async function downloadHlsAsTs(
   let decrypted = 0;
   const tasks = segments.map(
     (seg) => async (): Promise<{ bytes: Uint8Array; duration: number }> => {
+      signal?.throwIfAborted();
       const cipher = await fetchArrayBuffer(proxyFetch, {
         tabId,
         frameId,
         url: seg.url,
         headers,
       });
+      signal?.throwIfAborted();
       fetched += 1;
       onProgress({ stage: 'fetch', current: fetched, total });
 
@@ -141,7 +151,8 @@ export async function downloadHlsAsTs(
     },
   );
 
-  const decryptedSegments = await runWithConcurrency(tasks, SEGMENT_CONCURRENCY);
+  const decryptedSegments = await runWithConcurrency(tasks, SEGMENT_CONCURRENCY, undefined, signal);
+  signal?.throwIfAborted();
 
   // 4. Remux per-segment via mux.js. Pushing each segment with
   //    setBaseMediaDecodeTime(cumulative) is mux.js's intended VOD pattern;

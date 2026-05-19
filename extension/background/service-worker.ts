@@ -269,6 +269,12 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     }
+    case MSG.CANCEL_DOWNLOAD: {
+      const requestId = msg.payload?.requestId;
+      if (typeof requestId === 'string') cancelDownload(requestId);
+      sendResponse({ ok: true });
+      return false;
+    }
     case MSG.GET_TAB_STATE: {
       const reqTab = msg.payload?.tabId ?? sender.tab?.id;
       if (reqTab == null) {
@@ -635,11 +641,37 @@ function handleDownloadError(payload: unknown): void {
   if (!payload || typeof payload !== 'object') return;
   const p = payload as { requestId?: unknown; code?: unknown; message?: unknown };
   if (typeof p.requestId !== 'string') return;
+  // If the popup already transitioned this request to 'canceled' (the SW
+  // does that synchronously on the cancel click), the late DOWNLOAD_ERROR
+  // arriving from the offscreen — even with code='Canceled' — must NOT
+  // overwrite the canceled state with 'error'. The 'canceled' state is
+  // final; we just confirm receipt.
+  const existing = downloadStates.get(p.requestId);
+  if (existing?.status === 'canceled') return;
   log.warn('download error', { requestId: p.requestId, code: p.code, message: p.message });
   setDownloadState(p.requestId, {
     status: 'error',
     errorCode: typeof p.code === 'string' ? p.code : 'Error',
     errorMessage: typeof p.message === 'string' ? p.message : '',
+  });
+}
+
+// Mark the SW state 'canceled' synchronously (so the popup's row flips
+// instantly) and forward the cancel to the offscreen so the in-flight
+// AbortController fires. Idempotent on already-final states.
+function cancelDownload(requestId: string): void {
+  const state = downloadStates.get(requestId);
+  if (!state) return;
+  if (state.status === 'saved' || state.status === 'error' || state.status === 'canceled') {
+    return;
+  }
+  setDownloadState(requestId, {
+    status: 'canceled',
+    errorCode: 'Canceled',
+    errorMessage: 'canceled by user',
+  });
+  chrome.runtime.sendMessage({ type: MSG.CANCEL_DOWNLOAD, payload: { requestId } }).catch(() => {
+    // offscreen may be down; nothing to abort.
   });
 }
 

@@ -15,17 +15,26 @@ export async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
   concurrency: number,
   onProgress?: (p: ConcurrencyProgress<T>) => void,
+  signal?: AbortSignal,
 ): Promise<T[]> {
   if (!Array.isArray(tasks)) throw new TypeError('runWithConcurrency: tasks must be an array');
   if (!Number.isInteger(concurrency) || concurrency < 1) {
     throw new RangeError('runWithConcurrency: concurrency must be a positive integer');
   }
+  if (signal?.aborted) throw signal.reason ?? new DOMException('aborted', 'AbortError');
+
   const total = tasks.length;
   const results: T[] = new Array(total);
   let nextIndex = 0;
   let done = 0;
   let aborted = false;
   let abortError: unknown = null;
+
+  const onAbort = (): void => {
+    aborted = true;
+    abortError = signal?.reason ?? new DOMException('aborted', 'AbortError');
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   async function worker(): Promise<void> {
     while (true) {
@@ -51,7 +60,11 @@ export async function runWithConcurrency<T>(
   }
 
   const lanes = Math.min(concurrency, Math.max(total, 1));
-  await Promise.all(Array.from({ length: lanes }, () => worker()));
+  try {
+    await Promise.all(Array.from({ length: lanes }, () => worker()));
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
   if (aborted) throw abortError;
   return results;
 }
