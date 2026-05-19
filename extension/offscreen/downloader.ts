@@ -70,7 +70,13 @@ export async function downloadHlsAsTs(
 
   // 1. Fetch + parse the chosen variant playlist. Single-pass parser does
   //    #EXTM3U validation, master detection, and segment extraction.
-  const playlistText = await fetchText(proxyFetch, { tabId, frameId, url: variantUrl, headers });
+  const playlistText = await fetchText(proxyFetch, {
+    tabId,
+    frameId,
+    url: variantUrl,
+    headers,
+    signal,
+  });
   signal?.throwIfAborted();
   const { isMaster, segments } = parsePlaylist(playlistText, variantUrl);
 
@@ -98,6 +104,7 @@ export async function downloadHlsAsTs(
       frameId,
       url: keyUrl,
       headers,
+      signal,
     });
     if (keyBytes.length !== 16) {
       throw new DecryptionError(`AES key at ${keyUrl} was ${keyBytes.length} bytes, expected 16.`);
@@ -120,6 +127,7 @@ export async function downloadHlsAsTs(
         frameId,
         url: seg.url,
         headers,
+        signal,
       });
       signal?.throwIfAborted();
       fetched += 1;
@@ -282,13 +290,76 @@ interface FetchArgs {
   frameId: number;
   url: string;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+
+// Retry budget for transient segment / key failures. Total wall time at
+// max attempts ≈ 500 + 1000 + 2000 + 4000ms = ~7.5s plus jitter — well
+// inside the typical signed-URL TTL on Hotmart's hdntl token.
+const MAX_FETCH_ATTEMPTS = 4;
+
+// Classify a proxy reply as "retry might help":
+//  - HTTP 429 (rate-limited)
+//  - HTTP 5xx (server failure)
+//  - status 0 (the content-script fetch threw — network glitch,
+//    CDN reset, frame torn down mid-request, etc.)
+// Explicit allowlist so non-transient failures (4xx other than 429,
+// notably 403 token-expired) fail fast instead of stalling on retries.
+function isRetryableReply(reply: ProxyFetchReply | undefined): boolean {
+  if (!reply) return true; // proxyFetch threw — treat as transient
+  if (reply.ok) return false;
+  const status = reply.status ?? 0;
+  if (status === 429) return true;
+  if (status >= 500 && status < 600) return true;
+  if (status === 0) return true; // network error from the content-script side
+  return false;
+}
+
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw signal.reason ?? new DOMException('aborted', 'AbortError');
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new DOMException('aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function proxyFetchWithRetry(
+  proxyFetch: ProxyFetch,
+  payload: ProxyFetchPayload,
+  signal?: AbortSignal,
+): Promise<ProxyFetchReply> {
+  let attempt = 0;
+  let lastReply: ProxyFetchReply | undefined;
+  while (attempt < MAX_FETCH_ATTEMPTS) {
+    signal?.throwIfAborted();
+    lastReply = await proxyFetch(payload);
+    if (lastReply.ok) return lastReply;
+    if (!isRetryableReply(lastReply)) return lastReply;
+    attempt += 1;
+    if (attempt >= MAX_FETCH_ATTEMPTS) break;
+    // Exponential backoff: 500ms · 1s · 2s · 4s with up to 300ms jitter.
+    const base = Math.min(4000, 500 * 2 ** (attempt - 1));
+    await sleep(base + Math.random() * 300, signal);
+  }
+  return lastReply ?? { ok: false, status: 0, error: 'proxy fetch returned no reply' };
 }
 
 async function fetchText(
   proxyFetch: ProxyFetch,
-  { tabId, frameId, url, headers }: FetchArgs,
+  { tabId, frameId, url, headers, signal }: FetchArgs,
 ): Promise<string> {
-  const reply = await proxyFetch({ tabId, frameId, url, headers, responseType: 'text' });
+  const reply = await proxyFetchWithRetry(
+    proxyFetch,
+    { tabId, frameId, url, headers, responseType: 'text' },
+    signal,
+  );
   if (!reply?.ok) throwFromReply(reply, url);
   if (typeof reply.body !== 'string') {
     throw new ManifestParseError(`proxy fetch for ${url} returned non-string body`);
@@ -298,9 +369,13 @@ async function fetchText(
 
 async function fetchArrayBuffer(
   proxyFetch: ProxyFetch,
-  { tabId, frameId, url, headers }: FetchArgs,
+  { tabId, frameId, url, headers, signal }: FetchArgs,
 ): Promise<Uint8Array> {
-  const reply = await proxyFetch({ tabId, frameId, url, headers, responseType: 'arrayBuffer' });
+  const reply = await proxyFetchWithRetry(
+    proxyFetch,
+    { tabId, frameId, url, headers, responseType: 'arrayBuffer' },
+    signal,
+  );
   if (!reply?.ok) throwFromReply(reply, url);
   if (typeof reply.body !== 'string') {
     throw new Error(`proxy fetch for ${url} returned non-string base64 body`);
@@ -317,7 +392,7 @@ function throwFromReply(reply: ProxyFetchReply | undefined, url: string): never 
   if (status === 403) {
     throw new TokenExpiredError(message);
   }
-  throw new Error(message);
+  throw new Error(`${message} (HTTP ${status})`);
 }
 
 // uint8ArrayToBase64 is re-exported for completeness; the downloader doesn't
