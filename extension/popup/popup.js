@@ -103,9 +103,24 @@ function renderRow(entry) {
   const filename = entryFilename(entry);
   const badges = entryBadges(entry);
   const isDrm = entry.drm === true;
-  const action = isDrm
-    ? '<span class="drm-label" title="Encrypted with a DRM system the extension cannot decrypt.">DRM-protected</span>'
-    : '<button type="button" class="download">Download &#x2193;</button>';
+  // Master playlists need their variant list parsed before we can pick a
+  // concrete media URL. Until then the select shows "Loading…" — clicking
+  // would fall back to entry.url (the master) and the downloader rejects
+  // it with UnsupportedFormatError. Disable the button until a real
+  // variant exists or we've confirmed this is a single-bitrate playlist.
+  const isReady =
+    !!entry.parseError === false &&
+    ((Array.isArray(entry.variants) && entry.variants.length > 0) || entry.isMaster === false);
+  let action;
+  if (isDrm) {
+    action =
+      '<span class="drm-label" title="Encrypted with a DRM system the extension cannot decrypt.">DRM-protected</span>';
+  } else if (!isReady) {
+    action =
+      '<button type="button" class="download" disabled title="Waiting for the manifest to load.">Download &#x2193;</button>';
+  } else {
+    action = '<button type="button" class="download">Download &#x2193;</button>';
+  }
   return `
     <div class="row" data-media-id="${escapeHtml(entry.id)}">
       <div class="row-header">
@@ -188,7 +203,19 @@ $content.addEventListener('click', (e) => {
   // the entry's own URL (single-bitrate / unparsed cases).
   const sel = row.querySelector('.quality');
   const chosen = sel?.value;
-  const variantUrl = typeof chosen === 'string' && /^https?:/.test(chosen) ? chosen : entry.url;
+  // Only fall back to entry.url when this is a known single-bitrate
+  // (media) playlist. If the entry is a master without parsed variants,
+  // entry.url IS the master URL and the downloader would reject it.
+  let variantUrl;
+  if (typeof chosen === 'string' && /^https?:/.test(chosen)) {
+    variantUrl = chosen;
+  } else if (entry.isMaster === false) {
+    variantUrl = entry.url;
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn('[VDL] download blocked — manifest not parsed yet', { mediaId: entry.id });
+    return;
+  }
 
   // eslint-disable-next-line no-console
   console.log('[VDL] download clicked', {

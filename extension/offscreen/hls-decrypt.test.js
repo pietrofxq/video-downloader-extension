@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { Parser } from 'm3u8-parser';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
 
 describe('ivFromSequence', () => {
@@ -10,9 +11,7 @@ describe('ivFromSequence', () => {
 
   it('encodes the sequence number in the low 8 bytes, big-endian', () => {
     // 1 → ...00 00 00 00 00 00 00 01
-    expect(Array.from(ivFromSequence(1))).toEqual([
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ]);
+    expect(Array.from(ivFromSequence(1))).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     // 256 → ...00 00 00 00 00 00 01 00
     expect(Array.from(ivFromSequence(256))).toEqual([
       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
@@ -32,12 +31,35 @@ describe('toUint8', () => {
     expect(toUint8(u8)).toBe(u8);
   });
 
-  it('reinterprets a Uint32Array (m3u8-parser sometimes returns one)', () => {
+  it('serializes Uint32Array words big-endian (HLS IV byte order)', () => {
+    // Bytes must come out big-endian regardless of host endianness:
+    // 0x01020304 → [0x01, 0x02, 0x03, 0x04].
     const u32 = new Uint32Array([0x01020304]);
     const u8 = toUint8(u32);
-    expect(u8.length).toBe(4);
-    // System endianness affects byte order, so just check round-trippability.
-    expect(new Uint32Array(u8.buffer, u8.byteOffset, 1)[0]).toBe(0x01020304);
+    expect(Array.from(u8)).toEqual([0x01, 0x02, 0x03, 0x04]);
+  });
+
+  it('round-trips a full 16-byte IV from m3u8-parser big-endian', () => {
+    // m3u8-parser stores parsed IV= attributes as a Uint32Array; the
+    // wire-format must be big-endian per RFC 8216 §4.4.4.4.
+    const parser = new Parser();
+    parser.push(
+      '#EXTM3U\n' +
+        '#EXT-X-VERSION:3\n' +
+        '#EXT-X-TARGETDURATION:6\n' +
+        '#EXT-X-KEY:METHOD=AES-128,URI="k",IV=0x000102030405060708090A0B0C0D0E0F\n' +
+        '#EXTINF:6,\n' +
+        'seg.ts\n' +
+        '#EXT-X-ENDLIST\n',
+    );
+    parser.end();
+    const segIv = parser.manifest.segments[0].key.iv;
+    expect(segIv).toBeInstanceOf(Uint32Array);
+    const bytes = toUint8(segIv);
+    expect(Array.from(bytes)).toEqual([
+      0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+      0x0f,
+    ]);
   });
 
   it('wraps a raw ArrayBuffer', () => {

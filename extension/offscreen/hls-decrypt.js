@@ -26,15 +26,29 @@ export function ivFromSequence(sequenceNumber) {
  * Normalize a key/IV input that might be either a Uint8Array or one of
  * m3u8-parser's Uint32Array IV representations into a 16-byte Uint8Array.
  *
+ * m3u8-parser stores parsed `IV=0x...` values as a 4-element Uint32Array
+ * where each element is a JS Number (host-byte-order in memory). On
+ * little-endian platforms (Chrome, Node on x86/ARM), reinterpreting the
+ * underlying buffer as Uint8Array would give bytes in the wrong order:
+ * IV `0x...0001` becomes `01 00 00 00` instead of `00 00 00 01`, and any
+ * stream with an explicit EXT-X-KEY:IV= decrypts to garbage. We must
+ * serialize each Uint32 word big-endian, which is the order HLS requires.
+ *
  * @param {ArrayBufferView | ArrayBuffer | undefined | null} input
  * @returns {Uint8Array | null}
  */
 export function toUint8(input) {
   if (!input) return null;
   if (input instanceof Uint8Array) return input;
+  if (input instanceof Uint32Array) {
+    const out = new Uint8Array(input.length * 4);
+    const view = new DataView(out.buffer);
+    for (let i = 0; i < input.length; i += 1) {
+      view.setUint32(i * 4, input[i] >>> 0, false); // big-endian
+    }
+    return out;
+  }
   if (ArrayBuffer.isView(input)) {
-    // Uint32Array → reinterpret as Uint8Array; m3u8-parser sometimes hands
-    // back a Uint32Array of length 4 (4 × 4 = 16 bytes).
     return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
   }
   if (input instanceof ArrayBuffer) return new Uint8Array(input);

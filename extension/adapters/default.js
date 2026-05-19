@@ -11,7 +11,8 @@ function basenameFromUrl(url) {
 }
 
 function scrapeDefaultMeta(doc) {
-  const og = (prop) => doc.querySelector(`meta[property="${prop}"]`)?.getAttribute('content') ?? null;
+  const og = (prop) =>
+    doc.querySelector(`meta[property="${prop}"]`)?.getAttribute('content') ?? null;
   return {
     title: doc.title || '',
     ogTitle: og('og:title'),

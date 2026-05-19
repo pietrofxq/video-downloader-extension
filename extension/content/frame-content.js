@@ -83,9 +83,7 @@ if (/^https?:$/.test(location.protocol)) {
     if (msg?.type !== MSG.PROXY_FETCH) return false;
     handleProxyFetch(msg.payload ?? {})
       .then(sendResponse)
-      .catch((err) =>
-        sendResponse({ ok: false, error: String(err?.message ?? err), status: 0 }),
-      );
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err), status: 0 }));
     return true; // async sendResponse
   });
 

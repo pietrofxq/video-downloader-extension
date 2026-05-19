@@ -229,7 +229,6 @@ function throwFromReply(reply, url) {
   throw new Error(message);
 }
 
-
 // uint8ArrayToBase64 is re-exported for completeness; the downloader doesn't
 // use it directly but PROXY_FETCH replies encode bodies with it.
 export { uint8ArrayToBase64 };

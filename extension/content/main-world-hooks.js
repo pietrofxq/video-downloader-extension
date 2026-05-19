@@ -23,6 +23,19 @@
     }
   }
 
+  // Pages frequently call `fetch('/master.m3u8')` with a relative path.
+  // webRequest stores absolute URLs, and the SW matches body-capture by
+  // exact URL string equality (handleManifestBody → entry.url === url).
+  // Resolve against the current document so both sides see the same URL.
+  function absolutize(url) {
+    if (typeof url !== 'string' || url.length === 0) return url;
+    try {
+      return new URL(url, window.location.href).href;
+    } catch {
+      return url;
+    }
+  }
+
   function collectHeaders(input) {
     if (!input) return undefined;
     const out = {};
@@ -71,12 +84,13 @@
       }
       const promise = origFetch.apply(this, arguments);
       if (url) {
+        const absUrl = absolutize(url);
         try {
-          post({ kind: 'fetch', url, headers: collectHeaders(headerSource) });
+          post({ kind: 'fetch', url: absUrl, headers: collectHeaders(headerSource) });
         } catch {
           // ignore
         }
-        if (isManifestUrl(url)) {
+        if (isManifestUrl(absUrl)) {
           // Clone is essential — reading the body would consume the
           // player's stream. Send the text body once available.
           promise
@@ -84,7 +98,7 @@
               try {
                 if (!res || !res.ok) return;
                 const text = await res.clone().text();
-                post({ kind: 'manifest-body', url, text });
+                post({ kind: 'manifest-body', url: absUrl, text });
               } catch {
                 // body unreadable — leave it; SW fallback will try fetch.
               }
@@ -105,7 +119,8 @@
 
     XHR.prototype.open = function (method, url) {
       try {
-        this.__vdlUrl = typeof url === 'string' ? url : url?.toString?.() ?? '';
+        const raw = typeof url === 'string' ? url : (url?.toString?.() ?? '');
+        this.__vdlUrl = absolutize(raw);
         this.__vdlHeaders = undefined;
       } catch {
         // ignore

@@ -4,7 +4,10 @@ import { describe, expect, it } from 'vitest';
 
 import { remuxTsToMp4 } from './remux.js';
 
-const TS_FIXTURE = new URL('../../node_modules/mux.js/test/segments/test-segment.ts', import.meta.url);
+const TS_FIXTURE = new URL(
+  '../../node_modules/mux.js/test/segments/test-segment.ts',
+  import.meta.url,
+);
 
 describe('remuxTsToMp4', () => {
   it('rewrites mux.js audio/video output into one moof per time range', async () => {
@@ -105,9 +108,7 @@ function walkBoxes(buf, start, end, visit) {
 }
 
 function readU32(buf, off) {
-  return (
-    ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0
-  );
+  return ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
 }
 
 function readName(buf, off) {

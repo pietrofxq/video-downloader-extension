@@ -1,5 +1,5 @@
 import { MSG } from '../lib/messages.js';
-import { redactUrl } from '../lib/log.js';
+import { log, redactUrl } from '../lib/log.js';
 import { downloadHlsAsTs } from './downloader.js';
 
 // The offscreen document is the long-lived host for download work:
@@ -77,9 +77,7 @@ async function handleDownload(req) {
         payload: { requestId: req.requestId, code, message },
       })
       .catch(() => {});
-    // Surface the redacted-url variant in the offscreen console for dev visibility.
-    // eslint-disable-next-line no-console
-    console.warn('[offscreen] download failed', {
+    log.warn('[offscreen] download failed', {
       requestId: req.requestId,
       code,
       message,

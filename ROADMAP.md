@@ -262,6 +262,7 @@ Goal: shippable to friends — covers HLS end-to-end on any site, with first-cla
   - "Reset detected videos for current tab" button.
   - Plain-language explanation of why `<all_urls>` permission is needed.
 - [ ] Final icon set + active-state badge styling.
+- [ ] **HLS alternate-audio renditions**: when the master playlist declares `EXT-X-MEDIA TYPE=AUDIO` separate from the video variant (currently detected by `lib/m3u8.js` and hidden from the popup), fetch the chosen audio rendition's media playlist alongside the video, transmux both through mux.js, and combine them into a single moof-with-two-trafs in `remux.js`. README currently narrows the HLS claim to muxed-AV variants; widen it once this lands.
 - [ ] Write `CHANGELOG.md` and tag `v1.0.0`.
 - [ ] Manual smoke test on 3 sites: a Hotmart course, a public HLS demo, a generic third-party site with HTML5 HLS.
 - [ ] Update `README.md` install section with the final unpacked-load steps.

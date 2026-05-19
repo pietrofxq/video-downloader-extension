@@ -359,8 +359,7 @@ function collectFromTrak(buf, start, end, out) {
     if (name === 'tkhd') {
       const body = i + 8;
       const version = buf[body];
-      trackId =
-        version === 0 ? readU32(buf, body + 12) : readU32(buf, body + 20);
+      trackId = version === 0 ? readU32(buf, body + 12) : readU32(buf, body + 20);
     } else if (name === 'mdia') {
       let j = i + 8;
       const mdiaEnd = i + size;
@@ -371,8 +370,7 @@ function collectFromTrak(buf, start, end, out) {
         if (sname === 'mdhd') {
           const mbody = j + 8;
           const mver = buf[mbody];
-          timescale =
-            mver === 0 ? readU32(buf, mbody + 12) : readU32(buf, mbody + 20);
+          timescale = mver === 0 ? readU32(buf, mbody + 12) : readU32(buf, mbody + 20);
         }
         j += ssize;
       }
@@ -528,8 +526,7 @@ function patchHeaderDurations(buf, trackTotals, trackTimescales) {
   walkBoxes(buf, moovStart, moovEnd, (name, bodyStart) => {
     if (name === 'mvhd') {
       const version = buf[bodyStart];
-      movieTimescale =
-        version === 0 ? readU32(buf, bodyStart + 12) : readU32(buf, bodyStart + 20);
+      movieTimescale = version === 0 ? readU32(buf, bodyStart + 12) : readU32(buf, bodyStart + 20);
     }
   });
 
@@ -558,8 +555,7 @@ function patchTrakBox(buf, start, end, trackTotals, trackTimescales, mvhdDur) {
   walkBoxes(buf, start, end, (name, bodyStart, bodyEnd) => {
     if (name === 'tkhd') {
       const version = buf[bodyStart];
-      trackId =
-        version === 0 ? readU32(buf, bodyStart + 12) : readU32(buf, bodyStart + 20);
+      trackId = version === 0 ? readU32(buf, bodyStart + 12) : readU32(buf, bodyStart + 20);
       writeTkhdDuration(buf, bodyStart, mvhdDur);
     } else if (name === 'mdia') {
       walkBoxes(buf, bodyStart, bodyEnd, (subName, subStart) => {
@@ -666,9 +662,7 @@ function walkBoxes(buf, start, end, visit) {
 }
 
 function readU32(buf, off) {
-  return (
-    ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0
-  );
+  return ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
 }
 
 function readName(buf, off) {

@@ -3,17 +3,8 @@
   "name": "Video Downloader",
   "description": "Detect and download HLS/DASH/progressive video from any site, with first-class Hotmart Club support.",
   "version": "0.7.0",
-  "permissions": [
-    "storage",
-    "downloads",
-    "webRequest",
-    "scripting",
-    "tabs",
-    "offscreen"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "permissions": ["storage", "downloads", "webRequest", "scripting", "tabs", "offscreen"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"

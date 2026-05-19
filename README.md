@@ -2,6 +2,8 @@
 
 A Chrome extension (Manifest V3) that detects and downloads streaming video from arbitrary websites — HLS (`.m3u8`), DASH (`.mpd`), and progressive (`.mp4` / `.webm`) — through a generic media-detection engine plus a pluggable **site-adapter** layer that adds richer metadata, auth handling, and naming for specific sites. **Hotmart Club is the first first-class adapter**: it handles the cross-origin iframe, the signed Akamai token, and the AES-128 decryption automatically.
 
+> **Current HLS coverage** (v0.7): variant playlists whose segments carry both audio and video muxed into MPEG-TS (the common case, including Hotmart). Masters with separate alternate-audio renditions (`#EXT-X-MEDIA TYPE=AUDIO`) are detected but only the video rendition is downloaded — audio-rendition muxing is on the roadmap.
+
 > **Disclaimer**: This tool is intended for users who have the right to download the content they target — content they own, have purchased access to, or that is freely licensed. Do not use it to redistribute copyrighted material. DRM-protected streams (Widevine / PlayReady / FairPlay) are explicitly out of scope.
 
 ## How it works

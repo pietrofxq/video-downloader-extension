@@ -458,9 +458,9 @@ async function handleStartDownload(payload) {
     tabId: entryTabId,
     frameId: entry.frameId ?? 0,
     adapter: entry.adapterId,
-    filename: `${filename}.ts`,
+    filename: `${filename}.mp4`,
   });
-  return { requestId, filename: `${filename}.ts` };
+  return { requestId, filename: `${filename}.mp4` };
 }
 
 async function handleProxyFetch({ tabId, frameId, url, headers, responseType }) {
@@ -500,11 +500,9 @@ async function handleDownloadDone(payload) {
     if (delta.id !== downloadId) return;
     if (delta.state?.current === 'complete' || delta.state?.current === 'interrupted') {
       chrome.downloads.onChanged.removeListener(listener);
-      chrome.runtime
-        .sendMessage({ type: MSG.REVOKE_BLOB, payload: { blobUrl } })
-        .catch(() => {
-          // Offscreen may have closed; nothing to revoke.
-        });
+      chrome.runtime.sendMessage({ type: MSG.REVOKE_BLOB, payload: { blobUrl } }).catch(() => {
+        // Offscreen may have closed; nothing to revoke.
+      });
     }
   };
   chrome.downloads.onChanged.addListener(listener);
@@ -658,4 +656,3 @@ async function broadcastTabState(tabId) {
     }
   }
 }
-

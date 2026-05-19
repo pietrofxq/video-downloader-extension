@@ -73,8 +73,7 @@ export function parseManifest(text, baseUrl) {
         return {
           url: resolveUri(pl.uri, baseUrl),
           bandwidth: typeof attrs.BANDWIDTH === 'number' ? attrs.BANDWIDTH : 0,
-          resolution:
-            res && res.width && res.height ? `${res.width}x${res.height}` : null,
+          resolution: res && res.width && res.height ? `${res.width}x${res.height}` : null,
           codecs: typeof attrs.CODECS === 'string' ? attrs.CODECS : null,
         };
       })
