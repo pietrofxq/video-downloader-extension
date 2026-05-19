@@ -2,6 +2,7 @@ import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { log, redactUrl } from '../lib/log.js';
 import { MSG, parsePortMessageFromSW } from '../lib/messages.js';
+import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
 
 const $content = document.getElementById('content')!;
@@ -45,7 +46,19 @@ function entrySection(entry: MediaEntry): string {
 }
 
 function entryFilename(entry: MediaEntry): string {
-  return entry.meta?.filenameHint || basenameFromUrl(entry.url);
+  // Default the filename input to the same title chain the row-title
+  // displays — lessonTitle / title / OG title — sanitized so what the
+  // user sees matches what the SW will save. URL basename is the last
+  // resort (e.g. master-pkg-t-1746628520000) and is rarely useful.
+  const m = entry.meta ?? {};
+  const raw =
+    m.lessonTitle ||
+    m.title ||
+    m.ogTitle ||
+    m.ogVideoTitle ||
+    m.filenameHint ||
+    basenameFromUrl(entry.url);
+  return sanitizeFilename(raw, { fallback: 'video' });
 }
 
 function entryBadges(entry: MediaEntry): string[] {
