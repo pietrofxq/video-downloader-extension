@@ -390,8 +390,6 @@ async function ensureOffscreen() {
 
 async function handleStartDownload(payload) {
   const { mediaId, variantUrl } = payload;
-  const tabState = await Promise.resolve(); // no-op; documents the await chain below
-  void tabState;
   // Find the MediaEntry across all tabs.
   let entry = null;
   let entryTabId = null;
@@ -483,8 +481,9 @@ async function handleProxyFetch({ tabId, frameId, url, headers, responseType }) 
 
 async function handleDownloadDone(payload) {
   if (!payload || typeof payload.blobUrl !== 'string') return;
+  const blobUrl = payload.blobUrl;
   const downloadId = await chrome.downloads.download({
-    url: payload.blobUrl,
+    url: blobUrl,
     filename: payload.filename,
     saveAs: false,
   });
@@ -495,13 +494,17 @@ async function handleDownloadDone(payload) {
     segments: payload.segments,
   });
   // Revoke the offscreen Blob URL once the download lands or is interrupted.
+  // The offscreen document stays alive across downloads, so without this
+  // each Blob URL would pin its underlying buffer in memory forever.
   const listener = (delta) => {
     if (delta.id !== downloadId) return;
     if (delta.state?.current === 'complete' || delta.state?.current === 'interrupted') {
       chrome.downloads.onChanged.removeListener(listener);
-      // Asking the offscreen to revoke the URL would be ideal; we keep the
-      // doc alive (single shared instance) so it naturally goes away when
-      // the extension reloads.
+      chrome.runtime
+        .sendMessage({ type: MSG.REVOKE_BLOB, payload: { blobUrl } })
+        .catch(() => {
+          // Offscreen may have closed; nothing to revoke.
+        });
     }
   };
   chrome.downloads.onChanged.addListener(listener);

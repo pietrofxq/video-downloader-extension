@@ -53,7 +53,9 @@ function entryBadges(entry) {
   const kind = KIND_LABELS[entry.kind] || entry.kind;
   if (kind) out.push(kind);
   if (entry.parseError) out.push('manifest unavailable');
-  // v0.6+ will add encryption / DRM badges parsed from segments + ContentProtection.
+  // v1.1 will add encryption / DRM badges when DASH ContentProtection lands.
+  // v0.6's HLS pipeline handles AES-128 at the segment level inside the
+  // offscreen orchestrator — it doesn't surface on the entry, by design.
   return out;
 }
 

@@ -12,6 +12,20 @@ import { downloadHlsAsTs } from './downloader.js';
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return false;
+
+  if (msg.type === MSG.REVOKE_BLOB) {
+    const url = msg.payload?.blobUrl;
+    if (typeof url === 'string') {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // ignore
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   // RUN_DOWNLOAD is the SW→offscreen kickoff. The popup→SW message uses
   // START_DOWNLOAD; we deliberately don't listen for that here so the
   // chrome.runtime.sendMessage broadcast doesn't cross-fire.

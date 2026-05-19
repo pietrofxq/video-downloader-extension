@@ -1,5 +1,4 @@
 import { Parser } from 'm3u8-parser';
-import { parseManifest } from '../lib/m3u8.js';
 import { runWithConcurrency } from '../lib/concurrency.js';
 import { uint8ArrayToBase64, base64ToUint8Array } from '../lib/base64.js';
 import {
@@ -40,20 +39,16 @@ const SEGMENT_CONCURRENCY = 4;
 export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
   const { requestId, variantUrl, tabId, frameId, headers, filename } = req;
 
-  // 1. Fetch + parse the chosen variant playlist.
+  // 1. Fetch + parse the chosen variant playlist. Single-pass parser does
+  //    #EXTM3U validation, master detection, and segment extraction.
   const playlistText = await fetchText(proxyFetch, { tabId, frameId, url: variantUrl, headers });
-  const parsed = safeParse(playlistText, variantUrl);
+  const { isMaster, segments } = parsePlaylist(playlistText, variantUrl);
 
-  // We expect a media playlist with segments at this point.
-  if (parsed.isMaster) {
+  if (isMaster) {
     throw new UnsupportedFormatError(
       'Expected a media playlist (variant) but got a master. Pick a quality and retry.',
     );
   }
-
-  // Re-parse to extract segments via m3u8-parser's full output (parseManifest
-  // currently returns segmentCount only; we need URIs + keys here).
-  const segments = extractSegments(playlistText, variantUrl);
   if (segments.length === 0) {
     throw new ManifestParseError('Variant playlist contained no segments.');
   }
@@ -101,8 +96,12 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
     }
     const cryptoKey = await getCryptoKey(seg.keyUrl);
     if (!cryptoKey) {
-      // KEY=NONE explicitly — pass through.
-      return cipher;
+      // Encrypted segment with no resolvable key URL is a manifest defect.
+      // Fail loud rather than silently returning cipher bytes that would
+      // produce a broken file.
+      throw new DecryptionError(
+        `segment ${seg.sequence} is marked encrypted but has no resolvable key URL`,
+      );
     }
     const iv = seg.iv ?? ivFromSequence(seg.sequence);
     let plain;
@@ -139,28 +138,27 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
 
 // ---------- helpers ----------
 
-function safeParse(text, baseUrl) {
-  try {
-    return parseManifest(text, baseUrl);
-  } catch (err) {
-    throw new ManifestParseError(err?.message ?? String(err));
-  }
-}
-
 /**
- * Use m3u8-parser directly to get per-segment URIs, sequence numbers, and
- * key info. lib/m3u8.js exposes a more curated shape (variants + alternates);
- * the download pipeline needs the raw segment list.
+ * Single-pass parse for the download pipeline. Validates the manifest is
+ * HLS, detects master vs media, and extracts per-segment URIs + key info.
+ * lib/m3u8.js exposes a more curated shape (variants + alternates) for
+ * the popup; this is the raw segment list we need to drive decryption.
  */
-function extractSegments(text, baseUrl) {
+function parsePlaylist(text, baseUrl) {
+  if (typeof text !== 'string' || !text.trim().startsWith('#EXTM3U')) {
+    throw new ManifestParseError('Not an HLS manifest (missing #EXTM3U)');
+  }
   const parser = new Parser();
   parser.push(text);
   parser.end();
   const m = parser.manifest ?? {};
+  const playlists = Array.isArray(m.playlists) ? m.playlists : [];
+  if (playlists.length > 0) {
+    return { isMaster: true, segments: [] };
+  }
   const segs = Array.isArray(m.segments) ? m.segments : [];
   const startSeq = typeof m.mediaSequence === 'number' ? m.mediaSequence : 0;
-  return segs.map((seg, i) => {
-    const sequence = typeof seg.timeline === 'number' ? seg.timeline : startSeq + i;
+  const segments = segs.map((seg, i) => {
     let url;
     try {
       url = new URL(seg.uri ?? '', baseUrl).toString();
@@ -179,12 +177,17 @@ function extractSegments(text, baseUrl) {
     }
     return {
       url,
-      sequence,
+      // mediaSequence + array index per RFC 8216 §6.2.2. m3u8-parser's
+      // seg.timeline is the discontinuity counter (always 0 on continuous
+      // playlists) — using it would feed wrong IVs into every segment
+      // after the first on streams without EXT-X-KEY:IV=.
+      sequence: startSeq + i,
       encrypted,
       keyUrl,
       iv: toUint8(key?.iv),
     };
   });
+  return { isMaster: false, segments };
 }
 
 async function fetchText(proxyFetch, { tabId, frameId, url, headers }) {
@@ -208,7 +211,10 @@ async function fetchArrayBuffer(proxyFetch, { tabId, frameId, url, headers }) {
 function throwFromReply(reply, url) {
   const status = reply?.status ?? 0;
   const message = reply?.error ?? `proxy fetch failed for ${url}`;
-  if (status === 403 || /\b403\b/.test(message) || /token/i.test(message)) {
+  // Status check only — the prior substring regex misclassified any URL
+  // whose path contained "token" (e.g. /token-validation-error.png) or
+  // "403" (e.g. a 404 on a path with "403" in it).
+  if (status === 403) {
     throw new TokenExpiredError(message);
   }
   throw new Error(message);
