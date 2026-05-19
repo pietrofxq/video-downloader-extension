@@ -1,0 +1,159 @@
+// Cross-context message protocol. The `MSG` constants stay runtime
+// values (the switch statements in every context use them as cases);
+// the discriminated union below names each payload shape so a handler
+// that switches on `msg.type` narrows to the right payload without
+// any `as`-casts.
+//
+// Adding a new message:
+//   1. Append to MSG below.
+//   2. Add a corresponding interface (named <Verb>Message) extending
+//      `MessageBase<typeof MSG.NAME>` with its payload field.
+//   3. Add the new interface to ExtensionMessage's union.
+
+import type {
+  DownloadOutcome,
+  DownloadRequest,
+  DownloadState,
+  MediaKind,
+  PageMeta,
+} from './types.ts';
+
+export const MSG = Object.freeze({
+  PING: 'PING',
+  MEDIA_URL_DETECTED: 'MEDIA_URL_DETECTED',
+  MANIFEST_BODY: 'MANIFEST_BODY',
+  PAGE_META: 'PAGE_META',
+  GET_TAB_STATE: 'GET_TAB_STATE',
+  TAB_STATE_UPDATED: 'TAB_STATE_UPDATED',
+  START_DOWNLOAD: 'START_DOWNLOAD',
+  RUN_DOWNLOAD: 'RUN_DOWNLOAD',
+  DOWNLOAD_PROGRESS: 'DOWNLOAD_PROGRESS',
+  DOWNLOAD_DONE: 'DOWNLOAD_DONE',
+  DOWNLOAD_ERROR: 'DOWNLOAD_ERROR',
+  PROXY_FETCH: 'PROXY_FETCH',
+  REVOKE_BLOB: 'REVOKE_BLOB',
+  SHOW_IN_FOLDER: 'SHOW_IN_FOLDER',
+} as const);
+
+export type MessageType = (typeof MSG)[keyof typeof MSG];
+
+interface MessageBase<T extends MessageType> {
+  type: T;
+  requestId?: string;
+}
+
+// ---------- discriminated payloads ----------
+
+export interface PingMessage extends MessageBase<typeof MSG.PING> {
+  payload?: { context?: string };
+}
+
+export interface MediaUrlDetectedMessage extends MessageBase<typeof MSG.MEDIA_URL_DETECTED> {
+  payload: {
+    url: string;
+    /** Optional — SW falls back to classifyUrl if absent. */
+    kind?: MediaKind;
+    headers?: Record<string, string>;
+    /** Subordinate source tag — 'fetch', 'xhr', 'page', etc. */
+    source?: string;
+  };
+}
+
+export interface ManifestBodyMessage extends MessageBase<typeof MSG.MANIFEST_BODY> {
+  payload: { url: string; text: string };
+}
+
+export interface PageMetaMessage extends MessageBase<typeof MSG.PAGE_META> {
+  payload: { adapterId: string; meta: PageMeta };
+}
+
+export interface GetTabStateMessage extends MessageBase<typeof MSG.GET_TAB_STATE> {
+  payload?: { tabId?: number };
+}
+
+export interface TabStateUpdatedMessage extends MessageBase<typeof MSG.TAB_STATE_UPDATED> {
+  payload: { tabId: number };
+}
+
+export interface StartDownloadMessage extends MessageBase<typeof MSG.START_DOWNLOAD> {
+  payload: { mediaId: string; variantUrl?: string };
+}
+
+export interface RunDownloadMessage extends MessageBase<typeof MSG.RUN_DOWNLOAD> {
+  payload: DownloadRequest;
+}
+
+export interface DownloadProgressMessage extends MessageBase<typeof MSG.DOWNLOAD_PROGRESS> {
+  payload: {
+    requestId: string;
+    stage: 'fetch' | 'decrypt' | 'remux';
+    current: number;
+    total: number;
+  };
+}
+
+export interface DownloadDoneMessage extends MessageBase<typeof MSG.DOWNLOAD_DONE> {
+  payload: DownloadOutcome;
+}
+
+export interface DownloadErrorMessage extends MessageBase<typeof MSG.DOWNLOAD_ERROR> {
+  payload: { requestId: string; code: string; message: string };
+}
+
+export interface ProxyFetchMessage extends MessageBase<typeof MSG.PROXY_FETCH> {
+  payload: {
+    tabId?: number;
+    frameId?: number;
+    url: string;
+    headers?: Record<string, string>;
+    responseType: 'text' | 'arrayBuffer';
+  };
+}
+
+export interface RevokeBlobMessage extends MessageBase<typeof MSG.REVOKE_BLOB> {
+  payload: { blobUrl: string };
+}
+
+export interface ShowInFolderMessage extends MessageBase<typeof MSG.SHOW_IN_FOLDER> {
+  payload: { downloadId: number };
+}
+
+export type ExtensionMessage =
+  | PingMessage
+  | MediaUrlDetectedMessage
+  | ManifestBodyMessage
+  | PageMetaMessage
+  | GetTabStateMessage
+  | TabStateUpdatedMessage
+  | StartDownloadMessage
+  | RunDownloadMessage
+  | DownloadProgressMessage
+  | DownloadDoneMessage
+  | DownloadErrorMessage
+  | ProxyFetchMessage
+  | RevokeBlobMessage
+  | ShowInFolderMessage;
+
+// ---------- popup ↔ SW port wire ----------
+//
+// Distinct from the runtime.sendMessage protocol — the popup keeps a
+// long-lived port for state pushes. The shapes are listed here so popup
+// + SW agree on the wire format.
+
+export type PortMessageFromPopup = { type: 'SUBSCRIBE'; tabId: number | null };
+
+export type PortMessageFromSW =
+  | { type: 'STATE'; state: { entries: Array<import('./types.ts').MediaEntry> } }
+  | { type: 'DOWNLOAD_STATE'; state: DownloadState };
+
+// ---------- helpers ----------
+
+export function envelope<T extends MessageType>(
+  type: T,
+  payload: object = {},
+  requestId?: string,
+): { type: T; payload: object; requestId?: string } {
+  const msg: { type: T; payload: object; requestId?: string } = { type, payload };
+  if (requestId !== undefined) msg.requestId = requestId;
+  return msg;
+}
