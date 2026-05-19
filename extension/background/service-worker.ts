@@ -510,6 +510,15 @@ async function handleStartDownload(payload: {
   const requestId = crypto.randomUUID();
   const finalVariantUrl = variantUrl && /^https?:/.test(variantUrl) ? variantUrl : entry.url;
 
+  const runPayload: RunPayload = {
+    requestId,
+    variantUrl: finalVariantUrl,
+    tabId: entryTabId,
+    frameId: entry.frameId ?? 0,
+    headers: entry.headers,
+    filename,
+  };
+
   // Seed the per-request state BEFORE forwarding to the offscreen, so the
   // first DOWNLOAD_PROGRESS message can patch it instead of creating a
   // race-window where the popup sees progress but no row state.
@@ -527,21 +536,7 @@ async function handleStartDownload(payload: {
   broadcastDownloadState(downloadStates.get(requestId));
 
   await ensureOffscreen();
-  // SW → offscreen uses RUN_DOWNLOAD so it doesn't collide with the
-  // popup→SW START_DOWNLOAD message on the broadcast bus.
-  void chrome.runtime
-    .sendMessage({
-      type: MSG.RUN_DOWNLOAD,
-      payload: {
-        requestId,
-        variantUrl: finalVariantUrl,
-        tabId: entryTabId,
-        frameId: entry.frameId ?? 0,
-        headers: entry.headers,
-        filename,
-      },
-    })
-    .catch((err) => log.warn('forward RUN_DOWNLOAD to offscreen failed', err));
+  enqueueOrStart(runPayload);
 
   log.info('download started', {
     requestId,
@@ -550,8 +545,72 @@ async function handleStartDownload(payload: {
     frameId: entry.frameId ?? 0,
     adapter: entry.adapterId,
     filename: `${filename}.mp4`,
+    queued: activeRequestId !== requestId,
   });
   return { requestId, filename: `${filename}.mp4` };
+}
+
+// ---------- download queue ----------
+//
+// Serialize downloads: only one RUN_DOWNLOAD lives in the offscreen at
+// a time. Subsequent START_DOWNLOAD requests are seeded in the SW state
+// with status 'queued' (popup shows a "Queued" pill) and start when the
+// active one reaches a terminal state.
+//
+// In-memory only; on SW restart the offscreen-running download is lost
+// regardless. The queue carries the verbatim RUN_DOWNLOAD payload so
+// advancement is a one-line resend.
+
+interface RunPayload {
+  requestId: string;
+  variantUrl: string;
+  tabId: number;
+  frameId: number;
+  headers?: Record<string, string>;
+  filename: string;
+}
+
+let activeRequestId: string | null = null;
+const downloadQueue: RunPayload[] = [];
+
+function enqueueOrStart(run: RunPayload): void {
+  if (activeRequestId === null) {
+    activeRequestId = run.requestId;
+    runInOffscreen(run);
+    return;
+  }
+  // Someone's already downloading. Park this one behind them.
+  setDownloadState(run.requestId, { status: 'queued' });
+  downloadQueue.push(run);
+}
+
+function runInOffscreen(run: RunPayload): void {
+  // SW → offscreen uses RUN_DOWNLOAD so it doesn't collide with the
+  // popup→SW START_DOWNLOAD message on the broadcast bus.
+  void chrome.runtime
+    .sendMessage({ type: MSG.RUN_DOWNLOAD, payload: run })
+    .catch((err) => log.warn('forward RUN_DOWNLOAD to offscreen failed', err));
+}
+
+// Called when the active download reaches a terminal status (saved /
+// error / canceled). Clears the active slot and starts the next queued
+// run, if any.
+function advanceQueue(finishedRequestId: string): void {
+  if (activeRequestId !== finishedRequestId) return;
+  activeRequestId = null;
+  const next = downloadQueue.shift();
+  if (!next) return;
+  activeRequestId = next.requestId;
+  // Promote 'queued' → 'pending' so the popup row repaints with the
+  // initial progress UI before the offscreen's first DOWNLOAD_PROGRESS
+  // lands.
+  setDownloadState(next.requestId, {
+    status: 'pending',
+    stage: null,
+    current: 0,
+    total: 0,
+  });
+  runInOffscreen(next);
 }
 
 interface ProxyFetchPayload {
@@ -654,17 +713,32 @@ function handleDownloadError(payload: unknown): void {
     errorCode: typeof p.code === 'string' ? p.code : 'Error',
     errorMessage: typeof p.message === 'string' ? p.message : '',
   });
+  advanceQueue(p.requestId);
 }
 
 // Mark the SW state 'canceled' synchronously (so the popup's row flips
-// instantly) and forward the cancel to the offscreen so the in-flight
-// AbortController fires. Idempotent on already-final states.
+// instantly) and either forward the cancel to the offscreen (if the
+// request was active) or drop it from the queue (if it hadn't started
+// yet). Idempotent on already-final states.
 function cancelDownload(requestId: string): void {
   const state = downloadStates.get(requestId);
   if (!state) return;
   if (state.status === 'saved' || state.status === 'error' || state.status === 'canceled') {
     return;
   }
+  // Queued request: just remove it from the queue. The offscreen never
+  // started it, so there's nothing to abort.
+  if (state.status === 'queued') {
+    const idx = downloadQueue.findIndex((r) => r.requestId === requestId);
+    if (idx !== -1) downloadQueue.splice(idx, 1);
+    setDownloadState(requestId, {
+      status: 'canceled',
+      errorCode: 'Canceled',
+      errorMessage: 'canceled by user',
+    });
+    return;
+  }
+  // Active (pending / progress) request: transition + tell the offscreen.
   setDownloadState(requestId, {
     status: 'canceled',
     errorCode: 'Canceled',
@@ -673,6 +747,7 @@ function cancelDownload(requestId: string): void {
   chrome.runtime.sendMessage({ type: MSG.CANCEL_DOWNLOAD, payload: { requestId } }).catch(() => {
     // offscreen may be down; nothing to abort.
   });
+  advanceQueue(requestId);
 }
 
 async function handleDownloadDone(payload: unknown): Promise<void> {
@@ -706,6 +781,7 @@ async function handleDownloadDone(payload: unknown): Promise<void> {
       filename,
       bytes: typeof p.bytes === 'number' ? p.bytes : 0,
     });
+    advanceQueue(requestId);
   }
   // Revoke the offscreen Blob URL once the download lands or is interrupted.
   // The offscreen document stays alive across downloads, so without this
@@ -726,6 +802,11 @@ function clearDownloadStatesForTab(tabId: number): void {
   for (const [requestId, state] of downloadStates) {
     if (state.tabId === tabId) downloadStates.delete(requestId);
   }
+  // Also drop any queued runs for this tab so they don't fire later;
+  // their state entries are already gone above.
+  for (let i = downloadQueue.length - 1; i >= 0; i -= 1) {
+    if (downloadQueue[i].tabId === tabId) downloadQueue.splice(i, 1);
+  }
 }
 
 // Drop any cached DownloadState for this mediaId across all tabs and
@@ -738,6 +819,14 @@ function dismissDownloadStatesForMedia(mediaId: string): void {
       downloadStates.delete(requestId);
       dismissedTabIds.add(state.tabId);
     }
+  }
+  // If a queued run for this mediaId hasn't started yet, drop it too —
+  // otherwise the dismiss would clear the visible state while the run
+  // fires later and re-creates a new entry.
+  for (let i = downloadQueue.length - 1; i >= 0; i -= 1) {
+    const run = downloadQueue[i];
+    const state = downloadStates.get(run.requestId);
+    if (!state || state.mediaId === mediaId) downloadQueue.splice(i, 1);
   }
   if (dismissedTabIds.size === 0) return;
   for (const [port, info] of popupPorts) {

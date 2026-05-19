@@ -464,6 +464,27 @@ body {
   letter-spacing: 0.01em;
 }
 
+.queued-pill {
+  display: inline-flex;
+  align-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  letter-spacing: 0.01em;
+}
+
+.queued-hint {
+  flex: 1;
+  font-size: 11px;
+  color: var(--muted-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .show-in-folder,
 .dismiss-download {
   background: transparent;

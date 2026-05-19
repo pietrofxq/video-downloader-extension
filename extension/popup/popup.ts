@@ -220,6 +220,16 @@ function renderActionForDownload(state: DownloadState): string {
         </button>
       </div>`;
   }
+  if (state.status === 'queued') {
+    return `
+      <div class="download-result queued">
+        <span class="queued-pill">Queued</span>
+        <span class="queued-hint">waiting for an earlier download</span>
+        <button type="button" class="cancel-download" data-request-id="${escapeHtml(state.requestId)}" title="Cancel">
+          &#x2715;
+        </button>
+      </div>`;
+  }
   // pending / progress
   const total = state.total > 0 ? state.total : 0;
   const current = state.current > 0 ? state.current : 0;
