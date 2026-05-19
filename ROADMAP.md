@@ -261,27 +261,18 @@ Goal: close correctness holes in the current HLS-to-MP4 path before adding more 
 
 Goal: migrate before the adapter/message/download APIs grow further, so new features land on typed contracts instead of loose JSDoc.
 
-- [ ] Add `typescript`, Chrome extension types, and `tsconfig.json` targeting Chrome 120 + ES2022. Start with `allowJs`/`checkJs` if needed, but the milestone is not complete until source modules are `.ts`.
-- [ ] Add scripts:
+- [x] Add `typescript`, Chrome extension types, and `tsconfig.json` targeting Chrome 120 + ES2022.
+- [x] Add scripts:
   - `npm run typecheck`
   - `npm run check` = format check + lint + typecheck + tests + build
-- [ ] Update esbuild to accept `.ts` entry points and keep content scripts bundled as IIFEs.
-- [ ] Define shared domain types:
-  - `MediaKind`
-  - `MediaEntry`
-  - `ParsedHlsManifest`, `HlsVariant`, `HlsAlternate`
-  - `DownloadRequest`, `DownloadOutcome`, `DownloadState`
-  - `Adapter`, `AdapterMeta`, `AdapterId`
-- [ ] Replace ad-hoc message payloads with discriminated unions keyed by `MSG.*`. Require exhaustive handling in the service worker, popup, offscreen document, and content scripts.
-- [ ] Convert low-risk shared modules first: `lib/errors`, `lib/base64`, `lib/sanitize-filename`, `lib/log`, `lib/media-detection`, `lib/m3u8`, `lib/concurrency`, `lib/media-store`.
-- [ ] Convert adapters next and make the adapter contract a real exported TypeScript interface. Adapter implementations should type `matches`, `scrapePageMeta`, `observe`, `deriveFilename`, and `transformHeaders`.
-- [ ] Convert runtime contexts last: service worker, offscreen, popup, page content, frame content, MAIN-world hooks.
-- [ ] Turn on stricter flags in phases:
-  - `strict`
-  - `noImplicitReturns`
-  - `noFallthroughCasesInSwitch`
-  - `noUncheckedIndexedAccess` once the MP4 box walkers are typed cleanly
-- [ ] Keep tests close to converted modules and add compile-time assertions for message and adapter shapes.
+- [x] Update esbuild to accept `.ts` entry points and keep content scripts bundled as IIFEs. (build.mjs resolves each entry to `.ts` first then `.js`; output filenames stay `.js` since the manifest references them by that name.)
+- [x] Define shared domain types in `extension/lib/types.ts`: `MediaKind`, `MediaEntry`, `PageMeta`, `ParsedHlsManifest`, `HlsVariant`, `HlsAlternate`, `DownloadRequest`, `DownloadOutcome`, `DownloadStatus`, `DownloadStage`, `DownloadState`, `AdapterId`, `Adapter`.
+- [x] Replace ad-hoc message payloads with discriminated unions keyed by `MSG.*` (`extension/lib/messages.ts`). Each handler switches on `msg.type` and TS narrows to the right payload — no `as`-casts at receive sites.
+- [x] Convert low-risk shared modules: `lib/errors`, `lib/base64`, `lib/sanitize-filename`, `lib/log`, `lib/media-detection`, `lib/m3u8`, `lib/manifest-fetch`, `lib/concurrency`, `lib/media-store`, `lib/entry-filter`, `lib/dom-utils`.
+- [x] Convert adapters with the exported `Adapter` interface from `lib/types.ts`. Implementations type all five method members.
+- [x] Convert runtime contexts: service-worker, offscreen + downloader + hls-decrypt + remux, popup, page-content + frame-content + main-world-hooks.
+- [x] Strict flags on: `strict: true`, `noImplicitReturns: true`, `noFallthroughCasesInSwitch: true`. (`noUncheckedIndexedAccess` deferred — the MP4 box walkers in remux.ts read indexed `buf[off]` heavily and the flag would force null-guards on every byte; revisit when those walkers get refactored into a tighter API.)
+- [x] All 13 test files converted to `.ts` and run against the typed modules.
 
 **Ship criterion:** all extension source is TypeScript, `npm run check` is green, and future adapter/message/download changes require typed contracts.
 
