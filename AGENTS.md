@@ -236,7 +236,7 @@ mux.js was built for `SourceBuffer.appendBuffer()` — it expects the player to 
 - Don't store signed tokens in `chrome.storage` longer than necessary. They're bearer credentials.
 - Don't add a backend or hosted service. The extension must work fully offline (apart from the obvious downloads from the target CDN).
 - Don't capture URLs from non-http(s) frames (extension pages, devtools, view-source).
-- Don't ship adapters for sites whose ToS unambiguously forbid downloads (e.g. YouTube). Stick to sites where there's a legitimate user-owns-the-content use case.
+- Site adapters may target any site where the user has a legitimate download/use case, including YouTube. Keep the hard boundaries above: no DRM decryption, no backend service, no telemetry, and no site-specific logic outside `extension/adapters/`.
 
 ---
 

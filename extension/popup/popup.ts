@@ -2,16 +2,18 @@ import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { log, redactUrl } from '../lib/log.js';
 import { MSG } from '../lib/messages.js';
+import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
+import type { PortMessageFromSW } from '../lib/messages.js';
 
-const $content = document.getElementById('content');
-const $footer = document.getElementById('footer');
+const $content = document.getElementById('content')!;
+const $footer = document.getElementById('footer')!;
 const $gear = document.getElementById('open-options');
 
 $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
 
 // ---------- helpers ----------
 
-function safeHost(url) {
+function safeHost(url: string): string {
   try {
     return new URL(url).host;
   } catch {
@@ -19,7 +21,7 @@ function safeHost(url) {
   }
 }
 
-function basenameFromUrl(url) {
+function basenameFromUrl(url: string): string {
   try {
     const u = new URL(url);
     return u.pathname.split('/').filter(Boolean).pop() || u.host;
@@ -28,38 +30,35 @@ function basenameFromUrl(url) {
   }
 }
 
-const KIND_LABELS = {
+const KIND_LABELS: Record<string, string> = {
   hls: 'HLS',
   dash: 'DASH',
   progressive: 'MP4/WebM',
 };
 
-function entryTitle(entry) {
+function entryTitle(entry: MediaEntry): string {
   const m = entry.meta ?? {};
   return m.lessonTitle || m.title || m.ogTitle || m.ogVideoTitle || basenameFromUrl(entry.url);
 }
 
-function entrySection(entry) {
+function entrySection(entry: MediaEntry): string {
   const m = entry.meta ?? {};
   return m.sectionTitle || m.ogSiteName || safeHost(entry.pageUrl) || safeHost(entry.url);
 }
 
-function entryFilename(entry) {
+function entryFilename(entry: MediaEntry): string {
   return entry.meta?.filenameHint || basenameFromUrl(entry.url);
 }
 
-function entryBadges(entry) {
-  const out = [];
+function entryBadges(entry: MediaEntry): string[] {
+  const out: string[] = [];
   const kind = KIND_LABELS[entry.kind] || entry.kind;
   if (kind) out.push(kind);
   if (entry.parseError) out.push('manifest unavailable');
-  // v1.1 will add encryption / DRM badges when DASH ContentProtection lands.
-  // v0.6's HLS pipeline handles AES-128 at the segment level inside the
-  // offscreen orchestrator — it doesn't surface on the entry, by design.
   return out;
 }
 
-function formatVariant(v) {
+function formatVariant(v: HlsVariant): string {
   const resPart = v.resolution?.includes('x')
     ? `${v.resolution.split('x')[1]}p`
     : v.resolution || '';
@@ -68,7 +67,7 @@ function formatVariant(v) {
   return resPart || bwPart || 'variant';
 }
 
-function qualityOptionsHtml(entry) {
+function qualityOptionsHtml(entry: MediaEntry): string {
   if (entry.parseError) {
     return '<option value="auto">Manifest unavailable</option>';
   }
@@ -100,7 +99,7 @@ function renderEmpty() {
 // Friendly error messages for each typed error from lib/errors.js. The
 // SW forwards err.name (e.g. "TokenExpiredError") as `errorCode`; the
 // popup maps it here so future error types only need one tweak.
-const ERROR_MESSAGES = {
+const ERROR_MESSAGES: Record<string, string> = {
   TokenExpiredError: 'Token expired. Reload the page and try again.',
   ManifestParseError: "Couldn't read the video manifest.",
   DecryptionError: 'Decryption failed. Try reloading the page.',
@@ -109,15 +108,15 @@ const ERROR_MESSAGES = {
   UnsupportedFormatError: 'Unsupported stream format.',
 };
 
-function friendlyErrorMessage(state) {
+function friendlyErrorMessage(state: DownloadState): string {
   return (
-    ERROR_MESSAGES[state.errorCode] ||
+    (state.errorCode && ERROR_MESSAGES[state.errorCode]) ||
     state.errorMessage ||
     'Download failed. Check the console for details.'
   );
 }
 
-function stageLabel(stage) {
+function stageLabel(stage: DownloadStage): string {
   switch (stage) {
     case 'fetch':
       return 'fetching';
@@ -130,7 +129,7 @@ function stageLabel(stage) {
   }
 }
 
-function renderActionForDownload(state) {
+function renderActionForDownload(state: DownloadState): string {
   if (state.status === 'saved') {
     return `
       <div class="download-result saved">
@@ -160,7 +159,7 @@ function renderActionForDownload(state) {
     </div>`;
 }
 
-function renderRow(entry) {
+function renderRow(entry: MediaEntry): string {
   const title = entryTitle(entry);
   const section = entrySection(entry);
   const filename = entryFilename(entry);
@@ -176,7 +175,7 @@ function renderRow(entry) {
   const isReady =
     !!entry.parseError === false &&
     ((Array.isArray(entry.variants) && entry.variants.length > 0) || entry.isMaster === false);
-  let action;
+  let action: string;
   if (isDrm) {
     action =
       '<span class="drm-label" title="Encrypted with a DRM system the extension cannot decrypt.">DRM-protected</span>';
@@ -213,35 +212,39 @@ function renderRow(entry) {
   `;
 }
 
+interface TabStateMsg {
+  entries: MediaEntry[];
+}
+
 // Map<id, MediaEntry> for O(1) lookup from the delegated click handler.
-let entriesById = new Map();
+let entriesById = new Map<string, MediaEntry>();
 
 // Map<mediaId, DownloadState>. Populated by DOWNLOAD_STATE messages from
 // the SW. `renderRow` consults this Map to swap the Download button for a
 // progress bar / saved pill / error label as the state machine advances.
-const downloadsByMediaId = new Map();
+const downloadsByMediaId = new Map<string, DownloadState>();
 
 // Last tab state we rendered. DOWNLOAD_STATE arrives independently from
 // STATE — when only a download update lands we still need to redraw the
 // same entry list, so we keep a reference and re-call render() with it.
-let lastTabState = { entries: [] };
+let lastTabState: TabStateMsg = { entries: [] };
 
 // Preserve user selections in <select> elements across re-renders so a
 // quality pick doesn't get wiped by every push update. Captures by
 // (mediaId, select-class) to handle multiple selects per row in the future.
-function captureSelectState() {
-  const state = new Map();
-  for (const sel of $content.querySelectorAll('.row select')) {
-    const row = sel.closest('.row');
+function captureSelectState(): Map<string, string> {
+  const state = new Map<string, string>();
+  for (const sel of $content.querySelectorAll<HTMLSelectElement>('.row select')) {
+    const row = sel.closest<HTMLElement>('.row');
     const id = row?.dataset.mediaId;
     if (id) state.set(`${id}::${sel.className}`, sel.value);
   }
   return state;
 }
 
-function restoreSelectState(state) {
-  for (const sel of $content.querySelectorAll('.row select')) {
-    const row = sel.closest('.row');
+function restoreSelectState(state: Map<string, string>): void {
+  for (const sel of $content.querySelectorAll<HTMLSelectElement>('.row select')) {
+    const row = sel.closest<HTMLElement>('.row');
     const id = row?.dataset.mediaId;
     if (!id) continue;
     const saved = state.get(`${id}::${sel.className}`);
@@ -257,10 +260,10 @@ function restoreSelectState(state) {
   }
 }
 
-function render(state) {
+function render(state: TabStateMsg | null | undefined): void {
   lastTabState = state ?? { entries: [] };
   const rawEntries = lastTabState.entries ?? [];
-  entriesById = new Map(rawEntries.map((e) => [e.id, e]));
+  entriesById = new Map(rawEntries.map((e) => [e.id, e] as const));
   const visible = filterTopLevel(rawEntries);
   if (visible.length === 0) {
     $content.innerHTML = renderEmpty();
@@ -273,7 +276,7 @@ function render(state) {
   restoreSelectState(selectState);
 }
 
-function applyDownloadState(state) {
+function applyDownloadState(state: DownloadState): void {
   if (!state || typeof state.mediaId !== 'string') return;
   downloadsByMediaId.set(state.mediaId, state);
   // Re-render the current tab state — renderRow consults downloadsByMediaId
@@ -284,9 +287,10 @@ function applyDownloadState(state) {
 
 // Single delegated click listener — no per-button wiring, no reliance on
 // "the latest render's array reference". Lookup via the Map for O(1).
-$content.addEventListener('click', (e) => {
+$content.addEventListener('click', (e: MouseEvent) => {
+  const target = e.target as HTMLElement | null;
   // "Show in folder" on a saved download row.
-  const showBtn = e.target.closest('.show-in-folder');
+  const showBtn = target?.closest<HTMLElement>('.show-in-folder');
   if (showBtn) {
     const downloadId = Number(showBtn.dataset.downloadId);
     if (Number.isFinite(downloadId)) {
@@ -297,9 +301,9 @@ $content.addEventListener('click', (e) => {
     return;
   }
 
-  const btn = e.target.closest('.download');
+  const btn = target?.closest<HTMLButtonElement>('.download');
   if (!btn || btn.disabled) return;
-  const row = btn.closest('.row');
+  const row = btn.closest<HTMLElement>('.row');
   const id = row?.dataset.mediaId;
   if (!id) return;
   const entry = entriesById.get(id);
@@ -307,12 +311,12 @@ $content.addEventListener('click', (e) => {
   // Resolve the chosen variant URL from the row's <select>. A real URL
   // (one of entry.variants[].url) takes precedence; otherwise fall back to
   // the entry's own URL (single-bitrate / unparsed cases).
-  const sel = row.querySelector('.quality');
+  const sel = row.querySelector<HTMLSelectElement>('.quality');
   const chosen = sel?.value;
   // Only fall back to entry.url when this is a known single-bitrate
   // (media) playlist. If the entry is a master without parsed variants,
   // entry.url IS the master URL and the downloader would reject it.
-  let variantUrl;
+  let variantUrl: string;
   if (typeof chosen === 'string' && /^https?:/.test(chosen)) {
     variantUrl = chosen;
   } else if (entry.isMaster === false) {
@@ -344,7 +348,7 @@ $content.addEventListener('click', (e) => {
 
 // ---------- live subscription via SW port ----------
 
-async function activeTabId() {
+async function activeTabId(): Promise<number | null> {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     return tab?.id ?? null;
@@ -354,11 +358,11 @@ async function activeTabId() {
 }
 
 const MAX_RECONNECT_ATTEMPTS = 8;
-let port = null;
-let retryTimer = null;
+let port: chrome.runtime.Port | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retryCount = 0;
 
-function connect(tabId) {
+function connect(tabId: number): void {
   try {
     port = chrome.runtime.connect({ name: 'popup' });
   } catch {
@@ -367,7 +371,8 @@ function connect(tabId) {
     return;
   }
   port.postMessage({ type: 'SUBSCRIBE', tabId });
-  port.onMessage.addListener((msg) => {
+  port.onMessage.addListener((rawMsg: unknown) => {
+    const msg = rawMsg as PortMessageFromSW;
     if (msg?.type === 'STATE') {
       retryCount = 0; // first successful subscription resets the budget
       render(msg.state);
@@ -381,7 +386,7 @@ function connect(tabId) {
   });
 }
 
-function scheduleReconnect(tabId) {
+function scheduleReconnect(tabId: number): void {
   if (retryTimer) return;
   if (retryCount >= MAX_RECONNECT_ATTEMPTS) {
     log.warn('[VDL] popup gave up reconnecting after', MAX_RECONNECT_ATTEMPTS, 'attempts');

@@ -1,7 +1,12 @@
 import { log } from '../lib/log.js';
 import { MSG } from '../lib/messages.js';
 import { pickAdapter, getAdapter } from '../adapters/index.js';
-import { classifyUrl, isPrimary, WEBREQUEST_PATTERNS } from '../lib/media-detection.js';
+import {
+  classifyUrl,
+  isPrimary,
+  WEBREQUEST_PATTERNS,
+  type DetectionKind,
+} from '../lib/media-detection.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { parseManifest } from '../lib/m3u8.js';
 import { fetchManifest } from '../lib/manifest-fetch.js';
@@ -18,6 +23,7 @@ import {
   setAdapterMeta,
   setTabUrl,
 } from '../lib/media-store.js';
+import type { DownloadState, MediaEntry, MediaKind, PageMeta } from '../lib/types.ts';
 
 const BADGE_COLOR = '#ff5d2e';
 
@@ -30,8 +36,8 @@ chrome.runtime.onInstalled.addListener((details) => {
 // Seed the tab-URL cache so detections that race ahead of webNavigation pick
 // up the right pageUrl. Memoized one-shot — handleDetection awaits this so
 // the first wave of webRequest events never sees an empty cache.
-let seedPromise = null;
-function seedTabs() {
+let seedPromise: Promise<void> | null = null;
+function seedTabs(): Promise<void> {
   if (seedPromise) return seedPromise;
   seedPromise = (async () => {
     try {
@@ -54,7 +60,8 @@ seedTabs();
 
 // ---------- Tab lifecycle ----------
 
-const isHttpUrl = (u) => typeof u === 'string' && /^https?:/.test(u);
+const isHttpUrl = (u: string | undefined | null): u is string =>
+  typeof u === 'string' && /^https?:/.test(u);
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!changeInfo.url) {
@@ -81,7 +88,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 // ---------- webRequest observation ----------
 
 chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
+  (details): undefined => {
     if (details.tabId < 0) return; // extension/background requests
     const kind = classifyUrl(details.url);
     if (!kind) return;
@@ -99,7 +106,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 // Re-classify with Content-Type for URLs that don't have a clean extension.
 // Cheap: we only run for URLs already matched by the broad pattern set.
 chrome.webRequest.onHeadersReceived.addListener(
-  (details) => {
+  (details): undefined => {
     if (details.tabId < 0) return;
     const byUrl = classifyUrl(details.url);
     if (byUrl) return; // already handled in onBeforeRequest
@@ -268,13 +275,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ---------- Detection pipeline ----------
 
-async function handleDetection({ url, tabId, frameId, kind, headers, pageUrl, source }) {
+interface DetectionInput {
+  url: string;
+  tabId: number;
+  frameId: number;
+  kind: DetectionKind;
+  headers?: Record<string, string>;
+  pageUrl?: string;
+  source: string;
+}
+
+async function handleDetection({
+  url,
+  tabId,
+  frameId,
+  kind,
+  headers,
+  pageUrl,
+  source,
+}: DetectionInput): Promise<void> {
   // For v0.2 only primary kinds populate the user-visible list. We still log
   // segment/key observations so dev sanity-checks have something to read.
   if (!isPrimary(kind)) {
     log.debug('observed', { kind, url, source });
     return;
   }
+  // isPrimary narrowed kind down to MediaKind ('hls' | 'dash' | 'progressive').
+  const mediaKind = kind as MediaKind;
 
   // Block until the tab-URL cache is populated. Without this, the first wave
   // of webRequest events races ahead of seedTabs() and falls through to the
@@ -297,8 +324,8 @@ async function handleDetection({ url, tabId, frameId, kind, headers, pageUrl, so
   if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
 
   const adapter = pickAdapter(resolvedPageUrl, url);
-  const entry = {
-    kind,
+  const entry: Omit<MediaEntry, 'id'> = {
+    kind: mediaKind,
     url,
     pageUrl: resolvedPageUrl,
     adapterId: adapter.id,
@@ -327,9 +354,9 @@ async function handleDetection({ url, tabId, frameId, kind, headers, pageUrl, so
 
 // ---------- Manifest parsing ----------
 
-const inFlightParses = new Set(); // `${tabId}:${mediaId}` while a parse is running
+const inFlightParses = new Set<string>(); // `${tabId}:${mediaId}` while a parse is running
 
-async function ensureParsed(tabId, entry) {
+async function ensureParsed(tabId: number, entry: MediaEntry): Promise<void> {
   if (entry.variants || entry.parseError) return; // already done or terminally failed
   const key = `${tabId}:${entry.id}`;
   if (inFlightParses.has(key)) return;
@@ -375,9 +402,9 @@ async function ensureParsed(tabId, entry) {
 // ---------- Download orchestration ----------
 
 const OFFSCREEN_URL = chrome.runtime.getURL('offscreen/offscreen.html');
-let ensureOffscreenPromise = null;
+let ensureOffscreenPromise: Promise<void> | null = null;
 
-async function ensureOffscreen() {
+async function ensureOffscreen(): Promise<void> {
   // Memoize while creating; subsequent calls during creation share the
   // promise. After creation completes, future calls find the document
   // already open via getContexts and return cheaply.
@@ -402,11 +429,14 @@ async function ensureOffscreen() {
   return ensureOffscreenPromise;
 }
 
-async function handleStartDownload(payload) {
+async function handleStartDownload(payload: {
+  mediaId: string;
+  variantUrl?: string;
+}): Promise<{ requestId: string; filename: string }> {
   const { mediaId, variantUrl } = payload;
   // Find the MediaEntry across all tabs.
-  let entry = null;
-  let entryTabId = null;
+  let entry: MediaEntry | null = null;
+  let entryTabId: number | null = null;
   const states = popupPortsTabs();
   for (const tabId of states) {
     const s = await getTabState(tabId);
@@ -493,7 +523,21 @@ async function handleStartDownload(payload) {
   return { requestId, filename: `${filename}.mp4` };
 }
 
-async function handleProxyFetch({ tabId, frameId, url, headers, responseType }) {
+interface ProxyFetchPayload {
+  tabId: number;
+  frameId?: number;
+  url: string;
+  headers?: Record<string, string>;
+  responseType: 'text' | 'arrayBuffer';
+}
+
+async function handleProxyFetch({
+  tabId,
+  frameId,
+  url,
+  headers,
+  responseType,
+}: ProxyFetchPayload): Promise<unknown> {
   // Forward to the content script in the target frame. Its fetch goes out
   // with the page's Origin/Referer + cookies, which signed-URL CDNs check.
   try {
@@ -505,7 +549,10 @@ async function handleProxyFetch({ tabId, frameId, url, headers, responseType }) 
     return reply;
   } catch (err) {
     // Frame may have closed / navigated away. Surface as an explicit error.
-    return { ok: false, error: `proxy unreachable: ${err?.message ?? err}` };
+    return {
+      ok: false,
+      error: `proxy unreachable: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 
@@ -524,18 +571,18 @@ async function handleProxyFetch({ tabId, frameId, url, headers, responseType }) 
 // memory — fine because the SW stays warm while a download runs (the
 // offscreen sends a progress message per segment) and because losing
 // the state on SW restart is a cosmetic issue, not a correctness one.
-const downloadStates = new Map();
+const downloadStates = new Map<string, DownloadState>();
 
-function setDownloadState(requestId, patch) {
+function setDownloadState(requestId: string, patch: Partial<DownloadState>): DownloadState | null {
   const prev = downloadStates.get(requestId);
   if (!prev) return null;
-  const next = { ...prev, ...patch, updatedAt: Date.now() };
+  const next: DownloadState = { ...prev, ...patch, updatedAt: Date.now() };
   downloadStates.set(requestId, next);
   broadcastDownloadState(next);
   return next;
 }
 
-function broadcastDownloadState(state) {
+function broadcastDownloadState(state: DownloadState | null | undefined): void {
   if (!state || popupPorts.size === 0) return;
   for (const [port, info] of popupPorts) {
     if (info.tabId !== state.tabId) continue;
@@ -547,50 +594,66 @@ function broadcastDownloadState(state) {
   }
 }
 
-function handleDownloadProgress(payload) {
-  if (!payload || typeof payload.requestId !== 'string') return;
-  const { requestId, stage, current, total } = payload;
-  setDownloadState(requestId, { status: 'progress', stage, current, total });
-}
-
-function handleDownloadError(payload) {
-  if (!payload || typeof payload.requestId !== 'string') return;
-  const { requestId, code, message } = payload;
-  log.warn('download error', { requestId, code, message });
-  setDownloadState(requestId, {
-    status: 'error',
-    errorCode: typeof code === 'string' ? code : 'Error',
-    errorMessage: typeof message === 'string' ? message : '',
+function handleDownloadProgress(payload: unknown): void {
+  if (!payload || typeof payload !== 'object') return;
+  const p = payload as { requestId?: unknown; stage?: unknown; current?: unknown; total?: unknown };
+  if (typeof p.requestId !== 'string') return;
+  setDownloadState(p.requestId, {
+    status: 'progress',
+    stage: p.stage as DownloadState['stage'],
+    current: Number(p.current),
+    total: Number(p.total),
   });
 }
 
-async function handleDownloadDone(payload) {
-  if (!payload || typeof payload.blobUrl !== 'string') return;
-  const blobUrl = payload.blobUrl;
-  const requestId = typeof payload.requestId === 'string' ? payload.requestId : null;
+function handleDownloadError(payload: unknown): void {
+  if (!payload || typeof payload !== 'object') return;
+  const p = payload as { requestId?: unknown; code?: unknown; message?: unknown };
+  if (typeof p.requestId !== 'string') return;
+  log.warn('download error', { requestId: p.requestId, code: p.code, message: p.message });
+  setDownloadState(p.requestId, {
+    status: 'error',
+    errorCode: typeof p.code === 'string' ? p.code : 'Error',
+    errorMessage: typeof p.message === 'string' ? p.message : '',
+  });
+}
+
+async function handleDownloadDone(payload: unknown): Promise<void> {
+  if (!payload || typeof payload !== 'object') return;
+  const p = payload as {
+    blobUrl?: unknown;
+    requestId?: unknown;
+    filename?: unknown;
+    bytes?: unknown;
+    segments?: unknown;
+  };
+  if (typeof p.blobUrl !== 'string' || typeof p.filename !== 'string') return;
+  const blobUrl = p.blobUrl;
+  const filename = p.filename;
+  const requestId = typeof p.requestId === 'string' ? p.requestId : null;
   const downloadId = await chrome.downloads.download({
     url: blobUrl,
-    filename: payload.filename,
+    filename,
     saveAs: false,
   });
   log.info('chrome.downloads accepted', {
     downloadId,
-    filename: payload.filename,
-    bytes: payload.bytes,
-    segments: payload.segments,
+    filename,
+    bytes: p.bytes,
+    segments: p.segments,
   });
   if (requestId) {
     setDownloadState(requestId, {
       status: 'saved',
       downloadId,
-      filename: payload.filename,
-      bytes: payload.bytes ?? 0,
+      filename,
+      bytes: typeof p.bytes === 'number' ? p.bytes : 0,
     });
   }
   // Revoke the offscreen Blob URL once the download lands or is interrupted.
   // The offscreen document stays alive across downloads, so without this
   // each Blob URL would pin its underlying buffer in memory forever.
-  const listener = (delta) => {
+  const listener = (delta: chrome.downloads.DownloadDelta): void => {
     if (delta.id !== downloadId) return;
     if (delta.state?.current === 'complete' || delta.state?.current === 'interrupted') {
       chrome.downloads.onChanged.removeListener(listener);
@@ -602,7 +665,7 @@ async function handleDownloadDone(payload) {
   chrome.downloads.onChanged.addListener(listener);
 }
 
-function clearDownloadStatesForTab(tabId) {
+function clearDownloadStatesForTab(tabId: number): void {
   for (const [requestId, state] of downloadStates) {
     if (state.tabId === tabId) downloadStates.delete(requestId);
   }
@@ -611,15 +674,15 @@ function clearDownloadStatesForTab(tabId) {
 // Helper: enumerate tabIds currently subscribed via popup ports. Cheap
 // fast-path for handleStartDownload (the popup is the only context that
 // can call START_DOWNLOAD, so the active tab is almost always covered).
-function popupPortsTabs() {
-  const out = new Set();
+function popupPortsTabs(): Set<number> {
+  const out = new Set<number>();
   for (const info of popupPorts.values()) {
     if (typeof info.tabId === 'number') out.add(info.tabId);
   }
   return out;
 }
 
-async function listTrackedTabs() {
+async function listTrackedTabs(): Promise<number[]> {
   // chrome.storage.session has the mediaState dump; mining keys is cheaper
   // than maintaining a parallel index for v0.6.
   try {
@@ -630,13 +693,13 @@ async function listTrackedTabs() {
   }
 }
 
-async function entryIsResolved(tabId, mediaId) {
+async function entryIsResolved(tabId: number, mediaId: string): Promise<boolean> {
   const state = await getTabState(tabId);
   const fresh = state.entries.find((e) => e.id === mediaId);
   return !!(fresh && fresh.variants);
 }
 
-async function handleManifestBody(tabId, url, text) {
+async function handleManifestBody(tabId: number, url: string, text: string): Promise<void> {
   await seedTabs();
   const state = await getTabState(tabId);
   const entry = state.entries.find((e) => e.url === url);
@@ -679,7 +742,7 @@ async function handleManifestBody(tabId, url, text) {
   }
 }
 
-async function updateBadge(tabId) {
+async function updateBadge(tabId: number): Promise<void> {
   // Count only top-level (user-visible) entries — what the popup actually
   // renders. Raw entry count is misleading because variants/alternates
   // collapse under their master.
@@ -696,7 +759,7 @@ async function updateBadge(tabId) {
   }
 }
 
-async function handlePageMeta(tabId, adapterId, meta) {
+async function handlePageMeta(tabId: number, adapterId: string, meta: PageMeta): Promise<void> {
   await seedTabs();
   const { changed } = await setAdapterMeta(tabId, adapterId, meta);
   log.info('page meta', { tabId, adapterId, changed, meta });
@@ -756,7 +819,7 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function broadcastTabState(tabId) {
+async function broadcastTabState(tabId: number): Promise<void> {
   if (popupPorts.size === 0) return;
   const state = await getTabState(tabId);
   for (const [port, info] of popupPorts) {

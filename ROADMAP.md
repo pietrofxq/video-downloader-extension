@@ -439,8 +439,11 @@ Goal: adding a new site adapter is a documented, typed, small task.
   - `supportsBatch`
   - `filenameTemplateDefaults`
   - `qualityPreferenceHints`
-- [ ] Pick one additional real-world target (suggested: **generic Video.js detector** - matches any page where `videojs` is on `window` and pulls metadata from the player's data attributes; alternatively **Bunny CDN** or **public Vimeo embeds**) and implement it as `adapters/{name}.ts`.
-- [ ] Add an explicit unsupported-site policy to the adapter SDK. Sites whose terms clearly forbid downloads, including YouTube, should not get download adapters; instead they should match an unsupported-site adapter/guard that explains why the extension will not download from that origin.
+- [ ] Pick one additional real-world target and implement it as `adapters/{name}.ts`. Suggested targets:
+  - **YouTube adapter** - detect YouTube watch/embed pages, extract usable metadata, and route only non-DRM media URLs through the normal adapter/download pipeline.
+  - **Generic Video.js detector** - matches any page where `videojs` is on `window` and pulls metadata from the player's data attributes.
+  - **Bunny CDN** or **public Vimeo embeds**.
+- [ ] Document adapter boundaries in the SDK: adapters may target YouTube and other large platforms, but must still respect the project-wide constraints of no DRM decryption, no backend service, no telemetry, and no site-specific logic outside `extension/adapters/`.
 - [ ] Add an adapter-matching dev tool: in the options page, a "Test URL" field that shows which adapter would match.
 - [ ] Add adapter conformance fixtures covering: `matches`, `scrapePageMeta` on saved HTML, `deriveFilename`, and any capability hints.
 - [ ] Verify: with the new adapter installed, the popup correctly tags streams from that site with the new adapter id and produces a properly named MP4.

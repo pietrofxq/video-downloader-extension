@@ -1,5 +1,15 @@
-import muxjs from 'mux.js';
+import muxjs, { type Transmuxer } from 'mux.js';
 import { RemuxError } from '../lib/errors.js';
+
+export interface RemuxSegment {
+  bytes: Uint8Array;
+  duration: number;
+}
+
+export interface RemuxProgress {
+  done: number;
+  totalSegs: number;
+}
 
 // mux.js writes the OUTPUT MP4 at 90 kHz (the HLS standard movie timescale).
 const HLS_TIMESCALE = 90_000;
@@ -25,23 +35,26 @@ const HLS_TIMESCALE = 90_000;
  * @param {(p: { done: number, totalSegs: number }) => void} [onProgress]
  * @returns {Promise<Uint8Array>}
  */
-export function remuxTsToMp4(segments, onProgress) {
+export function remuxTsToMp4(
+  segments: RemuxSegment[],
+  onProgress?: (p: RemuxProgress) => void,
+): Promise<Uint8Array> {
   if (!Array.isArray(segments) || segments.length === 0) {
     return Promise.reject(new RemuxError('remuxTsToMp4: expected a non-empty segments array'));
   }
-  return new Promise((resolve, reject) => {
-    let transmuxer;
+  return new Promise<Uint8Array>((resolve, reject) => {
+    let transmuxer: Transmuxer;
     try {
       transmuxer = new muxjs.mp4.Transmuxer({ remux: true });
     } catch (err) {
-      reject(new RemuxError(`failed to create transmuxer: ${err?.message ?? err}`));
+      reject(new RemuxError(`failed to create transmuxer: ${errMsg(err)}`));
       return;
     }
 
-    let initSegment = null;
-    const chunks = [];
-    let currentFragment = null;
-    let pendingDone = null;
+    let initSegment: Uint8Array | null = null;
+    const chunks: Uint8Array[] = [];
+    let currentFragment: Uint8Array[] | null = null;
+    let pendingDone: (() => void) | null = null;
     let aborted = false;
     let nextFragmentSequence = 1;
 
@@ -58,7 +71,7 @@ export function remuxTsToMp4(segments, onProgress) {
         }
       } catch (err) {
         aborted = true;
-        reject(new RemuxError(`fragment normalization failed: ${err?.message ?? err}`));
+        reject(new RemuxError(`fragment normalization failed: ${errMsg(err)}`));
       }
     });
 
@@ -72,14 +85,14 @@ export function remuxTsToMp4(segments, onProgress) {
       resolver?.();
     });
 
-    function flushSegment() {
-      return new Promise((res) => {
+    function flushSegment(): Promise<void> {
+      return new Promise<void>((res) => {
         pendingDone = res;
         try {
           transmuxer.flush();
         } catch (err) {
           aborted = true;
-          reject(new RemuxError(`transmuxer flush failed: ${err?.message ?? err}`));
+          reject(new RemuxError(`transmuxer flush failed: ${errMsg(err)}`));
           res();
         }
       });
@@ -101,7 +114,7 @@ export function remuxTsToMp4(segments, onProgress) {
       } catch (err) {
         if (aborted) return;
         aborted = true;
-        reject(new RemuxError(`transmuxer push failed: ${err?.message ?? err}`));
+        reject(new RemuxError(`transmuxer push failed: ${errMsg(err)}`));
         return;
       }
 
@@ -175,14 +188,24 @@ export function remuxTsToMp4(segments, onProgress) {
 // and rewrite each trun.data_offset to point at its payload inside the new
 // combined mdat.
 
-function normalizeMuxjsFragment(data, sequenceNumber) {
+interface MoofMdatPair {
+  moofStart: number;
+  moofEnd: number;
+  mdatStart: number;
+  mdatEnd: number;
+}
+
+function normalizeMuxjsFragment(
+  data: Uint8Array,
+  sequenceNumber: number,
+): { chunks: Uint8Array[]; nextSequence: number } {
   const pairs = readMoofMdatPairs(data);
   if (!pairs || pairs.length === 0) {
     return { chunks: [data], nextSequence: sequenceNumber };
   }
 
-  const trafs = [];
-  const payloads = [];
+  const trafs: Uint8Array[] = [];
+  const payloads: Uint8Array[] = [];
   for (const pair of pairs) {
     const pairTrafs = extractTrafs(data, pair.moofStart + 8, pair.moofEnd);
     if (pairTrafs.length !== 1) {
@@ -206,8 +229,8 @@ function normalizeMuxjsFragment(data, sequenceNumber) {
   return { chunks: [concatUint8([moof, mdat])], nextSequence: sequenceNumber + 1 };
 }
 
-function readMoofMdatPairs(buf) {
-  const pairs = [];
+function readMoofMdatPairs(buf: Uint8Array): MoofMdatPair[] | null {
+  const pairs: MoofMdatPair[] = [];
   let p = 0;
   while (p + 8 <= buf.length) {
     const moofSize = readU32(buf, p);
@@ -232,8 +255,8 @@ function readMoofMdatPairs(buf) {
   return p === buf.length ? pairs : null;
 }
 
-function extractTrafs(buf, start, end) {
-  const trafs = [];
+function extractTrafs(buf: Uint8Array, start: number, end: number): Uint8Array[] {
+  const trafs: Uint8Array[] = [];
   walkBoxes(buf, start, end, (name, bodyStart, bodyEnd) => {
     if (name === 'traf') {
       trafs.push(new Uint8Array(buf.subarray(bodyStart - 8, bodyEnd)));
@@ -242,7 +265,7 @@ function extractTrafs(buf, start, end) {
   return trafs;
 }
 
-function patchTrafTrunDataOffset(traf, dataOffset) {
+function patchTrafTrunDataOffset(traf: Uint8Array, dataOffset: number): void {
   let hasTfhd = false;
   let patched = false;
   walkBoxes(traf, 8, traf.byteLength, (name, bodyStart) => {
@@ -270,13 +293,13 @@ function patchTrafTrunDataOffset(traf, dataOffset) {
   }
 }
 
-function makeMfhd(sequenceNumber) {
+function makeMfhd(sequenceNumber: number): Uint8Array {
   const payload = new Uint8Array(8);
   writeU32(payload, 4, sequenceNumber);
   return makeBox('mfhd', payload);
 }
 
-function makeBox(type, ...payloads) {
+function makeBox(type: string, ...payloads: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(8 + payloads.reduce((sum, payload) => sum + payload.byteLength, 0));
   writeU32(out, 0, out.byteLength);
   for (let i = 0; i < 4; i += 1) out[4 + i] = type.charCodeAt(i);
@@ -288,7 +311,7 @@ function makeBox(type, ...payloads) {
   return out;
 }
 
-function concatUint8(chunks) {
+function concatUint8(chunks: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
   let offset = 0;
   for (const chunk of chunks) {
@@ -318,8 +341,8 @@ function concatUint8(chunks) {
 //
 // All boxes mux.js produces are version 0 (32-bit fields).
 
-function collectTrackTimescales(buf) {
-  const out = new Map(); // trackId -> timescale
+function collectTrackTimescales(buf: Uint8Array): Map<number, number> {
+  const out = new Map<number, number>(); // trackId -> timescale
   // Walk moov → trak → (tkhd → trackId, mdia → mdhd → timescale).
   let i = 0;
   while (i + 8 <= buf.length) {
@@ -335,7 +358,12 @@ function collectTrackTimescales(buf) {
   return out;
 }
 
-function collectFromMoov(buf, start, end, out) {
+function collectFromMoov(
+  buf: Uint8Array,
+  start: number,
+  end: number,
+  out: Map<number, number>,
+): void {
   let i = start;
   while (i + 8 <= end) {
     const size = readU32(buf, i);
@@ -348,7 +376,12 @@ function collectFromMoov(buf, start, end, out) {
   }
 }
 
-function collectFromTrak(buf, start, end, out) {
+function collectFromTrak(
+  buf: Uint8Array,
+  start: number,
+  end: number,
+  out: Map<number, number>,
+): void {
   let trackId = -1;
   let timescale = 0;
   let i = start;
@@ -388,8 +421,11 @@ function collectFromTrak(buf, start, end, out) {
  * @returns {Map<number, number>} per-track total emitted duration in the
  *   track's own (mdhd) timescale.
  */
-function patchMoofTfdtsFromContent(buf, trackTimescales) {
-  const cumulative = new Map(); // trackId -> running tfdt (track timescale)
+function patchMoofTfdtsFromContent(
+  buf: Uint8Array,
+  trackTimescales: Map<number, number>,
+): Map<number, number> {
+  const cumulative = new Map<number, number>(); // trackId -> running tfdt (track timescale)
   let p = 0;
   while (p + 8 <= buf.length) {
     const size = readU32(buf, p);
@@ -403,7 +439,13 @@ function patchMoofTfdtsFromContent(buf, trackTimescales) {
   return cumulative;
 }
 
-function patchMoofTrafs(buf, start, end, cumulative, trackTimescales) {
+function patchMoofTrafs(
+  buf: Uint8Array,
+  start: number,
+  end: number,
+  cumulative: Map<number, number>,
+  trackTimescales: Map<number, number>,
+): void {
   let i = start;
   while (i + 8 <= end) {
     const size = readU32(buf, i);
@@ -416,7 +458,13 @@ function patchMoofTrafs(buf, start, end, cumulative, trackTimescales) {
   }
 }
 
-function patchOneTraf(buf, start, end, cumulative, trackTimescales) {
+function patchOneTraf(
+  buf: Uint8Array,
+  start: number,
+  end: number,
+  cumulative: Map<number, number>,
+  trackTimescales: Map<number, number>,
+): void {
   let trackId = -1;
   let defaultSampleDuration = 0;
   let tfdtAt = -1;
@@ -468,7 +516,12 @@ function patchOneTraf(buf, start, end, cumulative, trackTimescales) {
   }
 }
 
-function sumTrunSampleDurations(buf, start, size, defaultDuration) {
+function sumTrunSampleDurations(
+  buf: Uint8Array,
+  start: number,
+  size: number,
+  defaultDuration: number,
+): number {
   const flags = (buf[start + 1] << 16) | (buf[start + 2] << 8) | buf[start + 3];
   const sampleCount = readU32(buf, start + 4);
   let off = start + 8;
@@ -503,7 +556,11 @@ function sumTrunSampleDurations(buf, start, size, defaultDuration) {
  *
  * We pick the longest track in seconds as the movie duration.
  */
-function patchHeaderDurations(buf, trackTotals, trackTimescales) {
+function patchHeaderDurations(
+  buf: Uint8Array,
+  trackTotals: Map<number, number>,
+  trackTimescales: Map<number, number>,
+): void {
   if (trackTotals.size === 0) return;
   // Find moov + mvhd to read movie timescale.
   let movieTimescale = HLS_TIMESCALE;
@@ -550,7 +607,14 @@ function patchHeaderDurations(buf, trackTotals, trackTimescales) {
   });
 }
 
-function patchTrakBox(buf, start, end, trackTotals, trackTimescales, mvhdDur) {
+function patchTrakBox(
+  buf: Uint8Array,
+  start: number,
+  end: number,
+  trackTotals: Map<number, number>,
+  trackTimescales: Map<number, number>,
+  mvhdDur: number,
+): void {
   let trackId = -1;
   walkBoxes(buf, start, end, (name, bodyStart, bodyEnd) => {
     if (name === 'tkhd') {
@@ -570,7 +634,7 @@ function patchTrakBox(buf, start, end, trackTotals, trackTimescales, mvhdDur) {
 
 // mvhd / mdhd layout: version(1)+flags(3) + creation + modification +
 // timescale(4) + duration(4 or 8). v0 → duration at +16; v1 → +24.
-function writeMvhdOrMdhdDuration(buf, bodyStart, value) {
+function writeMvhdOrMdhdDuration(buf: Uint8Array, bodyStart: number, value: number): void {
   const version = buf[bodyStart];
   if (version === 0) {
     writeU32(buf, bodyStart + 16, value);
@@ -581,7 +645,7 @@ function writeMvhdOrMdhdDuration(buf, bodyStart, value) {
 
 // tkhd layout: version(1)+flags(3) + creation + modification + track_id(4) +
 // reserved(4) + duration(4 or 8). v0 → duration at +20; v1 → +28.
-function writeTkhdDuration(buf, bodyStart, value) {
+function writeTkhdDuration(buf: Uint8Array, bodyStart: number, value: number): void {
   const version = buf[bodyStart];
   if (version === 0) {
     writeU32(buf, bodyStart + 20, value);
@@ -601,7 +665,7 @@ function writeTkhdDuration(buf, bodyStart, value) {
  * We change only the version byte; the on-disk cto bits are unchanged
  * (signed vs unsigned is purely a reader interpretation).
  */
-function promoteSignedCtoTruns(buf) {
+function promoteSignedCtoTruns(buf: Uint8Array): void {
   let p = 0;
   while (p + 8 <= buf.length) {
     const size = readU32(buf, p);
@@ -619,7 +683,7 @@ function promoteSignedCtoTruns(buf) {
   }
 }
 
-function maybePromoteTrun(buf, bodyStart, bodyEnd) {
+function maybePromoteTrun(buf: Uint8Array, bodyStart: number, bodyEnd: number): void {
   const version = buf[bodyStart];
   if (version !== 0) return;
   const flags = (buf[bodyStart + 1] << 16) | (buf[bodyStart + 2] << 8) | buf[bodyStart + 3];
@@ -650,7 +714,9 @@ function maybePromoteTrun(buf, bodyStart, bodyEnd) {
   }
 }
 
-function walkBoxes(buf, start, end, visit) {
+type BoxVisitor = (name: string, bodyStart: number, bodyEnd: number) => void;
+
+function walkBoxes(buf: Uint8Array, start: number, end: number, visit: BoxVisitor): void {
   let i = start;
   while (i + 8 <= end) {
     const size = readU32(buf, i);
@@ -661,30 +727,35 @@ function walkBoxes(buf, start, end, visit) {
   }
 }
 
-function readU32(buf, off) {
+function readU32(buf: Uint8Array, off: number): number {
   return ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
 }
 
-function readName(buf, off) {
+function readName(buf: Uint8Array, off: number): string {
   return String.fromCharCode(buf[off], buf[off + 1], buf[off + 2], buf[off + 3]);
 }
 
-function writeU32(buf, off, val) {
+function writeU32(buf: Uint8Array, off: number, val: number): void {
   buf[off] = (val >>> 24) & 0xff;
   buf[off + 1] = (val >>> 16) & 0xff;
   buf[off + 2] = (val >>> 8) & 0xff;
   buf[off + 3] = val & 0xff;
 }
 
-function writeU24(buf, off, val) {
+function writeU24(buf: Uint8Array, off: number, val: number): void {
   buf[off] = (val >>> 16) & 0xff;
   buf[off + 1] = (val >>> 8) & 0xff;
   buf[off + 2] = val & 0xff;
 }
 
-function writeU64(buf, off, val) {
+function writeU64(buf: Uint8Array, off: number, val: number): void {
   // val ≤ 2^53 — safe as Number for our purposes (max 285 years at 90 kHz).
   const big = BigInt(val);
   writeU32(buf, off, Number((big >> 32n) & 0xffffffffn));
   writeU32(buf, off + 4, Number(big & 0xffffffffn));
+}
+
+function errMsg(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }

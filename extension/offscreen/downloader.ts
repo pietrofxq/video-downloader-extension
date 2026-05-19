@@ -10,35 +10,55 @@ import {
 } from '../lib/errors.js';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
 import { remuxTsToMp4 } from './remux.js';
+import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
 
 const SEGMENT_CONCURRENCY = 4;
 
-/**
- * @typedef {object} DownloadRequest
- * @property {string} requestId
- * @property {string} variantUrl   - chosen variant playlist URL (or media playlist for single-bitrate)
- * @property {number} tabId
- * @property {number} frameId      - frame ID to route proxy fetches to
- * @property {Record<string,string>} [headers]
- * @property {string} filename     - sanitized base name (no extension); orchestrator appends .ts
- */
+// Internal shapes — kept private to this module. DownloadRequest /
+// DownloadOutcome are public (re-exported via lib/types.ts).
 
-/**
- * @typedef {object} DownloadOutcome
- * @property {string} requestId
- * @property {string} blobUrl
- * @property {string} filename
- * @property {number} bytes
- * @property {number} segments
- */
+export interface ProxyFetchPayload {
+  tabId?: number;
+  frameId?: number;
+  url: string;
+  headers?: Record<string, string>;
+  responseType: 'text' | 'arrayBuffer';
+}
 
-/**
- * @param {(payload: object) => Promise<object>} proxyFetch  - text + arrayBuffer fetcher (SW-routed)
- * @param {(progress: { stage: 'fetch'|'decrypt'|'concat', current: number, total: number }) => void} onProgress
- * @param {DownloadRequest} req
- * @returns {Promise<DownloadOutcome>}
- */
-export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
+export interface ProxyFetchReply {
+  ok: boolean;
+  status?: number;
+  body?: string;
+  error?: string;
+}
+
+export type ProxyFetch = (payload: ProxyFetchPayload) => Promise<ProxyFetchReply>;
+
+export interface DownloadProgress {
+  stage: 'fetch' | 'decrypt' | 'remux';
+  current: number;
+  total: number;
+}
+
+interface ParsedSegment {
+  url: string;
+  sequence: number;
+  duration: number;
+  encrypted: boolean;
+  keyUrl: string;
+  iv: Uint8Array | null;
+}
+
+export interface ParsedMediaPlaylist {
+  isMaster: boolean;
+  segments: ParsedSegment[];
+}
+
+export async function downloadHlsAsTs(
+  io: { proxyFetch: ProxyFetch; onProgress: (p: DownloadProgress) => void },
+  req: DownloadRequest,
+): Promise<DownloadOutcome> {
+  const { proxyFetch, onProgress } = io;
   const { requestId, variantUrl, tabId, frameId, headers, filename } = req;
 
   // 1. Fetch + parse the chosen variant playlist. Single-pass parser does
@@ -60,11 +80,11 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
   // 2. Fetch + import the AES-128 key (if any). HLS supports per-segment
   //    key rotation, but in practice (and on Hotmart) one key covers all
   //    segments — we cache by key URL.
-  const keyCache = new Map();
-  async function getCryptoKey(keyUrl) {
+  const keyCache = new Map<string, CryptoKey>();
+  async function getCryptoKey(keyUrl: string): Promise<CryptoKey | null> {
     if (!keyUrl) return null;
-    let cryptoKey = keyCache.get(keyUrl);
-    if (cryptoKey !== undefined) return cryptoKey;
+    const cached = keyCache.get(keyUrl);
+    if (cached !== undefined) return cached;
     const keyBytes = await fetchArrayBuffer(proxyFetch, {
       tabId,
       frameId,
@@ -74,7 +94,7 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
     if (keyBytes.length !== 16) {
       throw new DecryptionError(`AES key at ${keyUrl} was ${keyBytes.length} bytes, expected 16.`);
     }
-    cryptoKey = await importAesKey(keyBytes);
+    const cryptoKey = await importAesKey(keyBytes);
     keyCache.set(keyUrl, cryptoKey);
     return cryptoKey;
   }
@@ -84,40 +104,42 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
   //    + duration for the remux step (mux.js needs per-segment pushes).
   let fetched = 0;
   let decrypted = 0;
-  const tasks = segments.map((seg) => async () => {
-    const cipher = await fetchArrayBuffer(proxyFetch, {
-      tabId,
-      frameId,
-      url: seg.url,
-      headers,
-    });
-    fetched += 1;
-    onProgress({ stage: 'fetch', current: fetched, total });
+  const tasks = segments.map(
+    (seg) => async (): Promise<{ bytes: Uint8Array; duration: number }> => {
+      const cipher = await fetchArrayBuffer(proxyFetch, {
+        tabId,
+        frameId,
+        url: seg.url,
+        headers,
+      });
+      fetched += 1;
+      onProgress({ stage: 'fetch', current: fetched, total });
 
-    let bytes;
-    if (!seg.encrypted) {
-      bytes = cipher;
-    } else {
-      const cryptoKey = await getCryptoKey(seg.keyUrl);
-      if (!cryptoKey) {
-        // Encrypted segment with no resolvable key URL is a manifest defect.
-        throw new DecryptionError(
-          `segment ${seg.sequence} is marked encrypted but has no resolvable key URL`,
-        );
+      let bytes: Uint8Array;
+      if (!seg.encrypted) {
+        bytes = cipher;
+      } else {
+        const cryptoKey = await getCryptoKey(seg.keyUrl);
+        if (!cryptoKey) {
+          // Encrypted segment with no resolvable key URL is a manifest defect.
+          throw new DecryptionError(
+            `segment ${seg.sequence} is marked encrypted but has no resolvable key URL`,
+          );
+        }
+        const iv = seg.iv ?? ivFromSequence(seg.sequence);
+        try {
+          bytes = await decryptSegment(cipher, cryptoKey, iv);
+        } catch (err) {
+          throw new DecryptionError(
+            `decrypt failed for segment ${seg.sequence}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        decrypted += 1;
+        onProgress({ stage: 'decrypt', current: decrypted, total });
       }
-      const iv = seg.iv ?? ivFromSequence(seg.sequence);
-      try {
-        bytes = await decryptSegment(cipher, cryptoKey, iv);
-      } catch (err) {
-        throw new DecryptionError(
-          `decrypt failed for segment ${seg.sequence}: ${err?.message ?? err}`,
-        );
-      }
-      decrypted += 1;
-      onProgress({ stage: 'decrypt', current: decrypted, total });
-    }
-    return { bytes, duration: seg.duration };
-  });
+      return { bytes, duration: seg.duration };
+    },
+  );
 
   const decryptedSegments = await runWithConcurrency(tasks, SEGMENT_CONCURRENCY);
 
@@ -131,8 +153,8 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
     onProgress({ stage: 'remux', current: done, total: totalSegs });
   });
 
-  // 6. Make a Blob URL for the SW to hand to chrome.downloads.download.
-  const blob = new Blob([mp4Bytes], { type: 'video/mp4' });
+  // 5. Make a Blob URL for the SW to hand to chrome.downloads.download.
+  const blob = new Blob([mp4Bytes as Uint8Array<ArrayBuffer>], { type: 'video/mp4' });
   const blobUrl = URL.createObjectURL(blob);
   return {
     requestId,
@@ -145,21 +167,15 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
 
 // ---------- helpers ----------
 
-/**
- * Single-pass parse for the download pipeline. Validates the manifest is
- * HLS, detects master vs media, and extracts per-segment URIs + key info.
- * lib/m3u8.js exposes a more curated shape (variants + alternates) for
- * the popup; this is the raw segment list we need to drive decryption.
- */
 // Pre-flight pass: m3u8-parser silently DROPS EXT-X-KEY tags whose
 // method isn't AES-128 (it returns key=undefined on the segment). That
 // would let us treat encrypted segments as plain TS and ship garbage to
 // mux.js. Scan the raw text for #EXT-X-KEY:METHOD=... tags and refuse
 // anything we don't actually support before handing off to the parser.
 const KEY_METHOD_RE = /^[ \t]*#EXT-X-KEY:[^\r\n]*\bMETHOD=([A-Z0-9\-_]+)/gim;
-function rejectUnsupportedKeyMethods(text) {
+function rejectUnsupportedKeyMethods(text: string): void {
   KEY_METHOD_RE.lastIndex = 0;
-  let m;
+  let m: RegExpExecArray | null;
   while ((m = KEY_METHOD_RE.exec(text)) !== null) {
     const method = (m[1] || '').toUpperCase();
     if (method === 'NONE' || method === 'AES-128') continue;
@@ -174,10 +190,15 @@ function rejectUnsupportedKeyMethods(text) {
   }
 }
 
+// Single-pass parse for the download pipeline. Validates the manifest is
+// HLS, detects master vs media, and extracts per-segment URIs + key info.
+// lib/m3u8.js exposes a more curated shape (variants + alternates) for
+// the popup; this is the raw segment list we need to drive decryption.
+//
 // Exported so the test suite can exercise the encryption-method gate,
 // implicit/explicit IV handling, and malformed-manifest rejection
 // without spinning up the full proxyFetch + mux.js integration path.
-export function parsePlaylist(text, baseUrl) {
+export function parsePlaylist(text: unknown, baseUrl: string): ParsedMediaPlaylist {
   if (typeof text !== 'string' || !text.trim().startsWith('#EXTM3U')) {
     throw new ManifestParseError('Not an HLS manifest (missing #EXTM3U)');
   }
@@ -192,8 +213,8 @@ export function parsePlaylist(text, baseUrl) {
   }
   const segs = Array.isArray(m.segments) ? m.segments : [];
   const startSeq = typeof m.mediaSequence === 'number' ? m.mediaSequence : 0;
-  const segments = segs.map((seg, i) => {
-    let url;
+  const segments: ParsedSegment[] = segs.map((seg, i) => {
+    let url: string;
     try {
       url = new URL(seg.uri ?? '', baseUrl).toString();
     } catch {
@@ -208,7 +229,7 @@ export function parsePlaylist(text, baseUrl) {
     //                                    than silently mis-decrypt with the AES-CBC assumption.
     const rawMethod = typeof key?.method === 'string' ? key.method : '';
     const method = rawMethod.toUpperCase();
-    const encrypted = !!key && method && method !== 'NONE';
+    const encrypted = !!key && !!method && method !== 'NONE';
     if (encrypted && method !== 'AES-128') {
       if (method === 'SAMPLE-AES' || method === 'SAMPLE-AES-CTR') {
         throw new DRMProtectedError(
@@ -220,7 +241,7 @@ export function parsePlaylist(text, baseUrl) {
       );
     }
     let keyUrl = '';
-    if (encrypted && key.uri) {
+    if (encrypted && key?.uri) {
       try {
         keyUrl = new URL(key.uri, baseUrl).toString();
       } catch {
@@ -245,7 +266,17 @@ export function parsePlaylist(text, baseUrl) {
   return { isMaster: false, segments };
 }
 
-async function fetchText(proxyFetch, { tabId, frameId, url, headers }) {
+interface FetchArgs {
+  tabId: number;
+  frameId: number;
+  url: string;
+  headers?: Record<string, string>;
+}
+
+async function fetchText(
+  proxyFetch: ProxyFetch,
+  { tabId, frameId, url, headers }: FetchArgs,
+): Promise<string> {
   const reply = await proxyFetch({ tabId, frameId, url, headers, responseType: 'text' });
   if (!reply?.ok) throwFromReply(reply, url);
   if (typeof reply.body !== 'string') {
@@ -254,7 +285,10 @@ async function fetchText(proxyFetch, { tabId, frameId, url, headers }) {
   return reply.body;
 }
 
-async function fetchArrayBuffer(proxyFetch, { tabId, frameId, url, headers }) {
+async function fetchArrayBuffer(
+  proxyFetch: ProxyFetch,
+  { tabId, frameId, url, headers }: FetchArgs,
+): Promise<Uint8Array> {
   const reply = await proxyFetch({ tabId, frameId, url, headers, responseType: 'arrayBuffer' });
   if (!reply?.ok) throwFromReply(reply, url);
   if (typeof reply.body !== 'string') {
@@ -263,7 +297,7 @@ async function fetchArrayBuffer(proxyFetch, { tabId, frameId, url, headers }) {
   return base64ToUint8Array(reply.body);
 }
 
-function throwFromReply(reply, url) {
+function throwFromReply(reply: ProxyFetchReply | undefined, url: string): never {
   const status = reply?.status ?? 0;
   const message = reply?.error ?? `proxy fetch failed for ${url}`;
   // Status check only — the prior substring regex misclassified any URL

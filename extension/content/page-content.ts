@@ -1,5 +1,17 @@
 import { MSG } from '../lib/messages.js';
 import { pickAdapter } from '../adapters/index.js';
+import type { PageMeta } from '../lib/types.ts';
+
+// The double-injection guard flag + the Navigation API need a typed
+// window surface. We declare them ambiently in this file rather than in
+// external-modules.d.ts because they're truly local to the content
+// scripts (the Navigation API isn't exposed in SW or offscreen).
+declare global {
+  interface Window {
+    __VDL_PAGE_CONTENT_INSTALLED__?: boolean;
+    __VDL_HOOKED__?: boolean;
+  }
+}
 
 // Top-frame only (manifest restricts via all_frames: default false).
 // Runs at document_idle so the static DOM is rendered; SPAs that fill content
@@ -11,9 +23,9 @@ import { pickAdapter } from '../adapters/index.js';
 // from piling on, which would otherwise fire sendPageMeta twice per event.
 if (/^https?:$/.test(location.protocol) && !window.__VDL_PAGE_CONTENT_INSTALLED__) {
   window.__VDL_PAGE_CONTENT_INSTALLED__ = true;
-  let cleanup = null;
+  let cleanup: (() => void) | null = null;
 
-  function sendPageMeta(adapterId, meta) {
+  function sendPageMeta(adapterId: string, meta: PageMeta): void {
     try {
       chrome.runtime
         .sendMessage({ type: MSG.PAGE_META, payload: { adapterId, meta } })

@@ -12,12 +12,12 @@ if (/^https?:$/.test(location.protocol)) {
   // Bounded LRU-ish dedupe: Sets preserve insertion order, so dropping the
   // first value approximates "oldest". A long-lived SPA (Hotmart Club scrubs
   // through many lessons) can otherwise grow this set unboundedly.
-  const seenInFrame = new Set();
-  function markSeen(url) {
+  const seenInFrame = new Set<string>();
+  function markSeen(url: string): boolean {
     if (seenInFrame.has(url)) return false;
     if (seenInFrame.size >= SEEN_LIMIT) {
       const oldest = seenInFrame.values().next().value;
-      seenInFrame.delete(oldest);
+      if (oldest !== undefined) seenInFrame.delete(oldest);
     }
     seenInFrame.add(url);
     return true;
@@ -79,13 +79,23 @@ if (/^https?:$/.test(location.protocol)) {
   // PROXY_FETCH handler — the SW asks us (from inside the iframe origin
   // that the player runs in) to fetch a URL on its behalf, so the request
   // goes out with the right Origin/Referer/cookies for signed-URL CDNs.
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg?.type !== MSG.PROXY_FETCH) return false;
-    handleProxyFetch(msg.payload ?? {})
-      .then(sendResponse)
-      .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err), status: 0 }));
-    return true; // async sendResponse
-  });
+  chrome.runtime.onMessage.addListener(
+    (msg: unknown, _sender, sendResponse: (response: unknown) => void) => {
+      if (!msg || typeof msg !== 'object') return false;
+      const m = msg as { type?: string; payload?: ProxyFetchArgs };
+      if (m.type !== MSG.PROXY_FETCH) return false;
+      handleProxyFetch(m.payload ?? ({} as ProxyFetchArgs))
+        .then(sendResponse)
+        .catch((err: unknown) =>
+          sendResponse({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+            status: 0,
+          }),
+        );
+      return true; // async sendResponse
+    },
+  );
 
   // Lifecycle ping (kept from v0.1 for SW visibility).
   try {
@@ -100,7 +110,24 @@ if (/^https?:$/.test(location.protocol)) {
   }
 }
 
-async function handleProxyFetch({ url, headers, responseType }) {
+interface ProxyFetchArgs {
+  url: string;
+  headers?: Record<string, string>;
+  responseType: 'text' | 'arrayBuffer';
+}
+
+interface ProxyFetchReply {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  body?: string;
+}
+
+async function handleProxyFetch({
+  url,
+  headers,
+  responseType,
+}: ProxyFetchArgs): Promise<ProxyFetchReply> {
   if (typeof url !== 'string') return { ok: false, error: 'missing url', status: 0 };
   // credentials: 'same-origin' (the default for content-script fetches) is
   // required here. Content scripts in MV3 enforce the page's CORS rules —
