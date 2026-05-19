@@ -57,7 +57,7 @@ function entryBadges(entry) {
 }
 
 function formatVariant(v) {
-  const resPart = v.resolution && v.resolution.includes('x')
+  const resPart = v.resolution?.includes('x')
     ? `${v.resolution.split('x')[1]}p`
     : v.resolution || '';
   const bwPart = v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : '';

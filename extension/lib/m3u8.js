@@ -52,6 +52,12 @@ function collectAlternates(mediaGroups, baseUrl) {
  * }}
  */
 export function parseManifest(text, baseUrl) {
+  // Reject anything that isn't an HLS manifest up front. m3u8-parser silently
+  // returns empty success on DASH/HTML/garbage input, which would mislabel
+  // the entry as a media playlist with 0 segments.
+  if (typeof text !== 'string' || !text.trim().startsWith('#EXTM3U')) {
+    throw new Error('Not an HLS manifest (missing #EXTM3U)');
+  }
   const parser = new Parser();
   parser.push(text);
   parser.end();

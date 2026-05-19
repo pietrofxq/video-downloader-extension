@@ -45,9 +45,11 @@
   // m3u8 / mpd manifest URLs — we want their bodies for parsing.
   // Note: false positives are fine (the isolated-world bridge will reject
   // anything that classifyUrl can't tag).
+  // The `[?&#]` class catches `.m3u8` followed by `&` mid-query too
+  // (e.g. ?file=video.m3u8&token=...), not just at the end of the path.
   function isManifestUrl(url) {
     if (typeof url !== 'string') return false;
-    return /\.m3u8(?:\?|#|$)/i.test(url) || /\.mpd(?:\?|#|$)/i.test(url);
+    return /\.m3u8(?:[?&#]|$)/i.test(url) || /\.mpd(?:[?&#]|$)/i.test(url);
   }
 
   // ---- fetch ----
@@ -125,7 +127,11 @@
       try {
         if (this.__vdlUrl) {
           post({ kind: 'xhr', url: this.__vdlUrl, headers: this.__vdlHeaders });
-          if (isManifestUrl(this.__vdlUrl)) {
+          if (isManifestUrl(this.__vdlUrl) && !this.__vdlManifestListenerAdded) {
+            // Some clients reuse an XHR instance across multiple requests
+            // (rare for HLS players but possible). The flag prevents
+            // accumulating duplicate listeners on the same instance.
+            this.__vdlManifestListenerAdded = true;
             const xhr = this;
             xhr.addEventListener('load', function () {
               try {

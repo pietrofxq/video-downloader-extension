@@ -60,10 +60,12 @@ https://cdn.example/abs.m3u8
     expect(r.variants[0].codecs).toBe('avc1.640028,mp4a.40.2');
   });
 
-  it('returns empty state for garbage input', () => {
-    const r = parseManifest('not a manifest', 'https://x.com/master.m3u8');
-    expect(r.isMaster).toBe(false);
-    expect(r.variants).toEqual([]);
+  it('throws for input lacking #EXTM3U', () => {
+    expect(() => parseManifest('not a manifest', 'https://x.com/master.m3u8')).toThrow(
+      /HLS manifest/,
+    );
+    expect(() => parseManifest('', 'https://x.com/master.m3u8')).toThrow(/HLS manifest/);
+    expect(() => parseManifest(null, 'https://x.com/master.m3u8')).toThrow(/HLS manifest/);
   });
 
   it('handles a master without RESOLUTION attribute', () => {

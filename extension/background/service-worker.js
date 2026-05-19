@@ -327,6 +327,13 @@ async function handleManifestBody(tabId, url, text) {
     log.debug('manifest body for unknown entry', { tabId, url });
     return;
   }
+  if (entry.kind !== 'hls') {
+    // m3u8-parser silently returns empty success on DASH/.mpd input, which
+    // would mislabel the entry as "Single quality". v1.1's mpd-parser will
+    // route DASH bodies through its own handler.
+    log.debug('skipping body capture for non-hls kind', { kind: entry.kind, url });
+    return;
+  }
   if (entry.variants) return; // already parsed (we win the race only once)
   try {
     const parsed = parseManifest(text, url);
