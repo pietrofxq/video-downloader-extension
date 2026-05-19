@@ -1,3 +1,5 @@
+import type { MediaKind } from './types.ts';
+
 export const KINDS = Object.freeze({
   HLS: 'hls',
   DASH: 'dash',
@@ -69,6 +71,8 @@ export function classifyUrl(url: string, contentType?: string): DetectionKind | 
   return null;
 }
 
-export function isPrimary(kind: DetectionKind | null): boolean {
+// Type predicate so callers can narrow DetectionKind → MediaKind without
+// an `as` cast. PRIMARY_KINDS contains exactly the MediaKind values.
+export function isPrimary(kind: DetectionKind | null): kind is MediaKind {
   return kind !== null && PRIMARY_KINDS.has(kind);
 }

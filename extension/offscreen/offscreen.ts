@@ -1,8 +1,7 @@
-import { MSG } from '../lib/messages.js';
+import { MSG, parseExtensionMessage } from '../lib/messages.js';
 import { log, redactUrl } from '../lib/log.js';
 import { downloadHlsAsTs } from './downloader.js';
 import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
-import type { ExtensionMessage } from '../lib/messages.js';
 
 // The offscreen document is the long-lived host for download work:
 // - SW spawns it the first time a download is requested.
@@ -14,8 +13,8 @@ import type { ExtensionMessage } from '../lib/messages.js';
 
 chrome.runtime.onMessage.addListener(
   (rawMsg: unknown, _sender, sendResponse: (response: unknown) => void) => {
-    if (!rawMsg || typeof rawMsg !== 'object') return false;
-    const msg = rawMsg as ExtensionMessage;
+    const msg = parseExtensionMessage(rawMsg);
+    if (!msg) return false;
 
     if (msg.type === MSG.REVOKE_BLOB) {
       const url = msg.payload?.blobUrl;

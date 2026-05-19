@@ -1,5 +1,5 @@
 import { log } from '../lib/log.js';
-import { MSG } from '../lib/messages.js';
+import { MSG, parseExtensionMessage } from '../lib/messages.js';
 import { pickAdapter, getAdapter } from '../adapters/index.js';
 import {
   classifyUrl,
@@ -23,7 +23,7 @@ import {
   setAdapterMeta,
   setTabUrl,
 } from '../lib/media-store.js';
-import type { DownloadState, MediaEntry, MediaKind, PageMeta } from '../lib/types.ts';
+import type { DownloadState, MediaEntry, PageMeta } from '../lib/types.ts';
 
 const BADGE_COLOR = '#ff5d2e';
 
@@ -132,8 +132,9 @@ chrome.webRequest.onHeadersReceived.addListener(
 // MV3 message handler contract: return `true` from this listener if you call
 // sendResponse asynchronously, otherwise the channel closes and the sender's
 // promise rejects. Synchronous handlers can return `false` (or nothing).
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || typeof msg !== 'object') return false;
+chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
+  const msg = parseExtensionMessage(rawMsg);
+  if (!msg) return false;
   switch (msg.type) {
     case MSG.PING: {
       const tabId = sender.tab?.id ?? null;
@@ -215,14 +216,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true; // async
     }
     case MSG.PROXY_FETCH: {
-      const p = msg.payload ?? {};
+      const p = msg.payload;
       if (typeof p.url !== 'string' || typeof p.tabId !== 'number') {
         sendResponse({ ok: false, error: 'missing url/tabId' });
         return false;
       }
-      handleProxyFetch(p)
+      // The guard above narrows `p.tabId` to `number`. Re-spread with
+      // the narrowed value so handleProxyFetch's ProxyFetchPayload
+      // (which has a required tabId) is happy.
+      handleProxyFetch({ ...p, tabId: p.tabId })
         .then(sendResponse)
-        .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+        .catch((err: unknown) =>
+          sendResponse({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
       return true; // async
     }
     case MSG.DOWNLOAD_PROGRESS: {
@@ -300,8 +309,7 @@ async function handleDetection({
     log.debug('observed', { kind, url, source });
     return;
   }
-  // isPrimary narrowed kind down to MediaKind ('hls' | 'dash' | 'progressive').
-  const mediaKind = kind as MediaKind;
+  // isPrimary is a type predicate, so `kind` is already MediaKind here.
 
   // Block until the tab-URL cache is populated. Without this, the first wave
   // of webRequest events races ahead of seedTabs() and falls through to the
@@ -328,7 +336,7 @@ async function handleDetection({
 
   const adapter = pickAdapter(resolvedPageUrl, url);
   const entry: Omit<MediaEntry, 'id'> = {
-    kind: mediaKind,
+    kind,
     url,
     pageUrl: resolvedPageUrl,
     adapterId: adapter.id,

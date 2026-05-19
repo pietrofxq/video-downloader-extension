@@ -148,6 +148,42 @@ export type PortMessageFromSW =
 
 // ---------- helpers ----------
 
+const MSG_TYPES: ReadonlySet<string> = new Set(Object.values(MSG));
+
+// Validate that `raw` is an object with a `type` that matches one of the
+// MSG.* constants, and return it narrowed to ExtensionMessage. Returns
+// null otherwise. Receive sites (SW, offscreen, popup) call this instead
+// of `as ExtensionMessage` casting, so the switch on `msg.type` then
+// narrows each `case` to the matching payload statically. If a new
+// message variant is added without extending ExtensionMessage, the
+// receive-site switch fails to compile rather than silently dropping.
+export function parseExtensionMessage(raw: unknown): ExtensionMessage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const type = (raw as { type?: unknown }).type;
+  if (typeof type !== 'string' || !MSG_TYPES.has(type)) return null;
+  // The shape of each `payload` is asserted at the case level by the
+  // ExtensionMessage union; we don't deep-validate here because the SW
+  // and offscreen + popup are all internal trusted senders. The gate
+  // exists to lock the type, not to defend against malicious payloads.
+  return raw as ExtensionMessage;
+}
+
+// Same idea for the popup ↔ SW port wire.
+export function parsePortMessageFromSW(raw: unknown): PortMessageFromSW | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const type = (raw as { type?: unknown }).type;
+  if (type !== 'STATE' && type !== 'DOWNLOAD_STATE') return null;
+  return raw as PortMessageFromSW;
+}
+
+// Compile-time exhaustiveness helper: drop in the `default:` branch of
+// a switch to make sure every variant of ExtensionMessage is handled.
+// Calling `assertNever(msg)` with anything other than `never` is a
+// TypeError at compile time.
+export function assertNever(_x: never): never {
+  throw new Error('unreachable');
+}
+
 export function envelope<T extends MessageType>(
   type: T,
   payload: object = {},

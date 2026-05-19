@@ -1,9 +1,8 @@
 import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { log, redactUrl } from '../lib/log.js';
-import { MSG } from '../lib/messages.js';
+import { MSG, parsePortMessageFromSW } from '../lib/messages.js';
 import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
-import type { PortMessageFromSW } from '../lib/messages.js';
 
 const $content = document.getElementById('content')!;
 const $footer = document.getElementById('footer')!;
@@ -372,11 +371,12 @@ function connect(tabId: number): void {
   }
   port.postMessage({ type: 'SUBSCRIBE', tabId });
   port.onMessage.addListener((rawMsg: unknown) => {
-    const msg = rawMsg as PortMessageFromSW;
-    if (msg?.type === 'STATE') {
+    const msg = parsePortMessageFromSW(rawMsg);
+    if (!msg) return;
+    if (msg.type === 'STATE') {
       retryCount = 0; // first successful subscription resets the budget
       render(msg.state);
-    } else if (msg?.type === 'DOWNLOAD_STATE') {
+    } else if (msg.type === 'DOWNLOAD_STATE') {
       applyDownloadState(msg.state);
     }
   });

@@ -15,12 +15,6 @@
     // We don't emit — esbuild bundles. tsc is purely the checker.
     "noEmit": true,
 
-    // Allow mixed JS / TS during the conversion. `checkJs` stays off so
-    // unconverted JS doesn't blow up the typechecker; converted .ts
-    // modules still benefit from full inference at the call sites.
-    "allowJs": true,
-    "checkJs": false,
-
     // Interop with esbuild + npm packages
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
@@ -43,6 +37,6 @@
     // @types/node is for the dev-side test files (`node:fs`).
     "types": ["chrome", "node"]
   },
-  "include": ["extension/**/*.ts", "extension/**/*.js"],
+  "include": ["extension/**/*.ts"],
   "exclude": ["dist", "node_modules", "scripts", "build.mjs"]
 }
