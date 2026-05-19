@@ -68,7 +68,9 @@ function scrapeHotmartMeta(doc) {
 }
 
 function metaKey(m) {
-  return `${m.title}|${m.lessonTitle}|${m.sectionTitle}|${m.filenameHint}`;
+  // JSON.stringify is unambiguous — `|` could collide if any field contained
+  // it, suppressing a legitimate onUpdate.
+  return JSON.stringify([m.title, m.lessonTitle, m.sectionTitle, m.filenameHint]);
 }
 
 export default {
@@ -81,7 +83,14 @@ export default {
   },
   scrapePageMeta: scrapeHotmartMeta,
   observe(doc, onUpdate) {
-    const root = doc.body || doc.documentElement;
+    // Prefer a scoped landmark so chat widgets / animations elsewhere on the
+    // page don't dispatch records to our debounced tick. Falls back to body
+    // if neither <main> nor [role="main"] exists.
+    const root =
+      doc.querySelector('main') ||
+      doc.querySelector('[role="main"]') ||
+      doc.body ||
+      doc.documentElement;
     if (!root || typeof MutationObserver === 'undefined') return () => {};
 
     // Seed `last` from the current DOM so we don't fire an "update" on the
@@ -107,7 +116,10 @@ export default {
       if (timer) return;
       timer = setTimeout(tick, 250);
     });
-    observer.observe(root, { childList: true, subtree: true, characterData: true });
+    // childList + subtree is sufficient: Hotmart's SPA re-renders nodes
+    // rather than mutating text in place, so characterData would just be
+    // extra work.
+    observer.observe(root, { childList: true, subtree: true });
 
     return () => {
       if (timer) clearTimeout(timer);

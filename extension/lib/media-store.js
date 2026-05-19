@@ -83,6 +83,15 @@ export async function addEntry(tabId, entry) {
   return stored;
 }
 
+function shallowEqualMeta(a, b) {
+  if (!a || !b) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) if (a[k] !== b[k]) return false;
+  return true;
+}
+
 export async function setAdapterMeta(tabId, adapterId, meta) {
   await init();
   let s = tabState.get(tabId);
@@ -91,18 +100,23 @@ export async function setAdapterMeta(tabId, adapterId, meta) {
     tabState.set(tabId, s);
   }
   if (!s.adapterMeta) s.adapterMeta = {};
+  // No-op early when the scraper produced the exact same meta as before.
+  // Avoids redundant chrome.storage.session writes and TAB_STATE_UPDATED
+  // broadcasts on every Hotmart re-render that doesn't actually change
+  // anything we care about.
+  if (shallowEqualMeta(s.adapterMeta[adapterId], meta)) {
+    return { changed: false };
+  }
   s.adapterMeta[adapterId] = meta;
   // Back-patch existing entries with matching adapterId — the popup may
   // already be rendering their rows.
-  let changed = false;
   for (const e of s.entries) {
     if (e.adapterId === adapterId) {
       e.meta = { ...(e.meta ?? {}), ...meta };
-      changed = true;
     }
   }
   await persist();
-  return { changed };
+  return { changed: true };
 }
 
 export async function getAdapterMeta(tabId, adapterId) {

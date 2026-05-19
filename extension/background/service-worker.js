@@ -49,13 +49,17 @@ seedTabs();
 
 // ---------- Tab lifecycle ----------
 
+const isHttpUrl = (u) => typeof u === 'string' && /^https?:/.test(u);
+
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!changeInfo.url) {
     // Initial load may give us a URL via `tab.url` before changeInfo.url ever
-    // fires; cache it so detections aren't blind.
-    if (tab?.url && !(await getTabUrl(tabId))) await setTabUrl(tabId, tab.url);
+    // fires; cache it so detections aren't blind. Same http(s) guard as
+    // seedTabs — we don't want chrome:// or devtools:// URLs in the store.
+    if (isHttpUrl(tab?.url) && !(await getTabUrl(tabId))) await setTabUrl(tabId, tab.url);
     return;
   }
+  if (!isHttpUrl(changeInfo.url)) return;
   const { prev } = await setTabUrl(tabId, changeInfo.url);
   if (prev && prev !== changeInfo.url) {
     const had = await clearTab(tabId);
@@ -256,11 +260,12 @@ async function updateBadge(tabId) {
 async function handlePageMeta(tabId, adapterId, meta) {
   await seedTabs();
   const { changed } = await setAdapterMeta(tabId, adapterId, meta);
-  log.info('page meta', { tabId, adapterId, patched: changed, meta });
-  // Always broadcast: even when no entries existed to patch, the popup may
-  // be open and waiting; future-self of the same tab will benefit from
-  // having the meta when entries arrive.
-  await broadcastTabState(tabId);
+  log.info('page meta', { tabId, adapterId, changed, meta });
+  // Only broadcast when something actually changed. setAdapterMeta returns
+  // changed: false when the new meta is shallow-equal to the stored value
+  // (frequent on Hotmart re-renders) — popups that opened later can pull
+  // current state via GET_TAB_STATE.
+  if (changed) await broadcastTabState(tabId);
 }
 
 async function broadcastTabState(tabId) {

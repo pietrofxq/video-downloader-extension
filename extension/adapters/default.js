@@ -29,8 +29,11 @@ export default {
   scrapePageMeta: scrapeDefaultMeta,
   observe(doc, onUpdate) {
     if (typeof MutationObserver === 'undefined') return () => {};
-    const titleEl = doc.querySelector('title');
-    if (!titleEl) return () => {};
+    // Observe document.head (stable across SPA replacements) rather than the
+    // <title> element directly — React Helmet, Vue meta etc. swap the title
+    // node entirely, which would detach an observer attached to the old node.
+    const head = doc.head || doc.documentElement;
+    if (!head) return () => {};
     let last = doc.title || '';
     const observer = new MutationObserver(() => {
       const t = doc.title || '';
@@ -38,7 +41,7 @@ export default {
       last = t;
       onUpdate(scrapeDefaultMeta(doc));
     });
-    observer.observe(titleEl, { childList: true, characterData: true, subtree: true });
+    observer.observe(head, { childList: true, subtree: true, characterData: true });
     return () => observer.disconnect();
   },
   deriveFilename({ pageMeta, url }) {

@@ -115,10 +115,34 @@ describe('removeTab', () => {
 });
 
 describe('setAdapterMeta', () => {
-  it('stores meta on a tab with no prior state', async () => {
+  it('stores meta on a tab with no prior state and reports changed: true', async () => {
     const { changed } = await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 3' });
-    expect(changed).toBe(false); // no entries to patch yet
+    expect(changed).toBe(true);
     expect(await store.getAdapterMeta(42, 'hotmart')).toEqual({ lessonTitle: 'Lição 3' });
+  });
+
+  it('returns { changed: false } when meta is shallow-equal to the stored value', async () => {
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'L1', sectionTitle: 'S1' });
+    const result = await store.setAdapterMeta(42, 'hotmart', {
+      lessonTitle: 'L1',
+      sectionTitle: 'S1',
+    });
+    expect(result.changed).toBe(false);
+  });
+
+  it('returns { changed: true } when any scalar value differs', async () => {
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'L1' });
+    const result = await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'L2' });
+    expect(result.changed).toBe(true);
+  });
+
+  it('returns { changed: true } when the key set differs', async () => {
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'L1' });
+    const result = await store.setAdapterMeta(42, 'hotmart', {
+      lessonTitle: 'L1',
+      sectionTitle: 'S1',
+    });
+    expect(result.changed).toBe(true);
   });
 
   it('back-patches existing entries with matching adapterId', async () => {
@@ -158,6 +182,24 @@ describe('addEntry meta inheritance', () => {
     await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
     const e = await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'default' });
     expect(e.meta).toBeUndefined();
+  });
+});
+
+describe('v0.2 → v0.3 state migration', () => {
+  it('backfills adapterMeta on pre-v0.3 stored state', async () => {
+    // Seed the backing store with a v0.2-shaped record (no adapterMeta),
+    // then force a fresh import so init() runs against it.
+    backing.mediaState = {
+      99: {
+        entries: [{ id: 'x', url: 'https://a/b.m3u8', adapterId: 'default', kind: 'hls' }],
+        pageUrl: 'https://a',
+      },
+    };
+    vi.resetModules();
+    const freshStore = await import('./media-store.js');
+    const s = await freshStore.getTabState(99);
+    expect(s.adapterMeta).toEqual({});
+    expect(s.entries[0].url).toBe('https://a/b.m3u8');
   });
 });
 
