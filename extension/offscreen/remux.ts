@@ -126,13 +126,16 @@ export function remuxTsToMp4(
         reject(new RemuxError('transmuxer produced no media data'));
         return;
       }
+      // Local non-null re-binding — control-flow narrowing on `initSegment`
+      // is lost across the closure boundary in the for-loops below.
+      const initBytes: Uint8Array = initSegment;
 
       // Concatenate init + all media chunks into a single MP4 buffer.
-      let total = initSegment.byteLength;
+      let total = initBytes.byteLength;
       for (const c of chunks) total += c.byteLength;
       const out = new Uint8Array(total);
-      out.set(initSegment, 0);
-      let offset = initSegment.byteLength;
+      out.set(initBytes, 0);
+      let offset = initBytes.byteLength;
       for (const c of chunks) {
         out.set(c, offset);
         offset += c.byteLength;

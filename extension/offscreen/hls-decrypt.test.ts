@@ -35,7 +35,7 @@ describe('toUint8', () => {
     // Bytes must come out big-endian regardless of host endianness:
     // 0x01020304 → [0x01, 0x02, 0x03, 0x04].
     const u32 = new Uint32Array([0x01020304]);
-    const u8 = toUint8(u32);
+    const u8 = toUint8(u32)!;
     expect(Array.from(u8)).toEqual([0x01, 0x02, 0x03, 0x04]);
   });
 
@@ -53,9 +53,9 @@ describe('toUint8', () => {
         '#EXT-X-ENDLIST\n',
     );
     parser.end();
-    const segIv = parser.manifest.segments[0].key.iv;
+    const segIv = parser.manifest.segments![0].key!.iv;
     expect(segIv).toBeInstanceOf(Uint32Array);
-    const bytes = toUint8(segIv);
+    const bytes = toUint8(segIv)!;
     expect(Array.from(bytes)).toEqual([
       0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
       0x0f,
@@ -65,7 +65,7 @@ describe('toUint8', () => {
   it('wraps a raw ArrayBuffer', () => {
     const ab = new ArrayBuffer(4);
     new Uint8Array(ab).set([1, 2, 3, 4]);
-    expect(Array.from(toUint8(ab))).toEqual([1, 2, 3, 4]);
+    expect(Array.from(toUint8(ab)!)).toEqual([1, 2, 3, 4]);
   });
 
   it('returns null for null / undefined', () => {

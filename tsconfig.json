@@ -29,10 +29,14 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
 
-    // We'll turn strict on per ROADMAP phase order, but `noImplicitAny`
-    // is the one we want from day one for any code we write in .ts.
-    "strict": false,
-    "noImplicitAny": true,
+    // v0.9 phase 7: strict checking lives on the release gate now.
+    // Includes strictNullChecks / strictFunctionTypes / noImplicitAny /
+    // useUnknownInCatchVariables / noImplicitThis. The follow-on flags
+    // catch the remaining classes of bug we care about (missing
+    // returns, fallthrough switches).
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
 
     // Chrome extension globals. @types/chrome gives us the chrome.*
     // namespace; chrome120 target ensures the runtime APIs we use exist.

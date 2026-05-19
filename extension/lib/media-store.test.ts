@@ -45,9 +45,9 @@ describe('addEntry', () => {
   it('stores a new entry with a UUID id', async () => {
     const e = await store.addEntry(42, addStub('https://x.com/a.m3u8', { kind: 'hls' }));
     expect(e).not.toBeNull();
-    expect(e.id).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(e.url).toBe('https://x.com/a.m3u8');
-    expect(e.kind).toBe('hls');
+    expect(e!.id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(e!.url).toBe('https://x.com/a.m3u8');
+    expect(e!.kind).toBe('hls');
   });
 
   it('returns null when the same URL is added twice to the same tab', async () => {
@@ -61,7 +61,7 @@ describe('addEntry', () => {
     const b = await store.addEntry(43, addStub('https://x.com/a.m3u8'));
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
-    expect(a.id).not.toBe(b.id);
+    expect(a!.id).not.toBe(b!.id);
   });
 
   it('persists to chrome.storage.session', async () => {
@@ -136,14 +136,14 @@ describe('removeTab', () => {
 describe('patchEntry', () => {
   it('shallow-merges a patch onto an existing entry', async () => {
     const e = await store.addEntry(42, addStub('https://x/a.m3u8', { kind: 'hls' }));
-    const patched = await store.patchEntry(42, e.id, {
+    const patched = await store.patchEntry(42, e!.id, {
       isMaster: true,
       variants: [{ url: 'https://x/1.m3u8', bandwidth: 1000, resolution: null, codecs: null }],
     });
-    expect(patched.isMaster).toBe(true);
-    expect(patched.variants).toHaveLength(1);
+    expect(patched!.isMaster).toBe(true);
+    expect(patched!.variants).toHaveLength(1);
     // existing fields preserved
-    expect(patched.url).toBe('https://x/a.m3u8');
+    expect(patched!.url).toBe('https://x/a.m3u8');
   });
 
   it('returns null for an unknown tab or media id', async () => {
@@ -154,7 +154,7 @@ describe('patchEntry', () => {
 
   it('persists patched fields to chrome.storage.session', async () => {
     const e = await store.addEntry(42, addStub('https://x/a.m3u8'));
-    await store.patchEntry(42, e.id, { parseError: 'token expired' });
+    await store.patchEntry(42, e!.id, { parseError: 'token expired' });
     expect(
       (backing.mediaState as Record<number, { entries: MediaEntry[] }>)[42].entries[0].parseError,
     ).toBe('token expired');
@@ -222,13 +222,13 @@ describe('addEntry meta inheritance', () => {
   it('inherits adapterMeta at insertion time', async () => {
     await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
     const e = await store.addEntry(42, addStub('https://x/1.m3u8', { adapterId: 'hotmart' }));
-    expect(e.meta).toEqual({ lessonTitle: 'Lição 5' });
+    expect(e!.meta).toEqual({ lessonTitle: 'Lição 5' });
   });
 
   it('does not inherit from a different adapter', async () => {
     await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
     const e = await store.addEntry(42, addStub('https://x/1.m3u8', { adapterId: 'default' }));
-    expect(e.meta).toBeUndefined();
+    expect(e!.meta).toBeUndefined();
   });
 });
 
@@ -263,6 +263,6 @@ describe('clearTab keeps adapterMeta', () => {
     await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
     await store.clearTab(42);
     const e = await store.addEntry(42, addStub('https://x/1.m3u8', { adapterId: 'hotmart' }));
-    expect(e.meta).toEqual({ lessonTitle: 'Lição 5' });
+    expect(e!.meta).toEqual({ lessonTitle: 'Lição 5' });
   });
 });

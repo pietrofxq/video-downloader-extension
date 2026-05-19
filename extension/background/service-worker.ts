@@ -317,7 +317,10 @@ async function handleDetection({
       const tab = await chrome.tabs.get(tabId);
       resolvedPageUrl = tab.url ?? '';
     } catch (err) {
-      log.warn('chrome.tabs.get failed', { tabId, err: String(err?.message ?? err) });
+      log.warn('chrome.tabs.get failed', {
+        tabId,
+        err: err instanceof Error ? err.message : String(err),
+      });
       resolvedPageUrl = '';
     }
   }
@@ -390,7 +393,7 @@ async function ensureParsed(tabId: number, entry: MediaEntry): Promise<void> {
     // Race-check again before recording a parse error — body capture
     // may have already succeeded.
     if (await entryIsResolved(tabId, entry.id)) return;
-    const message = String(err?.message ?? err);
+    const message = err instanceof Error ? err.message : String(err);
     await patchEntry(tabId, entry.id, { parseError: message });
     log.warn('manifest parse failed', { tabId, mediaId: entry.id, err: message });
   } finally {
@@ -461,7 +464,7 @@ async function handleStartDownload(payload: {
       }
     }
   }
-  if (!entry) throw new Error(`unknown mediaId: ${mediaId}`);
+  if (!entry || entryTabId === null) throw new Error(`unknown mediaId: ${mediaId}`);
 
   if (entry.kind !== 'hls') {
     throw new Error(`v0.6 supports HLS only; this entry is ${entry.kind}`);
@@ -725,7 +728,7 @@ async function handleManifestBody(tabId: number, url: string, text: string): Pro
       variants: parsed.variants,
       alternates: parsed.alternates,
       segmentCount: parsed.segmentCount,
-      parseError: null,
+      parseError: undefined,
     });
     log.info('parsed manifest (body capture)', {
       tabId,
@@ -736,7 +739,7 @@ async function handleManifestBody(tabId: number, url: string, text: string): Pro
     await updateBadge(tabId);
     await broadcastTabState(tabId);
   } catch (err) {
-    const message = String(err?.message ?? err);
+    const message = err instanceof Error ? err.message : String(err);
     log.warn('parse from body failed', { tabId, mediaId: entry.id, err: message });
     // Don't set parseError — the SW fallback fetch may still succeed.
   }

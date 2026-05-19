@@ -65,7 +65,9 @@ https://cdn.example/abs.m3u8
       /HLS manifest/,
     );
     expect(() => parseManifest('', 'https://x.com/master.m3u8')).toThrow(/HLS manifest/);
-    expect(() => parseManifest(null, 'https://x.com/master.m3u8')).toThrow(/HLS manifest/);
+    expect(() => parseManifest(null as unknown as string, 'https://x.com/master.m3u8')).toThrow(
+      /HLS manifest/,
+    );
   });
 
   it('handles a master without RESOLUTION attribute', () => {
@@ -90,10 +92,10 @@ audio.m3u8
     expect(r.isMaster).toBe(true);
     expect(r.variants).toHaveLength(1);
     expect(r.alternates).toHaveLength(2);
-    const subs = r.alternates.find((a) => a.type === 'SUBTITLES');
+    const subs = r.alternates.find((a) => a.type === 'SUBTITLES')!;
     expect(subs.url).toBe('https://x.com/subs/pt-br.m3u8');
     expect(subs.language).toBe('pt-BR');
-    const audio = r.alternates.find((a) => a.type === 'AUDIO');
+    const audio = r.alternates.find((a) => a.type === 'AUDIO')!;
     expect(audio.url).toBe('https://x.com/audio/aac.m3u8');
     expect(audio.default).toBe(true);
   });
