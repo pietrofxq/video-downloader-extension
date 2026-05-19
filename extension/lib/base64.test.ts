@@ -33,8 +33,10 @@ describe('base64 round-trip', () => {
   });
 
   it('rejects non-Uint8Array inputs', () => {
-    expect(() => uint8ArrayToBase64('hello')).toThrow();
-    expect(() => uint8ArrayToBase64(null)).toThrow();
-    expect(() => base64ToUint8Array(123)).toThrow();
+    // Casts intentional — the test asserts that runtime guards fire even
+    // when callers reach for the function with the wrong type.
+    expect(() => uint8ArrayToBase64('hello' as unknown as Uint8Array)).toThrow();
+    expect(() => uint8ArrayToBase64(null as unknown as Uint8Array)).toThrow();
+    expect(() => base64ToUint8Array(123 as unknown as string)).toThrow();
   });
 });

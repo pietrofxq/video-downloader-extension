@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.1.42",
+    "@types/node": "^25.9.1",
     "@vitest/web-worker": "^2.1.8",
     "esbuild": "^0.24.0",
     "eslint": "^9.16.0",

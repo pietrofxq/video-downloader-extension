@@ -1,33 +1,48 @@
 import { describe, it, expect } from 'vitest';
 import { filterTopLevel } from './entry-filter.js';
+import type { MediaEntry } from './types.ts';
+
+// filterTopLevel only reads url / variants / alternates, so test fixtures
+// are intentionally partial — `as MediaEntry[]` papers over the missing
+// kind / pageUrl / adapterId / capturedAt fields the production shape
+// requires.
+// filterTopLevel only reads `.url` on variants/alternates, so this loose
+// stub is enough for the test fixtures.
+interface EntryStub {
+  id: string;
+  url: string;
+  variants?: { url: string }[];
+  alternates?: { url: string }[];
+}
+const asEntries = (xs: EntryStub[]): MediaEntry[] => xs as unknown as MediaEntry[];
 
 describe('filterTopLevel', () => {
   it('returns top-level entries when there are no list references', () => {
-    const entries = [
+    const entries = asEntries([
       { id: 'a', url: 'https://a.m3u8' },
       { id: 'b', url: 'https://b.m3u8' },
-    ];
+    ]);
     expect(filterTopLevel(entries)).toEqual(entries);
   });
 
   it('hides entries listed in another entry variants', () => {
-    const entries = [
+    const entries = asEntries([
       { id: 'a', url: 'https://master.m3u8', variants: [{ url: 'https://720.m3u8' }] },
       { id: 'b', url: 'https://720.m3u8' },
-    ];
+    ]);
     expect(filterTopLevel(entries)).toEqual([entries[0]]);
   });
 
   it('hides entries listed in another entry alternates (subtitle/alt-audio)', () => {
-    const entries = [
+    const entries = asEntries([
       { id: 'a', url: 'https://master.m3u8', alternates: [{ url: 'https://subs.m3u8' }] },
       { id: 'b', url: 'https://subs.m3u8' },
-    ];
+    ]);
     expect(filterTopLevel(entries)).toEqual([entries[0]]);
   });
 
   it('collapses both variants and alternates under a single master row', () => {
-    const entries = [
+    const entries = asEntries([
       {
         id: 'master',
         url: 'https://master.m3u8',
@@ -37,24 +52,24 @@ describe('filterTopLevel', () => {
       { id: 'v1', url: 'https://720.m3u8' },
       { id: 'v2', url: 'https://1080.m3u8' },
       { id: 'a1', url: 'https://subs.m3u8' },
-    ];
+    ]);
     expect(filterTopLevel(entries).map((e) => e.id)).toEqual(['master']);
   });
 
   it('keeps masters whose variants are not in the list', () => {
-    const entries = [
+    const entries = asEntries([
       {
         id: 'master',
         url: 'https://master.m3u8',
         variants: [{ url: 'https://720.m3u8' }],
       },
-    ];
+    ]);
     expect(filterTopLevel(entries)).toEqual(entries);
   });
 
   it('handles empty input', () => {
     expect(filterTopLevel([])).toEqual([]);
-    expect(filterTopLevel(null)).toEqual([]);
-    expect(filterTopLevel(undefined)).toEqual([]);
+    expect(filterTopLevel(null as unknown as MediaEntry[])).toEqual([]);
+    expect(filterTopLevel(undefined as unknown as MediaEntry[])).toEqual([]);
   });
 });

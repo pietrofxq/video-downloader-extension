@@ -45,23 +45,32 @@ describe('remuxTsToMp4', () => {
   });
 });
 
-function topLevelBoxes(buf) {
-  const boxes = [];
+interface Box {
+  type: string;
+  start: number;
+  end: number;
+  size: number;
+}
+
+type BoxVisitor = (type: string, start: number, end: number) => void;
+
+function topLevelBoxes(buf: Uint8Array): Box[] {
+  const boxes: Box[] = [];
   walkBoxes(buf, 0, buf.byteLength, (type, start, end) => {
     boxes.push({ type, start, end, size: end - start });
   });
   return boxes;
 }
 
-function readMfhdSequence(buf, moof) {
-  let sequence = null;
+function readMfhdSequence(buf: Uint8Array, moof: Box): number | null {
+  let sequence: number | null = null;
   walkBoxes(buf, moof.start + 8, moof.end, (type, start) => {
     if (type === 'mfhd') sequence = readU32(buf, start + 12);
   });
   return sequence;
 }
 
-function countChildBoxes(buf, parent, childType) {
+function countChildBoxes(buf: Uint8Array, parent: Box, childType: string): number {
   let count = 0;
   walkBoxes(buf, parent.start + 8, parent.end, (type) => {
     if (type === childType) count += 1;
@@ -69,8 +78,8 @@ function countChildBoxes(buf, parent, childType) {
   return count;
 }
 
-function collectTfhdFlags(buf, moof) {
-  const flags = [];
+function collectTfhdFlags(buf: Uint8Array, moof: Box): number[] {
+  const flags: number[] = [];
   walkBoxes(buf, moof.start + 8, moof.end, (type, start, end) => {
     if (type !== 'traf') return;
     walkBoxes(buf, start + 8, end, (subType, subStart) => {
@@ -82,8 +91,8 @@ function collectTfhdFlags(buf, moof) {
   return flags;
 }
 
-function collectTrunDataOffsets(buf, moof) {
-  const offsets = [];
+function collectTrunDataOffsets(buf: Uint8Array, moof: Box): number[] {
+  const offsets: number[] = [];
   walkBoxes(buf, moof.start + 8, moof.end, (type, start, end) => {
     if (type !== 'traf') return;
     walkBoxes(buf, start + 8, end, (subType, subStart) => {
@@ -97,7 +106,7 @@ function collectTrunDataOffsets(buf, moof) {
   return offsets;
 }
 
-function walkBoxes(buf, start, end, visit) {
+function walkBoxes(buf: Uint8Array, start: number, end: number, visit: BoxVisitor): void {
   let i = start;
   while (i + 8 <= end) {
     const size = readU32(buf, i);
@@ -107,10 +116,10 @@ function walkBoxes(buf, start, end, visit) {
   }
 }
 
-function readU32(buf, off) {
+function readU32(buf: Uint8Array, off: number): number {
   return ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
 }
 
-function readName(buf, off) {
+function readName(buf: Uint8Array, off: number): string {
   return String.fromCharCode(buf[off], buf[off + 1], buf[off + 2], buf[off + 3]);
 }

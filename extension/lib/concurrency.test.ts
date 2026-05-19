@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { runWithConcurrency } from './concurrency.js';
+import { runWithConcurrency, type ConcurrencyProgress } from './concurrency.js';
 
-function defer() {
-  let resolve, reject;
-  const promise = new Promise((res, rej) => {
+function defer<T = string>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
     reject = rej;
   });
@@ -36,7 +41,7 @@ describe('runWithConcurrency', () => {
   });
 
   it('calls onProgress after each task settles', async () => {
-    const events = [];
+    const events: ConcurrencyProgress<string>[] = [];
     const tasks = [
       () => Promise.resolve('a'),
       () => Promise.resolve('b'),
@@ -68,7 +73,9 @@ describe('runWithConcurrency', () => {
   });
 
   it('rejects invalid task array', async () => {
-    await expect(runWithConcurrency(null, 1)).rejects.toThrow();
+    await expect(
+      runWithConcurrency(null as unknown as (() => Promise<unknown>)[], 1),
+    ).rejects.toThrow();
   });
 
   it('survives an onProgress callback that throws', async () => {
@@ -80,8 +87,8 @@ describe('runWithConcurrency', () => {
   });
 
   it('does not start more tasks after an in-flight failure', async () => {
-    const started = [];
-    const d = defer();
+    const started: number[] = [];
+    const d = defer<string>();
     const tasks = [
       () => {
         started.push(0);

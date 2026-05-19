@@ -5,23 +5,23 @@ import defaultAdapter from './default.js';
 
 describe('pickAdapter', () => {
   it('picks hotmart on hotmart.com club lessons', () => {
-    expect(pickAdapter('https://hotmart.com/abc/club/123').id).toBe('hotmart');
-    expect(pickAdapter('https://app.hotmart.com/abc/club/123').id).toBe('hotmart');
+    expect(pickAdapter('https://hotmart.com/abc/club/123', '').id).toBe('hotmart');
+    expect(pickAdapter('https://app.hotmart.com/abc/club/123', '').id).toBe('hotmart');
   });
 
   it('falls back to default on non-club hotmart pages', () => {
-    expect(pickAdapter('https://hotmart.com/abc/sales').id).toBe('default');
-    expect(pickAdapter('https://hotmart.com/').id).toBe('default');
+    expect(pickAdapter('https://hotmart.com/abc/sales', '').id).toBe('default');
+    expect(pickAdapter('https://hotmart.com/', '').id).toBe('default');
   });
 
   it('does not match imposter hosts ending in hotmart.com', () => {
-    expect(pickAdapter('https://evilhotmart.com/x/club/1').id).toBe('default');
-    expect(pickAdapter('https://not-hotmart.com/x/club/1').id).toBe('default');
+    expect(pickAdapter('https://evilhotmart.com/x/club/1', '').id).toBe('default');
+    expect(pickAdapter('https://not-hotmart.com/x/club/1', '').id).toBe('default');
   });
 
   it('default adapter matches any URL as fallback', () => {
-    expect(pickAdapter('https://example.com/anything').id).toBe('default');
-    expect(pickAdapter('').id).toBe('default');
+    expect(pickAdapter('https://example.com/anything', '').id).toBe('default');
+    expect(pickAdapter('', '').id).toBe('default');
   });
 
   it('falls back to default when pageUrl is empty, regardless of mediaUrl', () => {
@@ -73,19 +73,25 @@ describe('hotmart.deriveFilename', () => {
   it('formats as "{section} - {lesson}" when both present', () => {
     expect(
       hotmart.deriveFilename({
+        url: '',
         pageMeta: { sectionTitle: 'Porta de Entrada', lessonTitle: 'Lição 3' },
       }),
     ).toBe('Porta de Entrada - Lição 3');
   });
 
   it('falls back to lesson, then title, then literal', () => {
-    expect(hotmart.deriveFilename({ pageMeta: { lessonTitle: 'Lição 1' } })).toBe('Lição 1');
-    expect(hotmart.deriveFilename({ pageMeta: { title: 'just-a-title' } })).toBe('just-a-title');
-    expect(hotmart.deriveFilename({ pageMeta: {} })).toBe('hotmart-lesson');
+    expect(hotmart.deriveFilename({ url: '', pageMeta: { lessonTitle: 'Lição 1' } })).toBe(
+      'Lição 1',
+    );
+    expect(hotmart.deriveFilename({ url: '', pageMeta: { title: 'just-a-title' } })).toBe(
+      'just-a-title',
+    );
+    expect(hotmart.deriveFilename({ url: '', pageMeta: {} })).toBe('hotmart-lesson');
   });
 
   it('sanitizes illegal chars in lesson titles', () => {
     const name = hotmart.deriveFilename({
+      url: '',
       pageMeta: { sectionTitle: 'a/b', lessonTitle: 'c:d' },
     });
     expect(name).not.toMatch(/[/:]/);

@@ -83,11 +83,19 @@ describe('AES-128-CBC round-trip via Web Crypto', () => {
     const iv = ivFromSequence(1);
     const plaintext = new TextEncoder().encode('hello world from hls');
 
-    const rawKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, [
-      'encrypt',
-    ]);
+    const rawKey = await crypto.subtle.importKey(
+      'raw',
+      keyBytes as Uint8Array<ArrayBuffer>,
+      { name: 'AES-CBC' },
+      false,
+      ['encrypt'],
+    );
     const encrypted = new Uint8Array(
-      await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, rawKey, plaintext),
+      await crypto.subtle.encrypt(
+        { name: 'AES-CBC', iv: iv as Uint8Array<ArrayBuffer> },
+        rawKey,
+        plaintext as Uint8Array<ArrayBuffer>,
+      ),
     );
 
     const decryptKey = await importAesKey(keyBytes);
