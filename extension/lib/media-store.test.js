@@ -114,6 +114,32 @@ describe('removeTab', () => {
   });
 });
 
+describe('patchEntry', () => {
+  it('shallow-merges a patch onto an existing entry', async () => {
+    const e = await store.addEntry(42, { url: 'https://x/a.m3u8', kind: 'hls' });
+    const patched = await store.patchEntry(42, e.id, {
+      isMaster: true,
+      variants: [{ url: 'https://x/1.m3u8', bandwidth: 1000 }],
+    });
+    expect(patched.isMaster).toBe(true);
+    expect(patched.variants).toHaveLength(1);
+    // existing fields preserved
+    expect(patched.url).toBe('https://x/a.m3u8');
+  });
+
+  it('returns null for an unknown tab or media id', async () => {
+    expect(await store.patchEntry(999, 'missing', { foo: 1 })).toBeNull();
+    await store.addEntry(42, { url: 'https://x/a.m3u8' });
+    expect(await store.patchEntry(42, 'missing', { foo: 1 })).toBeNull();
+  });
+
+  it('persists patched fields to chrome.storage.session', async () => {
+    const e = await store.addEntry(42, { url: 'https://x/a.m3u8' });
+    await store.patchEntry(42, e.id, { parseError: 'token expired' });
+    expect(backing.mediaState[42].entries[0].parseError).toBe('token expired');
+  });
+});
+
 describe('setAdapterMeta', () => {
   it('stores meta on a tab with no prior state and reports changed: true', async () => {
     const { changed } = await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 3' });

@@ -1,4 +1,5 @@
 import { escapeHtml } from '../lib/dom-utils.js';
+import { filterTopLevel } from '../lib/entry-filter.js';
 import { redactUrl } from '../lib/log.js';
 
 const $content = document.getElementById('content');
@@ -50,9 +51,37 @@ function entryBadges(entry) {
   const out = [];
   const kind = KIND_LABELS[entry.kind] || entry.kind;
   if (kind) out.push(kind);
-  // v0.5+ will add encryption / DRM badges parsed from the manifest.
+  if (entry.parseError) out.push('manifest unavailable');
+  // v0.6+ will add encryption / DRM badges parsed from segments + ContentProtection.
   return out;
 }
+
+function formatVariant(v) {
+  const resPart = v.resolution && v.resolution.includes('x')
+    ? `${v.resolution.split('x')[1]}p`
+    : v.resolution || '';
+  const bwPart = v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : '';
+  if (resPart && bwPart) return `${resPart} (${bwPart})`;
+  return resPart || bwPart || 'variant';
+}
+
+function qualityOptionsHtml(entry) {
+  if (entry.parseError) {
+    return '<option value="auto">Manifest unavailable</option>';
+  }
+  if (Array.isArray(entry.variants) && entry.variants.length > 0) {
+    return entry.variants
+      .map((v) => `<option value="${escapeHtml(v.url)}">${escapeHtml(formatVariant(v))}</option>`)
+      .join('');
+  }
+  if (entry.isMaster === false) {
+    return '<option value="single">Single quality</option>';
+  }
+  return '<option value="auto">Loading…</option>';
+}
+
+// filterTopLevel lives in lib/entry-filter.js — the SW shares it for the
+// badge count so the two never disagree on what's "user-visible".
 
 // ---------- render ----------
 
@@ -84,7 +113,7 @@ function renderRow(entry) {
       <div class="row-meta">${escapeHtml(filename)}${badges.length ? ' &middot; ' + badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(' &middot; ') : ''}</div>
       <div class="row-actions">
         <select class="quality" aria-label="Quality">
-          <option value="auto">Auto (v0.5 will populate)</option>
+          ${qualityOptionsHtml(entry)}
         </select>
         ${action}
       </div>
@@ -127,15 +156,16 @@ function restoreSelectState(state) {
 }
 
 function render(state) {
-  const entries = state?.entries ?? [];
-  entriesById = new Map(entries.map((e) => [e.id, e]));
-  if (entries.length === 0) {
+  const rawEntries = state?.entries ?? [];
+  entriesById = new Map(rawEntries.map((e) => [e.id, e]));
+  const visible = filterTopLevel(rawEntries);
+  if (visible.length === 0) {
     $content.innerHTML = renderEmpty();
     $footer.classList.add('hidden');
     return;
   }
   const selectState = captureSelectState();
-  $content.innerHTML = entries.map(renderRow).join('');
+  $content.innerHTML = visible.map(renderRow).join('');
   $footer.classList.remove('hidden');
   restoreSelectState(selectState);
 }

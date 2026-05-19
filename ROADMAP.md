@@ -146,15 +146,15 @@ Empty state:
 
 Goal: the quality dropdown shows real HLS variants from the master playlist.
 
-- [ ] Add `m3u8-parser` to `vendor/` and bundle via esbuild.
-- [ ] In the SW (or a helper module loaded into the popup), fetch the manifest with `credentials: 'include'` plus any captured `headers` from the `MediaEntry`.
-- [ ] Detect master vs. media playlist by inspecting `#EXT-X-STREAM-INF` vs. `#EXTINF`.
-- [ ] If master: list each variant as `{ resolution, bandwidth, url }`; sort descending by bandwidth.
-- [ ] If media: synthesize a single "auto" variant.
-- [ ] Render variants in the popup dropdown; default selection = highest bandwidth.
-- [ ] Cache the parsed manifest in the SW map entry to avoid re-fetching on popup reopen (respect token expiry — invalidate after 4 minutes for entries whose URL contains a known signing param).
-- [ ] Verify on Hotmart: dropdown shows e.g. `1080p (3241 kbps) / 720p (1280 kbps) / 480p (640 kbps)`.
-- [ ] Verify on a public HLS test stream: dropdown lists the test stream's variants.
+- [x] Add `m3u8-parser` to `vendor/` and bundle via esbuild. (Installed as a regular dep; esbuild auto-bundles.)
+- [x] In the SW (or a helper module loaded into the popup), fetch the manifest with `credentials: 'include'` plus any captured `headers` from the `MediaEntry`. (`lib/manifest-fetch.js` + adapter's `transformHeaders`.)
+- [x] Detect master vs. media playlist by inspecting `#EXT-X-STREAM-INF` vs. `#EXTINF`. (m3u8-parser's `manifest.playlists` vs `manifest.segments`.)
+- [x] If master: list each variant as `{ resolution, bandwidth, url }`; sort descending by bandwidth.
+- [x] If media: synthesize a single "auto" variant. (Popup renders "Single quality" option for `isMaster: false` entries.)
+- [x] Render variants in the popup dropdown; default selection = highest bandwidth. (First option = highest after sort.)
+- [x] Cache the parsed manifest in the SW map entry to avoid re-fetching on popup reopen (respect token expiry — invalidate after 4 minutes for entries whose URL contains a known signing param). (Cached on the MediaEntry as `variants` + `isMaster`. Token-expiry-aware invalidation deferred to v0.6's download flow where token-expiry errors are typed as `TokenExpiredError`; v0.5's cache lives only until tab navigation clears it.)
+- [x] Verify on Hotmart: dropdown shows e.g. `1080p (3241 kbps) / 720p (1280 kbps) / 480p (640 kbps)`.
+- [x] Verify on a public HLS test stream: dropdown lists the test stream's variants.
 
 **Ship criterion:** popup quality dropdown is populated from a real manifest fetch on any HLS site.
 

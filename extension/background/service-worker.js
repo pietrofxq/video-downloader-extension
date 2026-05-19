@@ -1,13 +1,17 @@
 import { log } from '../lib/log.js';
 import { MSG } from '../lib/messages.js';
-import { pickAdapter } from '../adapters/index.js';
+import { pickAdapter, getAdapter } from '../adapters/index.js';
 import { classifyUrl, isPrimary, WEBREQUEST_PATTERNS } from '../lib/media-detection.js';
+import { filterTopLevel } from '../lib/entry-filter.js';
+import { parseManifest } from '../lib/m3u8.js';
+import { fetchManifest } from '../lib/manifest-fetch.js';
 import {
   addEntry,
   clearTab,
   getTabEntries,
   getTabState,
   getTabUrl,
+  patchEntry,
   ready,
   removeTab,
   setAdapterMeta,
@@ -160,6 +164,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     }
+    case MSG.MANIFEST_BODY: {
+      const tabId = sender.tab?.id;
+      const { url, text } = msg.payload ?? {};
+      if (tabId == null || tabId < 0 || typeof url !== 'string' || typeof text !== 'string') {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void handleManifestBody(tabId, url, text);
+      sendResponse({ ok: true });
+      return false;
+    }
     case MSG.PAGE_META: {
       const tabId = sender.tab?.id;
       if (tabId == null || tabId < 0) {
@@ -241,11 +256,109 @@ async function handleDetection({ url, tabId, kind, headers, pageUrl, source }) {
 
   await updateBadge(tabId);
   await broadcastTabState(tabId);
+
+  // Eagerly parse HLS manifests so the popup's quality dropdown is ready
+  // by the time the user opens it. ensureParsed is idempotent.
+  if (stored.kind === 'hls') {
+    void ensureParsed(tabId, stored);
+  }
+}
+
+// ---------- Manifest parsing ----------
+
+const inFlightParses = new Set(); // `${tabId}:${mediaId}` while a parse is running
+
+async function ensureParsed(tabId, entry) {
+  if (entry.variants || entry.parseError) return; // already done or terminally failed
+  const key = `${tabId}:${entry.id}`;
+  if (inFlightParses.has(key)) return;
+  inFlightParses.add(key);
+  try {
+    const adapter = getAdapter(entry.adapterId);
+    const headers = adapter.transformHeaders?.(entry.headers ?? {}) ?? entry.headers ?? {};
+    const { text, finalUrl } = await fetchManifest(entry.url, headers);
+
+    // Race-check: a manifest-body capture may have populated this entry
+    // while our fetch was in flight. The body capture is preferred (it
+    // hits the player's cookies/origin, which is exactly what signed-URL
+    // CDNs validate against).
+    if (await entryIsResolved(tabId, entry.id)) return;
+
+    const parsed = parseManifest(text, finalUrl);
+    await patchEntry(tabId, entry.id, {
+      isMaster: parsed.isMaster,
+      variants: parsed.variants,
+      alternates: parsed.alternates,
+      segmentCount: parsed.segmentCount,
+    });
+    log.info('parsed manifest (sw fetch)', {
+      tabId,
+      mediaId: entry.id,
+      isMaster: parsed.isMaster,
+      variants: parsed.variants.length,
+    });
+    await updateBadge(tabId);
+  } catch (err) {
+    // Race-check again before recording a parse error — body capture
+    // may have already succeeded.
+    if (await entryIsResolved(tabId, entry.id)) return;
+    const message = String(err?.message ?? err);
+    await patchEntry(tabId, entry.id, { parseError: message });
+    log.warn('manifest parse failed', { tabId, mediaId: entry.id, err: message });
+  } finally {
+    inFlightParses.delete(key);
+  }
+  await broadcastTabState(tabId);
+}
+
+async function entryIsResolved(tabId, mediaId) {
+  const state = await getTabState(tabId);
+  const fresh = state.entries.find((e) => e.id === mediaId);
+  return !!(fresh && fresh.variants);
+}
+
+async function handleManifestBody(tabId, url, text) {
+  await seedTabs();
+  const state = await getTabState(tabId);
+  const entry = state.entries.find((e) => e.url === url);
+  if (!entry) {
+    // Body arrived before the entry. Rare in practice — webRequest fires
+    // before the response resolves — but possible if the SW just restarted.
+    log.debug('manifest body for unknown entry', { tabId, url });
+    return;
+  }
+  if (entry.variants) return; // already parsed (we win the race only once)
+  try {
+    const parsed = parseManifest(text, url);
+    // Clear any prior parseError — body capture overrides a failed SW fetch.
+    await patchEntry(tabId, entry.id, {
+      isMaster: parsed.isMaster,
+      variants: parsed.variants,
+      alternates: parsed.alternates,
+      segmentCount: parsed.segmentCount,
+      parseError: null,
+    });
+    log.info('parsed manifest (body capture)', {
+      tabId,
+      mediaId: entry.id,
+      isMaster: parsed.isMaster,
+      variants: parsed.variants.length,
+    });
+    await updateBadge(tabId);
+    await broadcastTabState(tabId);
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    log.warn('parse from body failed', { tabId, mediaId: entry.id, err: message });
+    // Don't set parseError — the SW fallback fetch may still succeed.
+  }
 }
 
 async function updateBadge(tabId) {
+  // Count only top-level (user-visible) entries — what the popup actually
+  // renders. Raw entry count is misleading because variants/alternates
+  // collapse under their master.
   const entries = await getTabEntries(tabId);
-  const count = entries.length;
+  const count = filterTopLevel(entries).length;
   try {
     await chrome.action.setBadgeText({ tabId, text: count > 0 ? String(count) : '' });
     if (count > 0) {
@@ -288,6 +401,14 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       const state = await getTabState(tabId);
       port.postMessage({ type: 'STATE', state });
+      // Schedule parsing for any HLS entries whose manifest hasn't been
+      // fetched yet. Covers SW restart (in-flight Set is empty on cold
+      // start, so previously interrupted parses get retried).
+      for (const entry of state.entries) {
+        if (entry.kind === 'hls' && !entry.variants && !entry.parseError) {
+          void ensureParsed(tabId, entry);
+        }
+      }
     } catch (err) {
       log.warn('initial popup SUBSCRIBE state failed', err);
     }

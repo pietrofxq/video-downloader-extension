@@ -36,6 +36,25 @@ if (/^https?:$/.test(location.protocol)) {
     if (!data || data.source !== HOOK_TAG) return;
     const url = typeof data.url === 'string' ? data.url : null;
     if (!url) return;
+
+    // Manifest body capture: the player's fetch already succeeded with the
+    // right Origin/Referer, so reuse that body instead of re-fetching from
+    // the SW (which gets 403'd by signed-URL CDNs). Bypasses dedupe — the
+    // body arrives separately from the URL observation.
+    if (data.kind === 'manifest-body' && typeof data.text === 'string') {
+      try {
+        chrome.runtime
+          .sendMessage({
+            type: MSG.MANIFEST_BODY,
+            payload: { url, text: data.text },
+          })
+          .catch(() => {});
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
     const kind = classifyUrl(url);
     if (!kind) return;
     if (!markSeen(url)) return;

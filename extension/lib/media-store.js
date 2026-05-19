@@ -92,6 +92,17 @@ function shallowEqualMeta(a, b) {
   return true;
 }
 
+export async function patchEntry(tabId, mediaId, patch) {
+  await init();
+  const s = tabState.get(tabId);
+  if (!s) return null;
+  const entry = s.entries.find((e) => e.id === mediaId);
+  if (!entry) return null;
+  Object.assign(entry, patch);
+  await persist();
+  return entry;
+}
+
 export async function setAdapterMeta(tabId, adapterId, meta) {
   await init();
   let s = tabState.get(tabId);

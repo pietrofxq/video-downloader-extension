@@ -2,17 +2,19 @@
 // available here. Instrument fetch + XMLHttpRequest, then forward every
 // observed request URL to the isolated-world bridge via window.postMessage.
 // The isolated-world script (frame-content.js) decides what to do with it.
+//
+// As of v0.5 we ALSO capture manifest response bodies (m3u8/mpd) and
+// forward them. SW fetches from chrome-extension:// origin are commonly
+// rejected by signed-URL CDNs (e.g., Hotmart's Akamai 403s on Origin),
+// so the SW reads the body the player already fetched instead.
 
 (function () {
   if (window.__VDL_HOOKED__) return;
   window.__VDL_HOOKED__ = true;
 
   const TAG = 'vdl-hook';
-
-  // Scope postMessage to the current origin — the isolated-world bridge runs
-  // in the same frame, so '*' would needlessly expose captures to any other
-  // listener on the page.
   const ORIGIN = window.location.origin;
+
   function post(payload) {
     try {
       window.postMessage({ source: TAG, ...payload }, ORIGIN);
@@ -40,13 +42,21 @@
     return Object.keys(out).length ? out : undefined;
   }
 
+  // m3u8 / mpd manifest URLs — we want their bodies for parsing.
+  // Note: false positives are fine (the isolated-world bridge will reject
+  // anything that classifyUrl can't tag).
+  function isManifestUrl(url) {
+    if (typeof url !== 'string') return false;
+    return /\.m3u8(?:\?|#|$)/i.test(url) || /\.mpd(?:\?|#|$)/i.test(url);
+  }
+
   // ---- fetch ----
   const origFetch = window.fetch;
   if (typeof origFetch === 'function') {
     window.fetch = function (input, init) {
+      let url;
+      let headerSource;
       try {
-        let url;
-        let headerSource;
         if (typeof input === 'string') {
           url = input;
           headerSource = init?.headers;
@@ -54,11 +64,33 @@
           url = input.url;
           headerSource = init?.headers ?? input.headers;
         }
-        if (url) post({ kind: 'fetch', url, headers: collectHeaders(headerSource) });
       } catch {
         // never break the page over an observation failure
       }
-      return origFetch.apply(this, arguments);
+      const promise = origFetch.apply(this, arguments);
+      if (url) {
+        try {
+          post({ kind: 'fetch', url, headers: collectHeaders(headerSource) });
+        } catch {
+          // ignore
+        }
+        if (isManifestUrl(url)) {
+          // Clone is essential — reading the body would consume the
+          // player's stream. Send the text body once available.
+          promise
+            .then(async (res) => {
+              try {
+                if (!res || !res.ok) return;
+                const text = await res.clone().text();
+                post({ kind: 'manifest-body', url, text });
+              } catch {
+                // body unreadable — leave it; SW fallback will try fetch.
+              }
+            })
+            .catch(() => {});
+        }
+      }
+      return promise;
     };
   }
 
@@ -93,6 +125,18 @@
       try {
         if (this.__vdlUrl) {
           post({ kind: 'xhr', url: this.__vdlUrl, headers: this.__vdlHeaders });
+          if (isManifestUrl(this.__vdlUrl)) {
+            const xhr = this;
+            xhr.addEventListener('load', function () {
+              try {
+                if (xhr.status >= 200 && xhr.status < 300 && typeof xhr.responseText === 'string') {
+                  post({ kind: 'manifest-body', url: xhr.__vdlUrl, text: xhr.responseText });
+                }
+              } catch {
+                // ignore
+              }
+            });
+          }
         }
       } catch {
         // never break the page
