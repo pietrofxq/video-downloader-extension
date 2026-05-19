@@ -8,6 +8,7 @@ import {
   UnsupportedFormatError,
 } from '../lib/errors.js';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
+import { remuxTsToMp4 } from './remux.js';
 
 const SEGMENT_CONCURRENCY = 4;
 
@@ -78,7 +79,8 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
   }
 
   // 3. Fetch + decrypt segments with bounded concurrency. Each task returns
-  //    the decrypted bytes for its segment.
+  //    { bytes, duration } so we preserve the original per-segment boundary
+  //    + duration for the remux step (mux.js needs per-segment pushes).
   let fetched = 0;
   let decrypted = 0;
   const tasks = segments.map((seg) => async () => {
@@ -91,47 +93,51 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
     fetched += 1;
     onProgress({ stage: 'fetch', current: fetched, total });
 
+    let bytes;
     if (!seg.encrypted) {
-      return cipher;
+      bytes = cipher;
+    } else {
+      const cryptoKey = await getCryptoKey(seg.keyUrl);
+      if (!cryptoKey) {
+        // Encrypted segment with no resolvable key URL is a manifest defect.
+        throw new DecryptionError(
+          `segment ${seg.sequence} is marked encrypted but has no resolvable key URL`,
+        );
+      }
+      const iv = seg.iv ?? ivFromSequence(seg.sequence);
+      try {
+        bytes = await decryptSegment(cipher, cryptoKey, iv);
+      } catch (err) {
+        throw new DecryptionError(
+          `decrypt failed for segment ${seg.sequence}: ${err?.message ?? err}`,
+        );
+      }
+      decrypted += 1;
+      onProgress({ stage: 'decrypt', current: decrypted, total });
     }
-    const cryptoKey = await getCryptoKey(seg.keyUrl);
-    if (!cryptoKey) {
-      // Encrypted segment with no resolvable key URL is a manifest defect.
-      // Fail loud rather than silently returning cipher bytes that would
-      // produce a broken file.
-      throw new DecryptionError(
-        `segment ${seg.sequence} is marked encrypted but has no resolvable key URL`,
-      );
-    }
-    const iv = seg.iv ?? ivFromSequence(seg.sequence);
-    let plain;
-    try {
-      plain = await decryptSegment(cipher, cryptoKey, iv);
-    } catch (err) {
-      throw new DecryptionError(
-        `decrypt failed for segment ${seg.sequence}: ${err?.message ?? err}`,
-      );
-    }
-    decrypted += 1;
-    onProgress({ stage: 'decrypt', current: decrypted, total });
-    return plain;
+    return { bytes, duration: seg.duration };
   });
 
   const decryptedSegments = await runWithConcurrency(tasks, SEGMENT_CONCURRENCY);
 
-  // 4. Concatenate into a single MPEG-TS buffer.
-  onProgress({ stage: 'concat', current: 0, total: 1 });
-  const bytes = concatenate(decryptedSegments);
-  onProgress({ stage: 'concat', current: 1, total: 1 });
+  // 4. Remux per-segment via mux.js. Pushing each segment with
+  //    setBaseMediaDecodeTime(cumulative) is mux.js's intended VOD pattern;
+  //    pushing one big concatenation produces ONE giant moof with the
+  //    wrong baseMediaDecodeTime (VLC then reports a duration in hundreds
+  //    of hours and plays nothing).
+  onProgress({ stage: 'remux', current: 0, total: decryptedSegments.length });
+  const mp4Bytes = await remuxTsToMp4(decryptedSegments, ({ done, totalSegs }) => {
+    onProgress({ stage: 'remux', current: done, total: totalSegs });
+  });
 
-  // 5. Make a Blob URL for the SW to hand to chrome.downloads.download.
-  const blob = new Blob([bytes], { type: 'video/mp2t' });
+  // 6. Make a Blob URL for the SW to hand to chrome.downloads.download.
+  const blob = new Blob([mp4Bytes], { type: 'video/mp4' });
   const blobUrl = URL.createObjectURL(blob);
   return {
     requestId,
     blobUrl,
-    filename: `${filename}.ts`,
-    bytes: bytes.length,
+    filename: `${filename}.mp4`,
+    bytes: mp4Bytes.length,
     segments: total,
   };
 }
@@ -182,6 +188,9 @@ function parsePlaylist(text, baseUrl) {
       // playlists) — using it would feed wrong IVs into every segment
       // after the first on streams without EXT-X-KEY:IV=.
       sequence: startSeq + i,
+      // Segment duration (seconds) from #EXTINF. Used to drive mux.js's
+      // per-segment baseMediaDecodeTime in the remux step.
+      duration: typeof seg.duration === 'number' ? seg.duration : 0,
       encrypted,
       keyUrl,
       iv: toUint8(key?.iv),
@@ -220,17 +229,6 @@ function throwFromReply(reply, url) {
   throw new Error(message);
 }
 
-function concatenate(chunks) {
-  let length = 0;
-  for (const c of chunks) length += c.length;
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.length;
-  }
-  return out;
-}
 
 // uint8ArrayToBase64 is re-exported for completeness; the downloader doesn't
 // use it directly but PROXY_FETCH replies encode bodies with it.

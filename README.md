@@ -11,7 +11,7 @@ The extension watches every tab for media manifests using both `webRequest` list
 1. **Captures** the URL plus any auth context it needs — cookies are sent automatically; some sites (like Hotmart) embed short-lived signed tokens directly in the URL; others use `Authorization` headers that the frame hook forwards alongside the URL.
 2. **Routes** the detection through a **site adapter** matched by the page origin. Adapters can rename the file, supply better metadata, and apply site-specific quirks. Unknown sites fall back to the **default adapter**, which uses the page `<title>` and the URL filename.
 3. **Lists detected videos** in the popup UI — one row per stream, with source-site adapter badge, quality dropdown, format/encryption badges, and a Download button.
-4. **Downloads** segments, decrypts when needed (AES-128 for HLS, ClearKey AES-CTR for DASH — no DRM), concatenates, and **remuxes to MP4** (stream copy — no re-encoding) using `ffmpeg.wasm` inside an offscreen document.
+4. **Downloads** segments, decrypts when needed (AES-128 for HLS, ClearKey AES-CTR for DASH — no DRM), and **remuxes to fragmented MP4** (stream copy — no re-encoding) using `mux.js` inside an offscreen document. The remux step also patches the moov / moof boxes after `mux.js` produces them (see `AGENTS.md` §8 for the specific quirks).
 5. Saves the resulting MP4 via `chrome.downloads.download`.
 
 For Hotmart Club specifically: the player runs in a cross-origin iframe (`cf-embed.play.hotmart.com`) streaming HLS-packaged, AES-128 encrypted segments signed with a short-lived Akamai token (`hdntl`). The Hotmart adapter handles all of that automatically — the user just presses play and clicks Download.
@@ -37,15 +37,13 @@ hotmart-downloader/
 │   │   └── popup.js
 │   ├── offscreen/
 │   │   ├── offscreen.html
-│   │   └── offscreen.js             # HLS/DASH parse, AES-128/CTR decrypt, ffmpeg.wasm remux
+│   │   ├── offscreen.js             # message router for the offscreen context
+│   │   ├── downloader.js            # HLS pipeline: fetch + AES-128 decrypt + remux orchestration
+│   │   ├── hls-decrypt.js           # Web Crypto AES-CBC + IV derivation from media sequence
+│   │   └── remux.js                 # mux.js Transmuxer driver + moov / moof post-patcher
 │   ├── options/
 │   │   ├── options.html             # defaults, per-adapter enable/disable, disclaimer
 │   │   └── options.js
-│   ├── vendor/
-│   │   ├── ffmpeg-core.wasm
-│   │   ├── ffmpeg-core.js
-│   │   ├── m3u8-parser.js
-│   │   └── mpd-parser.js
 │   ├── lib/                         # shared modules (messaging, sanitize, url helpers, adapter API)
 │   └── icons/
 │       ├── icon-16.png

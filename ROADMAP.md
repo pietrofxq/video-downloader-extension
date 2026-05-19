@@ -186,17 +186,25 @@ Architectural addition (didn't survive contact with reality): all segment / key 
 
 ---
 
-## v0.7 — ffmpeg.wasm remux to MP4
+## v0.7 — mux.js remux to MP4
 
 Goal: the saved file is `.mp4` (H.264 + AAC, stream copy, plays in QuickTime/Chrome/VLC).
 
-- [ ] Add `@ffmpeg/ffmpeg` + `@ffmpeg/core` to `vendor/`; bundle the wasm with esbuild.
-- [ ] In `offscreen.js`, after segment concatenation, run `ffmpeg -i input.ts -c copy -bsf:a aac_adtstoasc output.mp4` via the WASM API.
-- [ ] Use the OPFS-backed ffmpeg virtual FS path for large files to avoid copying buffers.
-- [ ] Report progress stage `remux` while ffmpeg runs (use ffmpeg.wasm's progress callback if available; otherwise a spinner is fine).
-- [ ] Change the saved filename to the adapter-derived name + `.mp4`.
-- [ ] Tear down the offscreen document after each download to release WASM memory (`chrome.offscreen.closeDocument`).
-- [ ] Verify on Hotmart and a public HLS stream: downloaded MP4 plays in QuickTime with audio + video sync.
+Implementation note: the roadmap originally specified ffmpeg.wasm. After
+looking at the actual implementation needs — HLS H.264+AAC TS → fragmented
+MP4 with no re-encoding — `mux.js` (the same transmuxer videojs/HLS.js use
+internally) is a much better fit. 150 KB JS vs 25+ MB WASM, no
+SharedArrayBuffer/COOP/COEP setup, no virtual FS. We retain the option to
+swap in ffmpeg.wasm later if we ever need re-encoding, audio-only mux, or
+subtitle muxing.
+
+- [x] Add `mux.js` as a dependency; esbuild bundles it into the offscreen entry. (No `vendor/` copy needed; the bundle handles it.)
+- [x] In `offscreen/remux.js`, drive a `muxjs.mp4.Transmuxer({ remux: true })` per-segment (push + flush with running `setBaseMediaDecodeTime`), normalize each emitted data event into a single moof-with-two-trafs fragment, then patch the moov / moof boxes (tfdt, durations, signed cto, mfhd seq). See `AGENTS.md` §8a for why every step is necessary. (`keepOriginalTimestamps: true` was the original plan and caused the 371-hour-duration bug — do **not** re-introduce it.)
+- [x] In-memory remux for v0.7. OPFS-backed path deferred until we hit a multi-GB lesson (the same threshold we set for the TS concat step).
+- [x] Report progress stage `remux` while mux.js runs. (Plumbed; popup rendering still lands in v0.8.)
+- [x] Change the saved filename to the adapter-derived name + `.mp4`. Blob MIME changed to `video/mp4`.
+- [ ] Tear down the offscreen document after each download to release memory (`chrome.offscreen.closeDocument`). (Deferred: v0.8 will revisit when wiring progress UI + persisted in-progress download state. Today the doc stays alive across downloads.)
+- [x] Verify on Hotmart: downloaded MP4 plays cleanly in VLC with audio + video sync, accurate duration, no blank intro, working seek. (ffprobe + repaired-copy comparison confirmed correct fragment layout.)
 
 **Ship criterion:** any HLS download produces a clean `.mp4` that plays in QuickTime and Chrome.
 

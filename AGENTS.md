@@ -20,7 +20,7 @@ The original product spec (Hotmart-specific) lives in `plan.txt`; this document 
 | Language | **JavaScript (ES2022)** | No TypeScript initially — keep deps and build simple. Migrate to TS post-v1.3 once the adapter API surface stabilizes. |
 | Bundler | **esbuild** | Fast, zero-config, IIFE bundles per content script entry. |
 | Package manager | **npm** | Lockfile committed. |
-| Media remux | **ffmpeg.wasm** (`@ffmpeg/ffmpeg`, `@ffmpeg/core`) | MPEG-TS → MP4 stream-copy, and audio+video mux for DASH. **Never re-encode.** |
+| Media remux | **`mux.js`** (`mux.js` npm package) | MPEG-TS → fragmented MP4 stream-copy. **Never re-encode.** mux.js targets MSE, not on-disk files, so its output requires moov / moof post-patching before VLC and QuickTime will play it (see §8). |
 | HLS parsing | **m3u8-parser** (npm) | Bundled, runs in offscreen document. |
 | DASH parsing | **mpd-parser** (npm) | Same context as m3u8-parser. |
 | Crypto | **Web Crypto API** (`crypto.subtle`) | AES-128-CBC for HLS, AES-CTR for DASH ClearKey. No external crypto libraries. **No DRM (Widevine/PlayReady/FairPlay).** |
@@ -49,7 +49,7 @@ Manifest V3 forces work to be split across isolated contexts. Keep the responsib
 │ (all http(s) frames)        │     │ (offscreen/offscreen.html|.js)   │
 │  • run_at: document_start   │     │  • m3u8 / mpd parse              │
 │  • Hooks fetch + XHR        │     │  • Web Crypto AES-128 / AES-CTR  │
-│  • Forwards URLs + headers  │     │  • ffmpeg.wasm remux to MP4      │
+│  • Forwards URLs + headers  │     │  • mux.js remux + moov/moof patch│
 └─────────────────────────────┘     │  • Reports progress via runtime  │
                                     └──────────────────────────────────┘
 ┌─────────────────────────────┐     ┌──────────────────────────────────┐
@@ -116,16 +116,16 @@ export function pickAdapter(pageUrl, mediaUrl) {
 `webRequest.onBeforeRequest` sees the URL but cannot see request *bodies* or *headers added by JS*. The frame hook lets us capture URLs that only appear after JS-driven playback, and also capture custom `Authorization` headers via patched `XHR.setRequestHeader` / `fetch(init.headers)`. Both mechanisms are needed; the SW deduplicates by URL.
 
 ### Why an offscreen document, not the service worker
-Service workers in MV3 are killed after ~30s idle and cannot hold large blobs reliably. ffmpeg.wasm needs WASM + Workers + persistent memory. The **offscreen document** (`chrome.offscreen.createDocument`) is the MV3-sanctioned escape hatch for exactly this kind of work. Always tear it down after a download with `chrome.offscreen.closeDocument()` to free memory.
+Service workers in MV3 are killed after ~30s idle and cannot hold large blobs or run typed-array-heavy code reliably. The remux pipeline (mux.js Transmuxer, manual moov patching, Web Crypto, Blob creation) all need a real Document context with stable memory. The **offscreen document** (`chrome.offscreen.createDocument`) is the MV3-sanctioned escape hatch for exactly this kind of work; we keep it alive across downloads and revoke each `blob:` URL via a `REVOKE_BLOB` message once `chrome.downloads.onChanged` reports complete or interrupted.
 
 ### Why the adapter pattern
 Hotmart needs a cross-origin iframe scraper, signed-token handling, and a specific filename template. A second site (Vimeo, Bunny CDN, generic Video.js) will need a *different* set of three things. The adapter pattern keeps core code generic and pushes site oddities into ~50-line files that can be added or removed without touching the engine. The matching contract is also what makes the popup's per-row "adapter badge" possible.
 
 ### Why stream-copy remux (no re-encoding)
-The source is almost always already H.264 + AAC. `ffmpeg -i in.ts -c copy -bsf:a aac_adtstoasc out.mp4` is ~50× faster than re-encoding and lossless. **Never** add `-c:v libx264` or similar — re-encoding in WASM is unusable for long videos.
+The source is almost always already H.264 + AAC. mux.js demuxes the MPEG-TS and re-wraps the elementary streams in a fragmented MP4 (`moof` + `mdat`) without touching the encoded samples — lossless and ~50× faster than re-encoding. **Never** introduce a re-encode path (libx264, AAC encode) into the offscreen document; if a future codec needs it, fail loudly with `UnsupportedFormatError` instead.
 
-### Why OPFS for large downloads
-Holding 1–2 GB of concatenated TS data in JS memory is fragile in Chrome. For anything over ~500 MB, write decrypted segments to OPFS in the offscreen document, mount that into ffmpeg.wasm's virtual FS, then read back the MP4. Below the threshold, in-memory `Uint8Array` concatenation is fine and faster.
+### Why mux.js (and not ffmpeg.wasm)
+mux.js is ~150 KB of plain JS, ships as a normal npm dep, runs fine inside the offscreen document with no WASM or worker setup, and is the same library video.js uses for HLS playback in MSE. ffmpeg.wasm works but adds ~30 MB of WASM + a `vendor/` directory + cross-origin-isolation requirements (COOP/COEP headers in `web_accessible_resources`) that bloat the install. The trade-off is that mux.js targets MSE — its output assumes a player layers the timeline externally — so we patch the moov / moof boxes after remux (see §8). For long videos we drive mux.js segment-by-segment (push + flush) rather than concatenating the TS, which lets the post-patcher rewrite each `moof.tfdt` independently without re-parsing the whole TS stream.
 
 ### Why `<all_urls>` host permissions
 The engine has to fetch segments from any origin (the offscreen document doesn't inherit the page's CORS context) and observe `webRequest` everywhere. `<all_urls>` is the simplest way; the trade-off is a scarier install prompt. The options page should explain this in plain language and let users disable detection per-origin if they want.
@@ -178,9 +178,9 @@ Every `MediaEntry` carries an `adapterId` from the moment it's detected; downstr
 
 1. **Short-lived signed tokens** (Hotmart's `hdntl`, Cloudflare/Akamai variants). Treat any download that starts >5 minutes after capture as suspect. If a segment fetch returns 403, surface a "Token expired — reload the page and try again" error rather than retrying blindly.
 2. **`credentials: 'include'`** on every fetch from the offscreen document — many sites authenticate segment fetches via cookies. If a site uses `Authorization: Bearer ...` instead, the frame hook will have captured it; apply via the `headers` field on the media entry.
-3. **HLS IV derivation**: when `#EXT-X-KEY` omits `IV=`, the IV is the segment's media sequence number as a 16-byte big-endian integer. Don't default to a zero IV — it will decrypt to garbage.
+3. **HLS IV derivation**: when `#EXT-X-KEY` omits `IV=`, the IV is the segment's media sequence number as a 16-byte big-endian integer. The sequence number is `EXT-X-MEDIA-SEQUENCE + index_within_playlist` (RFC 8216 §6.2.2). `m3u8-parser`'s `segment.timeline` is the **discontinuity counter** (zero for continuous playlists), not the media sequence — using it silently produces a zero IV on every segment after the first and decrypts to garbage. Default to a zero IV is also wrong for the same reason.
 4. **Master vs. media playlist**: `.m3u8` may be either. Detect by presence of `#EXT-X-STREAM-INF` (master) vs. `#EXTINF` (media). Resolve variant URLs relative to the master URL, not the page.
-5. **AAC ADTS → ASC**: when remuxing TS→MP4 you MUST pass `-bsf:a aac_adtstoasc` or QuickTime/Safari won't play the audio.
+5. **AAC ADTS → ASC**: when remuxing TS→MP4 the AAC frames need ADTS-to-ASC conversion or QuickTime / Safari won't play the audio. mux.js handles this transparently; an ffmpeg path would need `-bsf:a aac_adtstoasc`. Don't ship a path that skips this — silent-audio-on-Safari is the easy regression.
 6. **DASH separates tracks**: audio and video are usually independent representations. Fetch both, then mux with `ffmpeg -i video.mp4 -i audio.mp4 -c copy out.mp4`.
 7. **DRM detection**: if a DASH MPD has `<ContentProtection>` referencing Widevine (`edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`), PlayReady (`9a04f079-9840-4286-ab92-e65be0885f95`), or FairPlay (`94ce86fb-...`), set `mediaEntry.drm = true` and let the popup show "DRM-protected — cannot download." Don't try to be clever.
 8. **MSE / `blob:` video sources**: some sites stream by building a MediaSource and pushing fragments via `SourceBuffer.appendBuffer`. The `<video>` tag's `src` will be `blob:...` — useless. You need the underlying `.m4s` / fragmented MP4 segment fetches, which the frame hook will see. Parked as a post-v1.0 item.
@@ -190,6 +190,31 @@ Every `MediaEntry` carries an `adapterId` from the moment it's detected; downstr
 12. **Filename sanitization**: strip `/ \ : * ? " < > |`, collapse whitespace, trim to 200 chars. Keep accented characters — many real titles need them.
 13. **Never log full URLs.** Signed-token query params are bearer credentials. Always pipe through `redactUrl()`.
 14. **Non-http(s) frames** (chrome-extension://, devtools://, view-source:): exclude from both the webRequest filters and the content script matches. They'll either error or surface garbage.
+15. **Capture manifest *bodies* from the player's origin**, not from the SW. Akamai-style signed URLs accept the request based on the *referer / origin* of the player iframe; an `chrome-extension://…` origin fetch gets 403'd even with the same `hdntl` token. The frame's main-world hook clones the player's already-successful `fetch` response and posts it to the isolated world, which forwards bytes to the SW. The SW must never re-fetch the manifest itself.
+16. **Cross-origin segment fetches use `credentials: 'same-origin'`, not `'include'`**. Many CDNs respond with `Access-Control-Allow-Origin: *`, which the browser refuses to combine with `credentials: 'include'` — the fetch fails with a generic `Failed to fetch`. Auth on these URLs is bearer-in-query (`hdntl`, signature tokens) and does not need the cookie jar.
+17. **Segment fetches must run inside the *player iframe's* content script**, not the SW. Same reason as #15: the iframe's origin matches the player, the SW's origin does not. `chrome.tabs.sendMessage(tabId, msg, { frameId })` is the routing tool; `frameId` is captured on `sender.frameId` for messages and `details.frameId` for webRequest.
+
+---
+
+## 8a. mux.js / fragmented-MP4 patching (the v0.7 lessons)
+
+mux.js was built for `SourceBuffer.appendBuffer()` — it expects the player to layer the playback timeline. Writing its output directly to disk surfaces several quirks that all manifest as the same broad symptom (file plays in browsers via MSE but VLC / QuickTime show blank intros, wrong durations, or 13-hour timelines). Each one of these took multiple test downloads to isolate; please don't undo them without reproducing on a real video first.
+
+1. **Per-track moofs are emitted separately even when the data event says `type: 'combined'`.** mux.js's `combined` event carries `[audio_moof + audio_mdat + video_moof + video_mdat]` concatenated — *not* a single moof with two trafs. VLC reads the audio-only first moof as the start of the movie, plays blank video for the duration of that fragment, then re-syncs when it hits the video moof at `tfdt = 0`. The fix in `remux.js` re-packs each data event into one proper movie fragment with `mfhd + audio traf + video traf` followed by a combined `mdat`. This involves rewriting each `trun.data_offset` to point inside the new mdat and setting `tfhd.flags |= 0x020000` (default-base-is-moof). Do not "simplify" this back to passing mux.js output through verbatim — VLC will break.
+
+2. **`mfhd.sequence_number` must be globally monotonic across all moofs.** mux.js counts per-track, so audio moofs and video moofs collide on the same sequence numbers. Renumbering alone (without combining moofs per (1)) is *worse*: VLC starts playback at the wrong offset and freezes. The combined-moof pass in (1) assigns one globally-increasing `sequence_number` per fragment, which is the right fix.
+
+3. **mux.js writes `tfdt.baseMediaDecodeTime = 0` on every fragment.** `setBaseMediaDecodeTime()` controls *internal* shifting; it does not propagate to the emitted box. We post-patch each moof's tfdt in file order using the running per-track cumulative.
+
+4. **Patch tfdt from *emitted content* duration, not from EXTINF.** mux.js's per-fragment content duration is typically slightly shorter than the playlist's `#EXTINF` (because the TS boundary lands a few frames before the declared duration). Patching tfdt from EXTINF accumulates a per-fragment gap; on a 14-minute video this is the difference between "plays perfectly" and "6 seconds of blank at the start, then resync". The correct source is the sum of `trun` sample durations in the moof we just wrote.
+
+5. **`trun.version` must be `1` whenever any sample composition offset is negative.** mux.js writes negative B-frame composition offsets (e.g. `-3060` at 90 kHz) but leaves the trun at `version = 0`, which declares cto as **unsigned**. VLC reads `0xFFFFF40C` as 4 294 964 236 ticks ≈ 47 721 s ≈ **13.26 hours** and pushes the affected sample's PTS into the far future, producing blank playback. The patcher promotes `version` to 1 whenever any cto in the trun has the sign bit set. The on-disk bits don't change — only the reader's interpretation.
+
+6. **`mvhd` / `tkhd` / `mdhd` duration fields must be patched.** mux.js leaves them at `0xFFFFFFFF` (the fMP4 "unknown duration, derive from samples" sentinel). MSE-based players honor the sentinel; VLC reads it literally — `0xFFFFFFFF / 90000 ≈ 47 721 s ≈ 13.26 hours`. We rewrite each duration from the per-track total computed in step (4): `mvhd` and `tkhd` in movie timescale = `longest-track-seconds × movie_timescale`; `mdhd` in the track's own timescale = its sample-duration total. The `tkhd` duration field lives at body offset `+20` (v0) or `+28` (v1); `mvhd` and `mdhd` use `+16` / `+24`. They look identical but the offsets differ — keep the helper functions separate.
+
+7. **Don't pass `keepOriginalTimestamps: true`** to the Transmuxer. With it on, the first fragment's tfdt and PTS reflect the raw HLS timeline (often hundreds of hours into wall-clock time), producing the original 371-hour-duration bug. Default `false` plus per-segment push lets mux.js normalize each segment internally; the patcher in §8a (3) handles the cross-segment timeline.
+
+8. **The whole patching pipeline lives in `extension/offscreen/remux.js`** and has a dedicated regression test (`extension/offscreen/remux.test.js`) asserting `ftyp / moov / moof / mdat / moof / mdat` shape with two trafs per moof. If you change anything in that file, run the test — it's the firewall against re-introducing any of the above bugs.
 
 ---
 

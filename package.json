@@ -1,6 +1,6 @@
 {
   "name": "video-downloader",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Chrome MV3 extension that downloads HLS/DASH/progressive video; first-class Hotmart Club adapter.",
   "type": "module",
@@ -23,6 +23,7 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
-    "m3u8-parser": "^7.2.0"
+    "m3u8-parser": "^7.2.0",
+    "mux.js": "^6.3.0"
   }
 }
