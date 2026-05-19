@@ -1,3 +1,4 @@
+import { escapeHtml } from '../lib/dom-utils.js';
 import { redactUrl } from '../lib/log.js';
 
 const $content = document.getElementById('content');
@@ -7,20 +8,6 @@ const $gear = document.getElementById('open-options');
 $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
 
 // ---------- helpers ----------
-
-function escapeHtml(s) {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) =>
-      ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-      })[c],
-  );
-}
 
 function safeHost(url) {
   try {
@@ -105,36 +92,74 @@ function renderRow(entry) {
   `;
 }
 
-let lastEntries = [];
+// Map<id, MediaEntry> for O(1) lookup from the delegated click handler.
+let entriesById = new Map();
+
+// Preserve user selections in <select> elements across re-renders so a
+// quality pick doesn't get wiped by every push update. Captures by
+// (mediaId, select-class) to handle multiple selects per row in the future.
+function captureSelectState() {
+  const state = new Map();
+  for (const sel of $content.querySelectorAll('.row select')) {
+    const row = sel.closest('.row');
+    const id = row?.dataset.mediaId;
+    if (id) state.set(`${id}::${sel.className}`, sel.value);
+  }
+  return state;
+}
+
+function restoreSelectState(state) {
+  for (const sel of $content.querySelectorAll('.row select')) {
+    const row = sel.closest('.row');
+    const id = row?.dataset.mediaId;
+    if (!id) continue;
+    const saved = state.get(`${id}::${sel.className}`);
+    if (saved == null) continue;
+    // Only restore if the option still exists post-render (v0.5 manifest
+    // re-parse could yield a different variant set).
+    for (const opt of sel.options) {
+      if (opt.value === saved) {
+        sel.value = saved;
+        break;
+      }
+    }
+  }
+}
 
 function render(state) {
   const entries = state?.entries ?? [];
-  lastEntries = entries;
+  entriesById = new Map(entries.map((e) => [e.id, e]));
   if (entries.length === 0) {
     $content.innerHTML = renderEmpty();
     $footer.classList.add('hidden');
     return;
   }
+  const selectState = captureSelectState();
   $content.innerHTML = entries.map(renderRow).join('');
   $footer.classList.remove('hidden');
-  for (const btn of $content.querySelectorAll('.download')) {
-    btn.addEventListener('click', () => {
-      const row = btn.closest('.row');
-      const id = row?.dataset.mediaId;
-      const entry = lastEntries.find((e) => e.id === id);
-      if (!entry) return;
-      // v0.6 will dispatch START_DOWNLOAD with this. For now, log so devs
-      // can confirm the wiring + see the redacted URL.
-      // eslint-disable-next-line no-console
-      console.log('[VDL] download clicked', {
-        mediaId: entry.id,
-        adapterId: entry.adapterId,
-        kind: entry.kind,
-        url: redactUrl(entry.url),
-      });
-    });
-  }
+  restoreSelectState(selectState);
 }
+
+// Single delegated click listener — no per-button wiring, no reliance on
+// "the latest render's array reference". Lookup via the Map for O(1).
+$content.addEventListener('click', (e) => {
+  const btn = e.target.closest('.download');
+  if (!btn) return;
+  const row = btn.closest('.row');
+  const id = row?.dataset.mediaId;
+  if (!id) return;
+  const entry = entriesById.get(id);
+  if (!entry) return;
+  // v0.6 will dispatch START_DOWNLOAD. For now, log so devs can confirm
+  // wiring + see the redacted URL.
+  // eslint-disable-next-line no-console
+  console.log('[VDL] download clicked', {
+    mediaId: entry.id,
+    adapterId: entry.adapterId,
+    kind: entry.kind,
+    url: redactUrl(entry.url),
+  });
+});
 
 // ---------- live subscription via SW port ----------
 
@@ -147,8 +172,10 @@ async function activeTabId() {
   }
 }
 
+const MAX_RECONNECT_ATTEMPTS = 8;
 let port = null;
 let retryTimer = null;
+let retryCount = 0;
 
 function connect(tabId) {
   try {
@@ -160,7 +187,10 @@ function connect(tabId) {
   }
   port.postMessage({ type: 'SUBSCRIBE', tabId });
   port.onMessage.addListener((msg) => {
-    if (msg?.type === 'STATE') render(msg.state);
+    if (msg?.type === 'STATE') {
+      retryCount = 0; // first successful subscription resets the budget
+      render(msg.state);
+    }
   });
   port.onDisconnect.addListener(() => {
     port = null;
@@ -170,6 +200,12 @@ function connect(tabId) {
 
 function scheduleReconnect(tabId) {
   if (retryTimer) return;
+  if (retryCount >= MAX_RECONNECT_ATTEMPTS) {
+    // eslint-disable-next-line no-console
+    console.warn('[VDL] popup gave up reconnecting after', MAX_RECONNECT_ATTEMPTS, 'attempts');
+    return;
+  }
+  retryCount += 1;
   retryTimer = setTimeout(() => {
     retryTimer = null;
     connect(tabId);

@@ -94,6 +94,9 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--row);
   transition: background-color 0.1s;
+  /* Isolate each row's layout + paint so re-renders / hover transitions
+     don't reflow the whole list. Cheap win once the list grows. */
+  contain: layout paint;
 }
 
 .row:hover {

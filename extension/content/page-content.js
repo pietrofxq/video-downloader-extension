@@ -4,7 +4,13 @@ import { pickAdapter } from '../adapters/index.js';
 // Top-frame only (manifest restricts via all_frames: default false).
 // Runs at document_idle so the static DOM is rendered; SPAs that fill content
 // in later are caught by the adapter's observe() hook.
-if (/^https?:$/.test(location.protocol)) {
+//
+// Double-injection guard: on extension reload / hot-reinstall the script can
+// re-execute against a page that still has the prior instance's listeners.
+// The flag prevents a second set of nav listeners (and a second observer)
+// from piling on, which would otherwise fire sendPageMeta twice per event.
+if (/^https?:$/.test(location.protocol) && !window.__VDL_PAGE_CONTENT_INSTALLED__) {
+  window.__VDL_PAGE_CONTENT_INSTALLED__ = true;
   let cleanup = null;
 
   function sendPageMeta(adapterId, meta) {
@@ -62,11 +68,10 @@ if (/^https?:$/.test(location.protocol)) {
   window.addEventListener('popstate', setupForCurrentUrl);
   window.addEventListener('hashchange', setupForCurrentUrl);
   if (window.navigation && typeof window.navigation.addEventListener === 'function') {
-    window.navigation.addEventListener('navigate', () => {
-      // Defer one tick so location.href reflects the destination URL when
-      // setupForCurrentUrl reads it.
-      Promise.resolve().then(setupForCurrentUrl);
-    });
+    // navigatesuccess fires AFTER location.href is updated. The older
+    // 'navigate' event fires before commit, so reading location.href there
+    // would be stale and forced a microtask defer hack.
+    window.navigation.addEventListener('navigatesuccess', setupForCurrentUrl);
   }
 
   // Tear-down. Listen for both — beforeunload is the historical hook;
