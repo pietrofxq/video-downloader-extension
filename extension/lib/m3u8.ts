@@ -74,8 +74,20 @@ export function parseManifest(text: string, baseUrl: string): ParsedHlsManifest 
       })
       .sort((a, b) => b.bandwidth - a.bandwidth);
     const alternates = collectAlternates(m.mediaGroups, baseUrl);
-    return { isMaster: true, variants, alternates, segmentCount: 0 };
+    // Master playlists don't carry per-variant durations — the popup
+    // pulls duration from the matching variant entry (which is parsed
+    // separately when its body is captured).
+    return { isMaster: true, variants, alternates, segmentCount: 0, totalDuration: 0 };
   }
 
-  return { isMaster: false, variants: [], alternates: [], segmentCount: segments.length };
+  // Sum #EXTINF for media playlists; popup uses this for the row's
+  // duration label and the size estimate (bandwidth × duration).
+  const totalDuration = segments.reduce((sum, seg) => sum + (seg.duration ?? 0), 0);
+  return {
+    isMaster: false,
+    variants: [],
+    alternates: [],
+    segmentCount: segments.length,
+    totalDuration,
+  };
 }

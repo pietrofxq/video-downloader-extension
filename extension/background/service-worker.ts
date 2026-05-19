@@ -263,6 +263,12 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     }
+    case MSG.DISMISS_DOWNLOAD: {
+      const mediaId = msg.payload?.mediaId;
+      if (typeof mediaId === 'string') dismissDownloadStatesForMedia(mediaId);
+      sendResponse({ ok: true });
+      return false;
+    }
     case MSG.GET_TAB_STATE: {
       const reqTab = msg.payload?.tabId ?? sender.tab?.id;
       if (reqTab == null) {
@@ -389,6 +395,7 @@ async function ensureParsed(tabId: number, entry: MediaEntry): Promise<void> {
       variants: parsed.variants,
       alternates: parsed.alternates,
       segmentCount: parsed.segmentCount,
+      totalDuration: parsed.totalDuration,
     });
     log.info('parsed manifest (sw fetch)', {
       tabId,
@@ -443,8 +450,9 @@ async function ensureOffscreen(): Promise<void> {
 async function handleStartDownload(payload: {
   mediaId: string;
   variantUrl?: string;
+  filename?: string;
 }): Promise<{ requestId: string; filename: string }> {
-  const { mediaId, variantUrl } = payload;
+  const { mediaId, variantUrl, filename: filenameOverride } = payload;
   // Find the MediaEntry across all tabs.
   let entry: MediaEntry | null = null;
   let entryTabId: number | null = null;
@@ -480,11 +488,17 @@ async function handleStartDownload(payload: {
 
   const adapter = getAdapter(entry.adapterId);
   const meta = entry.meta ?? {};
-  const baseName = adapter.deriveFilename({
-    pageMeta: meta,
-    url: entry.url,
-    mediaEntry: entry,
-  });
+  // Honor a user-supplied filename from the popup row's input if it
+  // resolves to something non-empty post-sanitize; otherwise the adapter
+  // derives one from the page meta + URL.
+  const baseName =
+    filenameOverride && filenameOverride.trim().length > 0
+      ? filenameOverride
+      : adapter.deriveFilename({
+          pageMeta: meta,
+          url: entry.url,
+          mediaEntry: entry,
+        });
   const filename = sanitizeFilename(baseName, { fallback: 'video' });
 
   const requestId = crypto.randomUUID();
@@ -682,6 +696,29 @@ function clearDownloadStatesForTab(tabId: number): void {
   }
 }
 
+// Drop any cached DownloadState for this mediaId across all tabs and
+// notify subscribed popups so the row reverts to its Download + quality-
+// picker UI. Wired to the "Download again" / "Try again" buttons.
+function dismissDownloadStatesForMedia(mediaId: string): void {
+  const dismissedTabIds = new Set<number>();
+  for (const [requestId, state] of downloadStates) {
+    if (state.mediaId === mediaId) {
+      downloadStates.delete(requestId);
+      dismissedTabIds.add(state.tabId);
+    }
+  }
+  if (dismissedTabIds.size === 0) return;
+  for (const [port, info] of popupPorts) {
+    if (info.tabId !== null && dismissedTabIds.has(info.tabId)) {
+      try {
+        port.postMessage({ type: 'DOWNLOAD_DISMISSED', mediaId });
+      } catch {
+        // disconnected; onDisconnect cleans up
+      }
+    }
+  }
+}
+
 // Helper: enumerate tabIds currently subscribed via popup ports. Cheap
 // fast-path for handleStartDownload (the popup is the only context that
 // can call START_DOWNLOAD, so the active tab is almost always covered).
@@ -736,6 +773,7 @@ async function handleManifestBody(tabId: number, url: string, text: string): Pro
       variants: parsed.variants,
       alternates: parsed.alternates,
       segmentCount: parsed.segmentCount,
+      totalDuration: parsed.totalDuration,
       parseError: undefined,
     });
     log.info('parsed manifest (body capture)', {

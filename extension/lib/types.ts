@@ -44,6 +44,8 @@ export interface MediaEntry {
   variants?: HlsVariant[];
   alternates?: HlsAlternate[];
   segmentCount?: number;
+  /** Sum of `#EXTINF` durations for media playlists (seconds). */
+  totalDuration?: number;
   /** Set if parsing the manifest failed; popup shows "manifest unavailable". */
   parseError?: string;
 }
@@ -74,6 +76,12 @@ export interface ParsedHlsManifest {
   variants: HlsVariant[];
   alternates: HlsAlternate[];
   segmentCount: number;
+  /**
+   * Sum of `#EXTINF` durations for media playlists (seconds). Zero on
+   * masters — they don't carry per-variant durations; the matching
+   * variant entry's totalDuration is the source for masters.
+   */
+  totalDuration: number;
 }
 
 // ---------- download pipeline ----------

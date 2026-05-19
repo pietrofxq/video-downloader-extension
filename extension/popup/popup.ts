@@ -5,7 +5,6 @@ import { MSG, parsePortMessageFromSW } from '../lib/messages.js';
 import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
 
 const $content = document.getElementById('content')!;
-const $footer = document.getElementById('footer')!;
 const $gear = document.getElementById('open-options');
 
 $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
@@ -55,6 +54,55 @@ function entryBadges(entry: MediaEntry): string[] {
   if (kind) out.push(kind);
   if (entry.parseError) out.push('manifest unavailable');
   return out;
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function formatSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${Math.round(kib)} KB`;
+  const mib = kib / 1024;
+  if (mib < 1024) return `${mib.toFixed(mib < 10 ? 1 : 0)} MB`;
+  const gib = mib / 1024;
+  return `${gib.toFixed(gib < 10 ? 2 : 1)} GB`;
+}
+
+// For master entries the duration lives on the matching variant entry
+// (the master playlist doesn't carry per-variant durations). For media
+// playlists it's on the entry itself.
+function resolveDurationSeconds(entry: MediaEntry, variantUrl: string | undefined): number {
+  if (entry.totalDuration && entry.totalDuration > 0) return entry.totalDuration;
+  if (variantUrl) {
+    for (const e of entriesById.values()) {
+      if (e.url === variantUrl && e.totalDuration && e.totalDuration > 0) {
+        return e.totalDuration;
+      }
+    }
+  }
+  return 0;
+}
+
+// Estimate file size from BANDWIDTH × duration / 8. Requires the master
+// playlist to declare BANDWIDTH on the chosen variant AND that variant's
+// media playlist to have been parsed (so we know its totalDuration). For
+// single-bitrate streams we don't have a bandwidth value — return 0.
+function resolveSizeBytes(entry: MediaEntry, variantUrl: string | undefined): number {
+  const dur = resolveDurationSeconds(entry, variantUrl);
+  if (dur <= 0) return 0;
+  if (variantUrl && Array.isArray(entry.variants)) {
+    const v = entry.variants.find((x) => x.url === variantUrl);
+    if (v && v.bandwidth > 0) return Math.round((v.bandwidth * dur) / 8);
+  }
+  return 0;
 }
 
 function formatVariant(v: HlsVariant): string {
@@ -136,12 +184,18 @@ function renderActionForDownload(state: DownloadState): string {
         <button type="button" class="show-in-folder" data-download-id="${state.downloadId}">
           Show in folder
         </button>
+        <button type="button" class="dismiss-download" data-media-id="${escapeHtml(state.mediaId)}" title="Download again">
+          &#x21bb; Again
+        </button>
       </div>`;
   }
   if (state.status === 'error') {
     return `
       <div class="download-result error" title="${escapeHtml(state.errorMessage || '')}">
         <span class="error-label">${escapeHtml(friendlyErrorMessage(state))}</span>
+        <button type="button" class="dismiss-download" data-media-id="${escapeHtml(state.mediaId)}" title="Try again">
+          &#x21bb; Retry
+        </button>
       </div>`;
   }
   // pending / progress
@@ -161,7 +215,7 @@ function renderActionForDownload(state: DownloadState): string {
 function renderRow(entry: MediaEntry): string {
   const title = entryTitle(entry);
   const section = entrySection(entry);
-  const filename = entryFilename(entry);
+  const defaultFilename = entryFilename(entry);
   const badges = entryBadges(entry);
   const isDrm = entry.drm === true;
   const downloadState = downloadsByMediaId.get(entry.id) || null;
@@ -195,6 +249,34 @@ function renderRow(entry: MediaEntry): string {
   const qualitySelect = downloadState
     ? ''
     : `<select class="quality" aria-label="Quality">${qualityOptionsHtml(entry)}</select>`;
+
+  // Best-effort duration / size — only known once a media playlist has
+  // been parsed. The popup keeps both as separate badges so future
+  // additions (codec, etc.) can slot in alongside.
+  const defaultVariantUrl =
+    entry.isMaster === false ? entry.url : (entry.variants?.[0]?.url ?? entry.url);
+  const dur = resolveDurationSeconds(entry, defaultVariantUrl);
+  const size = resolveSizeBytes(entry, defaultVariantUrl);
+  const stats: string[] = [];
+  const durLabel = formatDuration(dur);
+  if (durLabel) stats.push(durLabel);
+  const sizeLabel = formatSize(size);
+  if (sizeLabel) stats.push(`~${sizeLabel}`);
+  const metaParts: string[] = [];
+  for (const s of stats) metaParts.push(`<span class="stat">${escapeHtml(s)}</span>`);
+  for (const b of badges) metaParts.push(`<span class="badge">${escapeHtml(b)}</span>`);
+  const metaHtml = metaParts.join(' &middot; ');
+
+  // Editable filename — pre-filled with the adapter-derived name; the
+  // download click reads the input's value and sanitizes it server-side.
+  // Locked into a read-only static label once the download starts so the
+  // user can still see what was saved.
+  const filenameField = downloadState
+    ? `<div class="filename-static" title="${escapeHtml(defaultFilename)}">${escapeHtml(defaultFilename)}</div>`
+    : `<input type="text" class="filename-input" spellcheck="false" autocomplete="off"
+         aria-label="Filename" value="${escapeHtml(defaultFilename)}"
+         data-default="${escapeHtml(defaultFilename)}" />`;
+
   return `
     <div class="row" data-media-id="${escapeHtml(entry.id)}">
       <div class="row-header">
@@ -202,7 +284,8 @@ function renderRow(entry: MediaEntry): string {
         <span class="adapter-pill">${escapeHtml(entry.adapterId)}</span>
       </div>
       <div class="row-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-      <div class="row-meta">${escapeHtml(filename)}${badges.length ? ' &middot; ' + badges.map((b) => `<span class="badge">${escapeHtml(b)}</span>`).join(' &middot; ') : ''}</div>
+      <div class="row-filename">${filenameField}</div>
+      <div class="row-meta">${metaHtml}</div>
       <div class="row-actions">
         ${qualitySelect}
         ${action}
@@ -228,25 +311,41 @@ const downloadsByMediaId = new Map<string, DownloadState>();
 // same entry list, so we keep a reference and re-call render() with it.
 let lastTabState: TabStateMsg = { entries: [] };
 
-// Preserve user selections in <select> elements across re-renders so a
-// quality pick doesn't get wiped by every push update. Captures by
-// (mediaId, select-class) to handle multiple selects per row in the future.
-function captureSelectState(): Map<string, string> {
-  const state = new Map<string, string>();
+// Preserve user-controlled form values across re-renders so a quality
+// pick or an edited filename doesn't get wiped by every progress push.
+interface FormSnapshot {
+  selects: Map<string, string>;
+  // Map<mediaId, edited filename> — only captures user-typed values
+  // (different from the default rendered into the input).
+  filenames: Map<string, string>;
+}
+
+function captureFormState(): FormSnapshot {
+  const selects = new Map<string, string>();
   for (const sel of $content.querySelectorAll<HTMLSelectElement>('.row select')) {
     const row = sel.closest<HTMLElement>('.row');
     const id = row?.dataset.mediaId;
-    if (id) state.set(`${id}::${sel.className}`, sel.value);
+    if (id) selects.set(`${id}::${sel.className}`, sel.value);
   }
-  return state;
+  const filenames = new Map<string, string>();
+  for (const input of $content.querySelectorAll<HTMLInputElement>('.filename-input')) {
+    const row = input.closest<HTMLElement>('.row');
+    const id = row?.dataset.mediaId;
+    if (!id) continue;
+    const def = input.dataset.default ?? '';
+    // Skip un-edited inputs so a re-render with a fresh default name
+    // (e.g. PAGE_META lands and changes filenameHint) takes effect.
+    if (input.value !== def) filenames.set(id, input.value);
+  }
+  return { selects, filenames };
 }
 
-function restoreSelectState(state: Map<string, string>): void {
+function restoreFormState(snap: FormSnapshot): void {
   for (const sel of $content.querySelectorAll<HTMLSelectElement>('.row select')) {
     const row = sel.closest<HTMLElement>('.row');
     const id = row?.dataset.mediaId;
     if (!id) continue;
-    const saved = state.get(`${id}::${sel.className}`);
+    const saved = snap.selects.get(`${id}::${sel.className}`);
     if (saved == null) continue;
     // Only restore if the option still exists post-render (v0.5 manifest
     // re-parse could yield a different variant set).
@@ -257,6 +356,13 @@ function restoreSelectState(state: Map<string, string>): void {
       }
     }
   }
+  for (const input of $content.querySelectorAll<HTMLInputElement>('.filename-input')) {
+    const row = input.closest<HTMLElement>('.row');
+    const id = row?.dataset.mediaId;
+    if (!id) continue;
+    const saved = snap.filenames.get(id);
+    if (saved != null) input.value = saved;
+  }
 }
 
 function render(state: TabStateMsg | null | undefined): void {
@@ -266,13 +372,11 @@ function render(state: TabStateMsg | null | undefined): void {
   const visible = filterTopLevel(rawEntries);
   if (visible.length === 0) {
     $content.innerHTML = renderEmpty();
-    $footer.classList.add('hidden');
     return;
   }
-  const selectState = captureSelectState();
+  const snap = captureFormState();
   $content.innerHTML = visible.map(renderRow).join('');
-  $footer.classList.remove('hidden');
-  restoreSelectState(selectState);
+  restoreFormState(snap);
 }
 
 function applyDownloadState(state: DownloadState): void {
@@ -282,6 +386,14 @@ function applyDownloadState(state: DownloadState): void {
   // when picking the action UI. We don't get a fresh STATE for every progress
   // message, so re-using the cached one is the load-bearing bit here.
   render(lastTabState);
+}
+
+function dismissDownload(mediaId: string): void {
+  // Optimistic local clear so the row updates instantly; the SW broadcasts
+  // a matching DOWNLOAD_DISMISSED via the port shortly after.
+  downloadsByMediaId.delete(mediaId);
+  render(lastTabState);
+  chrome.runtime.sendMessage({ type: MSG.DISMISS_DOWNLOAD, payload: { mediaId } }).catch(() => {});
 }
 
 // Single delegated click listener — no per-button wiring, no reliance on
@@ -297,6 +409,14 @@ $content.addEventListener('click', (e: MouseEvent) => {
         .sendMessage({ type: MSG.SHOW_IN_FOLDER, payload: { downloadId } })
         .catch(() => {});
     }
+    return;
+  }
+
+  // "Download again" (on a saved row) / "Retry" (on an error row).
+  const dismissBtn = target?.closest<HTMLElement>('.dismiss-download');
+  if (dismissBtn) {
+    const mediaId = dismissBtn.dataset.mediaId;
+    if (mediaId) dismissDownload(mediaId);
     return;
   }
 
@@ -325,17 +445,24 @@ $content.addEventListener('click', (e: MouseEvent) => {
     return;
   }
 
+  // Pull the (possibly user-edited) filename from the input. SW will
+  // sanitize it and fall back to the adapter-derived name if it's empty
+  // post-sanitize.
+  const filenameInput = row.querySelector<HTMLInputElement>('.filename-input');
+  const filenameOverride = filenameInput?.value?.trim();
+
   log.info('[VDL] download clicked', {
     mediaId: entry.id,
     adapterId: entry.adapterId,
     kind: entry.kind,
     variantUrl: redactUrl(variantUrl),
+    filename: filenameOverride ?? null,
   });
 
   chrome.runtime
     .sendMessage({
       type: MSG.START_DOWNLOAD,
-      payload: { mediaId: entry.id, variantUrl },
+      payload: { mediaId: entry.id, variantUrl, filename: filenameOverride },
     })
     .then((resp) => {
       log.debug('[VDL] start ack', resp);
@@ -378,6 +505,9 @@ function connect(tabId: number): void {
       render(msg.state);
     } else if (msg.type === 'DOWNLOAD_STATE') {
       applyDownloadState(msg.state);
+    } else if (msg.type === 'DOWNLOAD_DISMISSED') {
+      downloadsByMediaId.delete(msg.mediaId);
+      render(lastTabState);
     }
   });
   port.onDisconnect.addListener(() => {

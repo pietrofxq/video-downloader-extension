@@ -13,12 +13,10 @@
       </button>
     </header>
     <main id="content"></main>
-    <footer class="footer hidden" id="footer">
-      <label>
-        <input type="checkbox" id="include-subtitles" />
-        Include subtitles
-      </label>
-    </footer>
+    <!-- v0.9 (subtitle support) will re-add a footer with a real
+         "Include subtitles" toggle bound to detected subtitle tracks.
+         Until then the placeholder UI is removed to avoid implying
+         functionality the pipeline doesn't have. -->
     <script type="module" src="popup.js"></script>
   </body>
 </html>

@@ -33,6 +33,7 @@ export const MSG = Object.freeze({
   PROXY_FETCH: 'PROXY_FETCH',
   REVOKE_BLOB: 'REVOKE_BLOB',
   SHOW_IN_FOLDER: 'SHOW_IN_FOLDER',
+  DISMISS_DOWNLOAD: 'DISMISS_DOWNLOAD',
 } as const);
 
 export type MessageType = (typeof MSG)[keyof typeof MSG];
@@ -76,7 +77,12 @@ export interface TabStateUpdatedMessage extends MessageBase<typeof MSG.TAB_STATE
 }
 
 export interface StartDownloadMessage extends MessageBase<typeof MSG.START_DOWNLOAD> {
-  payload: { mediaId: string; variantUrl?: string };
+  payload: {
+    mediaId: string;
+    variantUrl?: string;
+    /** User-supplied filename (no extension); the SW sanitizes it. */
+    filename?: string;
+  };
 }
 
 export interface RunDownloadMessage extends MessageBase<typeof MSG.RUN_DOWNLOAD> {
@@ -118,6 +124,13 @@ export interface ShowInFolderMessage extends MessageBase<typeof MSG.SHOW_IN_FOLD
   payload: { downloadId: number };
 }
 
+// Popup → SW: drop the cached DownloadState for this mediaId so the row
+// goes back to its Download-button + quality-picker state. Used by the
+// "Download again" and "Try again" buttons.
+export interface DismissDownloadMessage extends MessageBase<typeof MSG.DISMISS_DOWNLOAD> {
+  payload: { mediaId: string };
+}
+
 export type ExtensionMessage =
   | PingMessage
   | MediaUrlDetectedMessage
@@ -132,7 +145,8 @@ export type ExtensionMessage =
   | DownloadErrorMessage
   | ProxyFetchMessage
   | RevokeBlobMessage
-  | ShowInFolderMessage;
+  | ShowInFolderMessage
+  | DismissDownloadMessage;
 
 // ---------- popup ↔ SW port wire ----------
 //
@@ -144,7 +158,8 @@ export type PortMessageFromPopup = { type: 'SUBSCRIBE'; tabId: number | null };
 
 export type PortMessageFromSW =
   | { type: 'STATE'; state: { entries: Array<import('./types.ts').MediaEntry> } }
-  | { type: 'DOWNLOAD_STATE'; state: DownloadState };
+  | { type: 'DOWNLOAD_STATE'; state: DownloadState }
+  | { type: 'DOWNLOAD_DISMISSED'; mediaId: string };
 
 // ---------- helpers ----------
 
@@ -169,10 +184,15 @@ export function parseExtensionMessage(raw: unknown): ExtensionMessage | null {
 }
 
 // Same idea for the popup ↔ SW port wire.
+const PORT_FROM_SW_TYPES: ReadonlySet<string> = new Set([
+  'STATE',
+  'DOWNLOAD_STATE',
+  'DOWNLOAD_DISMISSED',
+]);
 export function parsePortMessageFromSW(raw: unknown): PortMessageFromSW | null {
   if (!raw || typeof raw !== 'object') return null;
   const type = (raw as { type?: unknown }).type;
-  if (type !== 'STATE' && type !== 'DOWNLOAD_STATE') return null;
+  if (typeof type !== 'string' || !PORT_FROM_SW_TYPES.has(type)) return null;
   return raw as PortMessageFromSW;
 }
 
