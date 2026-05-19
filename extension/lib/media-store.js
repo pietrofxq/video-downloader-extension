@@ -6,12 +6,12 @@
 const tabState = new Map(); // tabId -> { entries: MediaEntry[], pageUrl: string }
 const tabUrls = new Map(); // tabId -> last known url (used to detect navigation)
 
-let seq = 0;
 let initPromise = null;
 
-function nextId(tabId) {
-  seq += 1;
-  return `media-${tabId}-${Date.now().toString(36)}-${seq}`;
+function nextId() {
+  // SW context exposes crypto.randomUUID — globally unique, survives SW
+  // respawns without needing the seq counter we used before.
+  return crypto.randomUUID();
 }
 
 async function init() {
@@ -66,7 +66,7 @@ export async function addEntry(tabId, entry) {
     tabState.set(tabId, s);
   }
   if (s.entries.some((e) => e.url === entry.url)) return null;
-  const stored = { id: nextId(tabId), ...entry };
+  const stored = { id: nextId(), ...entry };
   s.entries.push(stored);
   await persist();
   return stored;

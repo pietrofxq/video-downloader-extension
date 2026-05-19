@@ -5,26 +5,41 @@ import { classifyUrl } from '../lib/media-detection.js';
 // protocol slipped past the manifest match (data:, blob:, javascript:).
 if (/^https?:$/.test(location.protocol)) {
   const HOOK_TAG = 'vdl-hook';
+  const PAGE_ORIGIN = window.location.origin;
+  const SEEN_LIMIT = 500;
+
+  // Bounded LRU-ish dedupe: Sets preserve insertion order, so dropping the
+  // first value approximates "oldest". A long-lived SPA (Hotmart Club scrubs
+  // through many lessons) can otherwise grow this set unboundedly.
   const seenInFrame = new Set();
+  function markSeen(url) {
+    if (seenInFrame.has(url)) return false;
+    if (seenInFrame.size >= SEEN_LIMIT) {
+      const oldest = seenInFrame.values().next().value;
+      seenInFrame.delete(oldest);
+    }
+    seenInFrame.add(url);
+    return true;
+  }
 
   // Bridge from the MAIN-world fetch/XHR hooks (see main-world-hooks.js).
-  // We pre-classify here so the SW only hears about media-shaped URLs.
+  //
+  // No race in practice between the two worlds: the main-world script's only
+  // startup work is monkey-patching fetch + XHR.prototype. It does NOT
+  // postMessage at startup — those calls fire later when the page makes its
+  // own network requests, by which time this addEventListener('message') is
+  // installed.
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
+    if (event.origin !== PAGE_ORIGIN) return;
     const data = event.data;
     if (!data || data.source !== HOOK_TAG) return;
     const url = typeof data.url === 'string' ? data.url : null;
     if (!url) return;
     const kind = classifyUrl(url);
     if (!kind) return;
-    // Dedupe per-frame: the page may issue the same URL many times.
-    if (seenInFrame.has(url)) return;
-    seenInFrame.add(url);
+    if (!markSeen(url)) return;
     try {
-      // Deliberately omit pageUrl here. In a sub-frame, location.href is the
-      // iframe's URL (e.g. cf-embed.play.hotmart.com), NOT the tab's URL —
-      // sending it would mislead adapter selection and poison the cache. The
-      // SW reads the authoritative top-level URL from sender.tab.url.
       chrome.runtime
         .sendMessage({
           type: MSG.MEDIA_URL_DETECTED,
@@ -33,7 +48,6 @@ if (/^https?:$/.test(location.protocol)) {
             kind,
             headers: data.headers,
             source: data.kind, // 'fetch' | 'xhr'
-            frameTop: window.top === window,
           },
         })
         .catch(() => {});

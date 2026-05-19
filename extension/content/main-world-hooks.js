@@ -9,9 +9,13 @@
 
   const TAG = 'vdl-hook';
 
+  // Scope postMessage to the current origin — the isolated-world bridge runs
+  // in the same frame, so '*' would needlessly expose captures to any other
+  // listener on the page.
+  const ORIGIN = window.location.origin;
   function post(payload) {
     try {
-      window.postMessage({ source: TAG, ...payload }, '*');
+      window.postMessage({ source: TAG, ...payload }, ORIGIN);
     } catch {
       // postMessage can throw on detached frames — swallow.
     }

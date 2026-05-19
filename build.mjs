@@ -28,6 +28,7 @@ const STATIC_FILES = [
   'popup/popup.html',
   'popup/popup.css',
   'offscreen/offscreen.html',
+  'options/options.html',
 ];
 
 const STATIC_DIRS = ['icons', 'vendor'];

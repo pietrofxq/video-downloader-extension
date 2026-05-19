@@ -33,7 +33,10 @@ function seedTabs() {
       const tabs = await chrome.tabs.query({});
       for (const t of tabs) {
         if (t.id == null || t.id < 0) continue;
-        if (t.url) await setTabUrl(t.id, t.url);
+        // Only cache http(s) URLs — chrome://, devtools://, etc. will never
+        // produce media detections and just bloat the store.
+        if (!t.url || !/^https?:/.test(t.url)) continue;
+        await setTabUrl(t.id, t.url);
       }
     } catch (err) {
       log.warn('seed tab cache failed', err);
