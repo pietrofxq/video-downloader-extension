@@ -3,7 +3,7 @@
 // session. Not exposed directly — SW reads/writes via these helpers and
 // notifies the popup via TAB_STATE_UPDATED messages.
 
-const tabState = new Map(); // tabId -> { entries: MediaEntry[], pageUrl: string }
+const tabState = new Map(); // tabId -> { entries: MediaEntry[], pageUrl: string, adapterMeta: Record<adapterId, PageMeta> }
 const tabUrls = new Map(); // tabId -> last known url (used to detect navigation)
 
 let initPromise = null;
@@ -14,13 +14,21 @@ function nextId() {
   return crypto.randomUUID();
 }
 
+function emptyState(tabId) {
+  return { entries: [], pageUrl: tabUrls.get(tabId) ?? '', adapterMeta: {} };
+}
+
 async function init() {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     try {
       const got = await chrome.storage.session.get(['mediaState', 'tabUrls']);
       if (got.mediaState) {
-        for (const [k, v] of Object.entries(got.mediaState)) tabState.set(Number(k), v);
+        for (const [k, v] of Object.entries(got.mediaState)) {
+          // Backfill adapterMeta on older stored states (pre-v0.3).
+          if (!v.adapterMeta) v.adapterMeta = {};
+          tabState.set(Number(k), v);
+        }
       }
       if (got.tabUrls) {
         for (const [k, v] of Object.entries(got.tabUrls)) tabUrls.set(Number(k), v);
@@ -50,7 +58,7 @@ export async function ready() {
 
 export async function getTabState(tabId) {
   await init();
-  return tabState.get(tabId) ?? { entries: [], pageUrl: tabUrls.get(tabId) ?? '' };
+  return tabState.get(tabId) ?? emptyState(tabId);
 }
 
 export async function getTabEntries(tabId) {
@@ -62,14 +70,44 @@ export async function addEntry(tabId, entry) {
   await init();
   let s = tabState.get(tabId);
   if (!s) {
-    s = { entries: [], pageUrl: tabUrls.get(tabId) ?? '' };
+    s = emptyState(tabId);
     tabState.set(tabId, s);
   }
   if (s.entries.some((e) => e.url === entry.url)) return null;
-  const stored = { id: nextId(), ...entry };
+  // Inherit any meta the adapter has already published for this tab — so an
+  // entry that lands after PAGE_META immediately has its lesson title etc.
+  const inherited = s.adapterMeta?.[entry.adapterId];
+  const stored = { id: nextId(), ...entry, ...(inherited ? { meta: inherited } : {}) };
   s.entries.push(stored);
   await persist();
   return stored;
+}
+
+export async function setAdapterMeta(tabId, adapterId, meta) {
+  await init();
+  let s = tabState.get(tabId);
+  if (!s) {
+    s = emptyState(tabId);
+    tabState.set(tabId, s);
+  }
+  if (!s.adapterMeta) s.adapterMeta = {};
+  s.adapterMeta[adapterId] = meta;
+  // Back-patch existing entries with matching adapterId — the popup may
+  // already be rendering their rows.
+  let changed = false;
+  for (const e of s.entries) {
+    if (e.adapterId === adapterId) {
+      e.meta = { ...(e.meta ?? {}), ...meta };
+      changed = true;
+    }
+  }
+  await persist();
+  return { changed };
+}
+
+export async function getAdapterMeta(tabId, adapterId) {
+  await init();
+  return tabState.get(tabId)?.adapterMeta?.[adapterId] ?? null;
 }
 
 export async function setTabUrl(tabId, url) {
@@ -85,8 +123,19 @@ export async function setTabUrl(tabId, url) {
 
 export async function clearTab(tabId) {
   await init();
-  const had = tabState.has(tabId);
-  tabState.delete(tabId);
+  const s = tabState.get(tabId);
+  const had = s != null && s.entries.length > 0;
+  if (s) {
+    s.entries = [];
+    // Intentionally KEEP adapterMeta. clearTab fires on every URL change
+    // (incl. trivial ones like Hotmart's pt-br → pt-BR case-normalization)
+    // that don't trigger a DOM mutation — so the page-content observer will
+    // NOT re-send PAGE_META, and wiping adapterMeta here would leave the
+    // entries that arrive next without their lesson title etc.
+    // On real navigation between lessons, the observer fires within ~250ms
+    // and overwrites this stale meta via setAdapterMeta (which also
+    // back-patches the briefly-stale entries).
+  }
   await persist();
   return had;
 }

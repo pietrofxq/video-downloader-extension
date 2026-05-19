@@ -67,21 +67,21 @@ Goal: when the user presses play on any site, the service worker captures the ma
 
 Goal: detected media has human-readable metadata on every site, with adapters supplying better data when available.
 
-- [ ] Define the **Adapter contract** in `lib/adapter.js` (JSDoc): `{ id, matches(pageUrl, mediaUrl), scrapePageMeta(document), observe(document, onUpdate)?, deriveFilename({ pageMeta, url, mediaEntry }), transformHeaders(headers)? }`.
-- [ ] Implement `adapters/default.js`:
+- [x] Define the **Adapter contract** in `lib/adapter.js` (JSDoc): `{ id, matches(pageUrl, mediaUrl), scrapePageMeta(document), observe(document, onUpdate)?, deriveFilename({ pageMeta, url, mediaEntry }), transformHeaders(headers)? }`.
+- [x] Implement `adapters/default.js`:
   - `matches`: always true.
   - `scrapePageMeta`: returns `{ title: document.title, ogTitle, ogVideoTitle }`.
   - `deriveFilename`: returns sanitized `{title} - {urlBasename}`.
-- [ ] Implement `adapters/hotmart.js`:
+- [x] Implement `adapters/hotmart.js`:
   - `matches`: `pageUrl` host is `hotmart.com` and path includes `/club/`.
   - `scrapePageMeta`: scrapes lesson `h1`, section line above, and `cur` filename from iframe `src`.
   - `observe`: `MutationObserver` on the lesson container that re-invokes `onUpdate` on SPA navigation.
   - `deriveFilename`: returns sanitized `{sectionTitle} - {lessonTitle}`.
-- [ ] In `page-content.js`, on `document_idle`: load the matched adapter, call its `scrapePageMeta`, send `PAGE_META` with `{ tabId, adapterId, meta }`. Wire up `observe` so SPA navs send fresh `PAGE_META` messages.
-- [ ] In the SW, merge `meta` onto every `MediaEntry` for the tab that shares the same `adapterId` (and the default adapter for any without a more specific one).
-- [ ] Add `lib/sanitize-filename.js` (strip illegal chars, trim, collapse whitespace, keep accents).
-- [ ] Verify on Hotmart: navigate between two lessons; SW state updates with the new title each time.
-- [ ] Verify on a non-Hotmart site: page title appears as the metadata; filename derived from page title + URL basename.
+- [x] In `page-content.js`, on `document_idle`: load the matched adapter, call its `scrapePageMeta`, send `PAGE_META` with `{ tabId, adapterId, meta }`. Wire up `observe` so SPA navs send fresh `PAGE_META` messages.
+- [x] In the SW, merge `meta` onto every `MediaEntry` for the tab that shares the same `adapterId` (and the default adapter for any without a more specific one).
+- [x] Add `lib/sanitize-filename.js` (strip illegal chars, trim, collapse whitespace, keep accents).
+- [x] Verify on Hotmart: navigate between two lessons; SW state updates with the new title each time.
+- [x] Verify on a non-Hotmart site: page title appears as the metadata; filename derived from page title + URL basename.
 
 **Ship criterion:** every detected `MediaEntry` has a meaningful title; navigating between SPA pages keeps it fresh.
 

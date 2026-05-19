@@ -16,6 +16,61 @@ function pathOf(url) {
   }
 }
 
+function textOf(el) {
+  return el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+}
+
+// Walk backward from the h1 until we find an element with non-empty text.
+// Hotmart's section line is typically the immediately-prior block-level
+// element (a span, p, or div) above the lesson h1.
+function findSectionSibling(h1) {
+  let candidate = h1?.previousElementSibling;
+  let hops = 0;
+  while (candidate && hops < 6) {
+    const t = textOf(candidate);
+    if (t) return t;
+    candidate = candidate.previousElementSibling;
+    hops += 1;
+  }
+  return '';
+}
+
+function findEmbedIframe(document) {
+  return (
+    document.querySelector('iframe[src*="cf-embed.play.hotmart.com"]') ||
+    document.querySelector('iframe[src*="play.hotmart.com/embed"]') ||
+    document.querySelector('iframe#hotmart-player-embed')
+  );
+}
+
+function scrapeHotmartMeta(doc) {
+  const h1 = doc.querySelector('h1');
+  const lessonTitle = textOf(h1);
+  const sectionTitle = findSectionSibling(h1);
+
+  let filenameHint = '';
+  const iframe = findEmbedIframe(doc);
+  if (iframe) {
+    try {
+      const u = new URL(iframe.getAttribute('src') || '', location.href);
+      filenameHint = u.searchParams.get('cur') || '';
+    } catch {
+      // malformed src — leave hint empty
+    }
+  }
+
+  return {
+    title: doc.title || '',
+    lessonTitle,
+    sectionTitle,
+    filenameHint,
+  };
+}
+
+function metaKey(m) {
+  return `${m.title}|${m.lessonTitle}|${m.sectionTitle}|${m.filenameHint}`;
+}
+
 export default {
   id: 'hotmart',
   matches(pageUrl /* , mediaUrl */) {
@@ -24,18 +79,40 @@ export default {
     if (host !== 'hotmart.com' && !host.endsWith('.hotmart.com')) return false;
     return pathOf(pageUrl).includes('/club/');
   },
-  scrapePageMeta(document) {
-    // v0.3 will flesh this out; for v0.1 we just return document.title so the
-    // PING/skeleton flow doesn't crash if the adapter is invoked.
-    return {
-      title: document.title || '',
-      lessonTitle: null,
-      sectionTitle: null,
-      filenameHint: null,
+  scrapePageMeta: scrapeHotmartMeta,
+  observe(doc, onUpdate) {
+    const root = doc.body || doc.documentElement;
+    if (!root || typeof MutationObserver === 'undefined') return () => {};
+
+    // Seed `last` from the current DOM so we don't fire an "update" on the
+    // initial scrape — page-content.js already sent that one synchronously.
+    let last = metaKey(scrapeHotmartMeta(doc));
+    let timer = null;
+
+    const tick = () => {
+      timer = null;
+      try {
+        const meta = scrapeHotmartMeta(doc);
+        const key = metaKey(meta);
+        if (key !== last) {
+          last = key;
+          onUpdate(meta);
+        }
+      } catch {
+        // ignore scrape errors — DOM may be mid-transition
+      }
     };
-  },
-  observe(/* document, onUpdate */) {
-    return () => {};
+
+    const observer = new MutationObserver(() => {
+      if (timer) return;
+      timer = setTimeout(tick, 250);
+    });
+    observer.observe(root, { childList: true, subtree: true, characterData: true });
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      observer.disconnect();
+    };
   },
   deriveFilename({ pageMeta }) {
     const section = pageMeta?.sectionTitle;
@@ -43,6 +120,7 @@ export default {
     let raw;
     if (section && lesson) raw = `${section} - ${lesson}`;
     else if (lesson) raw = lesson;
+    else if (pageMeta?.filenameHint) raw = pageMeta.filenameHint.replace(/\.[a-z0-9]+$/i, '');
     else raw = pageMeta?.title;
     return sanitizeFilename(raw, { fallback: 'hotmart-lesson' });
   },

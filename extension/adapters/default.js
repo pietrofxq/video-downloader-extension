@@ -10,24 +10,36 @@ function basenameFromUrl(url) {
   }
 }
 
+function scrapeDefaultMeta(doc) {
+  const og = (prop) => doc.querySelector(`meta[property="${prop}"]`)?.getAttribute('content') ?? null;
+  return {
+    title: doc.title || '',
+    ogTitle: og('og:title'),
+    ogVideoTitle: og('og:video:title'),
+    ogDescription: og('og:description'),
+    ogSiteName: og('og:site_name'),
+  };
+}
+
 export default {
   id: 'default',
   matches() {
     return true;
   },
-  scrapePageMeta(document) {
-    const og = (prop) =>
-      document.querySelector(`meta[property="${prop}"]`)?.getAttribute('content') ?? null;
-    return {
-      title: document.title || '',
-      ogTitle: og('og:title'),
-      ogVideoTitle: og('og:video:title'),
-      ogDescription: og('og:description'),
-      ogSiteName: og('og:site_name'),
-    };
-  },
-  observe() {
-    return () => {};
+  scrapePageMeta: scrapeDefaultMeta,
+  observe(doc, onUpdate) {
+    if (typeof MutationObserver === 'undefined') return () => {};
+    const titleEl = doc.querySelector('title');
+    if (!titleEl) return () => {};
+    let last = doc.title || '';
+    const observer = new MutationObserver(() => {
+      const t = doc.title || '';
+      if (t === last) return;
+      last = t;
+      onUpdate(scrapeDefaultMeta(doc));
+    });
+    observer.observe(titleEl, { childList: true, characterData: true, subtree: true });
+    return () => observer.disconnect();
   },
   deriveFilename({ pageMeta, url }) {
     const title = pageMeta?.title || pageMeta?.ogTitle || '';

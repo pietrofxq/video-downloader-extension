@@ -113,3 +113,67 @@ describe('removeTab', () => {
     expect(await store.getTabEntries(42)).toEqual([]);
   });
 });
+
+describe('setAdapterMeta', () => {
+  it('stores meta on a tab with no prior state', async () => {
+    const { changed } = await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 3' });
+    expect(changed).toBe(false); // no entries to patch yet
+    expect(await store.getAdapterMeta(42, 'hotmart')).toEqual({ lessonTitle: 'Lição 3' });
+  });
+
+  it('back-patches existing entries with matching adapterId', async () => {
+    await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'hotmart' });
+    await store.addEntry(42, { url: 'https://x/2.m3u8', adapterId: 'hotmart' });
+    const { changed } = await store.setAdapterMeta(42, 'hotmart', { sectionTitle: 'Porta' });
+    expect(changed).toBe(true);
+    const entries = await store.getTabEntries(42);
+    expect(entries[0].meta).toEqual({ sectionTitle: 'Porta' });
+    expect(entries[1].meta).toEqual({ sectionTitle: 'Porta' });
+  });
+
+  it('does not patch entries with a different adapterId', async () => {
+    await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'default' });
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'foo' });
+    const entries = await store.getTabEntries(42);
+    expect(entries[0].meta).toBeUndefined();
+  });
+
+  it('merges over prior meta keys on the same adapter', async () => {
+    await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'hotmart' });
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'L1', sectionTitle: 'S1' });
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'L2' });
+    const entries = await store.getTabEntries(42);
+    expect(entries[0].meta).toEqual({ lessonTitle: 'L2', sectionTitle: 'S1' });
+  });
+});
+
+describe('addEntry meta inheritance', () => {
+  it('inherits adapterMeta at insertion time', async () => {
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
+    const e = await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'hotmart' });
+    expect(e.meta).toEqual({ lessonTitle: 'Lição 5' });
+  });
+
+  it('does not inherit from a different adapter', async () => {
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
+    const e = await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'default' });
+    expect(e.meta).toBeUndefined();
+  });
+});
+
+describe('clearTab keeps adapterMeta', () => {
+  it('drops entries but preserves per-adapter meta on the tab', async () => {
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
+    await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'hotmart' });
+    await store.clearTab(42);
+    expect(await store.getTabEntries(42)).toEqual([]);
+    expect(await store.getAdapterMeta(42, 'hotmart')).toEqual({ lessonTitle: 'Lição 5' });
+  });
+
+  it('entries added after clearTab inherit the surviving meta', async () => {
+    await store.setAdapterMeta(42, 'hotmart', { lessonTitle: 'Lição 5' });
+    await store.clearTab(42);
+    const e = await store.addEntry(42, { url: 'https://x/1.m3u8', adapterId: 'hotmart' });
+    expect(e.meta).toEqual({ lessonTitle: 'Lição 5' });
+  });
+});

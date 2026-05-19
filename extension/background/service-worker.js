@@ -10,6 +10,7 @@ import {
   getTabUrl,
   ready,
   removeTab,
+  setAdapterMeta,
   setTabUrl,
 } from '../lib/media-store.js';
 
@@ -155,6 +156,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     }
+    case MSG.PAGE_META: {
+      const tabId = sender.tab?.id;
+      if (tabId == null || tabId < 0) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      const { adapterId, meta } = msg.payload ?? {};
+      if (!adapterId || !meta || typeof meta !== 'object') {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void handlePageMeta(tabId, adapterId, meta);
+      sendResponse({ ok: true });
+      return false;
+    }
     case MSG.GET_TAB_STATE: {
       const reqTab = msg.payload?.tabId ?? sender.tab?.id;
       if (reqTab == null) {
@@ -235,6 +251,16 @@ async function updateBadge(tabId) {
     // setBadge* throws if the tab no longer exists; not fatal.
     log.debug('updateBadge skipped', err);
   }
+}
+
+async function handlePageMeta(tabId, adapterId, meta) {
+  await seedTabs();
+  const { changed } = await setAdapterMeta(tabId, adapterId, meta);
+  log.info('page meta', { tabId, adapterId, patched: changed, meta });
+  // Always broadcast: even when no entries existed to patch, the popup may
+  // be open and waiting; future-self of the same tab will benefit from
+  // having the meta when entries arrive.
+  await broadcastTabState(tabId);
 }
 
 async function broadcastTabState(tabId) {
