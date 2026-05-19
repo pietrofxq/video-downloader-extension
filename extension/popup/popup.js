@@ -1,6 +1,6 @@
 import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
-import { redactUrl } from '../lib/log.js';
+import { log, redactUrl } from '../lib/log.js';
 import { MSG } from '../lib/messages.js';
 
 const $content = document.getElementById('content');
@@ -318,13 +318,11 @@ $content.addEventListener('click', (e) => {
   } else if (entry.isMaster === false) {
     variantUrl = entry.url;
   } else {
-    // eslint-disable-next-line no-console
-    console.warn('[VDL] download blocked — manifest not parsed yet', { mediaId: entry.id });
+    log.warn('[VDL] download blocked — manifest not parsed yet', { mediaId: entry.id });
     return;
   }
 
-  // eslint-disable-next-line no-console
-  console.log('[VDL] download clicked', {
+  log.info('[VDL] download clicked', {
     mediaId: entry.id,
     adapterId: entry.adapterId,
     kind: entry.kind,
@@ -337,13 +335,10 @@ $content.addEventListener('click', (e) => {
       payload: { mediaId: entry.id, variantUrl },
     })
     .then((resp) => {
-      // eslint-disable-next-line no-console
-      console.log('[VDL] start ack', resp);
-      // v0.8 will render a progress bar based on DOWNLOAD_PROGRESS pushes.
+      log.debug('[VDL] start ack', resp);
     })
     .catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn('[VDL] start failed', err);
+      log.warn('[VDL] start failed', err);
     });
 });
 
@@ -389,8 +384,7 @@ function connect(tabId) {
 function scheduleReconnect(tabId) {
   if (retryTimer) return;
   if (retryCount >= MAX_RECONNECT_ATTEMPTS) {
-    // eslint-disable-next-line no-console
-    console.warn('[VDL] popup gave up reconnecting after', MAX_RECONNECT_ATTEMPTS, 'attempts');
+    log.warn('[VDL] popup gave up reconnecting after', MAX_RECONNECT_ATTEMPTS, 'attempts');
     return;
   }
   retryCount += 1;

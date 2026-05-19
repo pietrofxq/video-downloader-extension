@@ -5,6 +5,7 @@ import {
   TokenExpiredError,
   ManifestParseError,
   DecryptionError,
+  DRMProtectedError,
   UnsupportedFormatError,
 } from '../lib/errors.js';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
@@ -150,10 +151,37 @@ export async function downloadHlsAsTs({ proxyFetch, onProgress }, req) {
  * lib/m3u8.js exposes a more curated shape (variants + alternates) for
  * the popup; this is the raw segment list we need to drive decryption.
  */
-function parsePlaylist(text, baseUrl) {
+// Pre-flight pass: m3u8-parser silently DROPS EXT-X-KEY tags whose
+// method isn't AES-128 (it returns key=undefined on the segment). That
+// would let us treat encrypted segments as plain TS and ship garbage to
+// mux.js. Scan the raw text for #EXT-X-KEY:METHOD=... tags and refuse
+// anything we don't actually support before handing off to the parser.
+const KEY_METHOD_RE = /^[ \t]*#EXT-X-KEY:[^\r\n]*\bMETHOD=([A-Z0-9\-_]+)/gim;
+function rejectUnsupportedKeyMethods(text) {
+  KEY_METHOD_RE.lastIndex = 0;
+  let m;
+  while ((m = KEY_METHOD_RE.exec(text)) !== null) {
+    const method = (m[1] || '').toUpperCase();
+    if (method === 'NONE' || method === 'AES-128') continue;
+    if (method === 'SAMPLE-AES' || method === 'SAMPLE-AES-CTR') {
+      throw new DRMProtectedError(
+        `HLS ${method} samples-encrypted streams (FairPlay / Common-Encryption) are not supported.`,
+      );
+    }
+    throw new UnsupportedFormatError(
+      `Unsupported HLS encryption method "${method}". Only AES-128 is supported.`,
+    );
+  }
+}
+
+// Exported so the test suite can exercise the encryption-method gate,
+// implicit/explicit IV handling, and malformed-manifest rejection
+// without spinning up the full proxyFetch + mux.js integration path.
+export function parsePlaylist(text, baseUrl) {
   if (typeof text !== 'string' || !text.trim().startsWith('#EXTM3U')) {
     throw new ManifestParseError('Not an HLS manifest (missing #EXTM3U)');
   }
+  rejectUnsupportedKeyMethods(text);
   const parser = new Parser();
   parser.push(text);
   parser.end();
@@ -172,7 +200,25 @@ function parsePlaylist(text, baseUrl) {
       url = seg.uri ?? '';
     }
     const key = seg.key;
-    const encrypted = !!key && key.method && key.method !== 'NONE';
+    // HLS encryption methods per RFC 8216 §4.4.4.4 + IANA registry:
+    //  - NONE                          → pass-through
+    //  - AES-128                       → full-segment AES-CBC, supported
+    //  - SAMPLE-AES, SAMPLE-AES-CTR    → per-sample crypto, typically FairPlay/Common-Encryption (DRM)
+    //  - any other value               → newer/proprietary; refuse rather
+    //                                    than silently mis-decrypt with the AES-CBC assumption.
+    const rawMethod = typeof key?.method === 'string' ? key.method : '';
+    const method = rawMethod.toUpperCase();
+    const encrypted = !!key && method && method !== 'NONE';
+    if (encrypted && method !== 'AES-128') {
+      if (method === 'SAMPLE-AES' || method === 'SAMPLE-AES-CTR') {
+        throw new DRMProtectedError(
+          `HLS ${method} samples-encrypted streams (FairPlay / Common-Encryption) are not supported.`,
+        );
+      }
+      throw new UnsupportedFormatError(
+        `Unsupported HLS encryption method "${rawMethod}". Only AES-128 is supported.`,
+      );
+    }
     let keyUrl = '';
     if (encrypted && key.uri) {
       try {
