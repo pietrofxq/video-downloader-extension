@@ -165,26 +165,56 @@ function mimeCodecs(mimeType: string | undefined): string | null {
   return m ? m[1] : null;
 }
 
-function isVideoFormat(mimeType: string | undefined): boolean {
-  return !!mimeType && mimeType.startsWith('video/');
+// v0.11 ships H.264 + AAC only. VP9 and AV1 muxing into MP4 (or WebM
+// muxing for opus audio) is more box-format work than the milestone can
+// absorb; the existing v0.7 mux.js pipeline is AVC/AAC-shaped. Lifting
+// these filters is a clean follow-up — until then we cap YouTube at the
+// best AVC variant the page exposes (typically 1080p).
+function isH264VideoMp4(mimeType: string | undefined): boolean {
+  if (!mimeType) return false;
+  return mimeType.startsWith('video/mp4') && /\bavc1\./i.test(mimeType);
 }
 
-function formatToVariant(f: YtFormat): HlsVariant | null {
+function isAacAudioMp4(mimeType: string | undefined): boolean {
+  if (!mimeType) return false;
+  return mimeType.startsWith('audio/mp4') && /\bmp4a\./i.test(mimeType);
+}
+
+function variantFromFormat(f: YtFormat, pairedAudio?: YtFormat): HlsVariant | null {
   // Skip protected formats. signatureCipher requires the n-param /
   // signature solver — v0.11.1+ work. Emitting these now would surface
   // unplayable URLs in the picker.
   if (!f.url) return null;
-  // Skip non-video — audio formats are paired internally at download
-  // time, not surfaced as user-pickable variants.
-  if (!isVideoFormat(f.mimeType)) return null;
+  if (!isH264VideoMp4(f.mimeType)) return null;
   const resolution = f.width && f.height ? `${f.width}x${f.height}` : null;
-  return {
+  const v: HlsVariant = {
     url: f.url,
     bandwidth: f.bitrate ?? DEFAULT_BITRATE,
     resolution,
     codecs: mimeCodecs(f.mimeType),
     ...(f.contentLength ? { contentLength: Number(f.contentLength) } : {}),
   };
+  if (pairedAudio?.url) {
+    v.pairedAudioUrl = pairedAudio.url;
+    if (pairedAudio.contentLength) {
+      v.pairedAudioContentLength = Number(pairedAudio.contentLength);
+    }
+  }
+  return v;
+}
+
+/**
+ * Pick a single default audio rendition to pair with every adaptive
+ * (video-only) variant. Highest-bitrate AAC/m4a wins because that's
+ * what the v0.11 mux path expects; itag 140 is the universal anchor.
+ * Returns undefined when no compatible audio is available — adaptive
+ * variants then fall back to "video-only download" handling later.
+ */
+function pickDefaultAudioFormat(adaptiveFormats: YtFormat[]): YtFormat | undefined {
+  const candidates = adaptiveFormats.filter((f) => f.url && isAacAudioMp4(f.mimeType));
+  if (candidates.length === 0) return undefined;
+  candidates.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+  return candidates[0];
 }
 
 /**
@@ -210,13 +240,20 @@ export function buildStreamsFromPlayerResponse(
   // so emit nothing rather than show a broken row.
   if (status !== 'OK') return [];
 
-  const allFormats: YtFormat[] = [
-    ...(player.streamingData?.formats ?? []),
-    ...(player.streamingData?.adaptiveFormats ?? []),
-  ];
+  const progressiveFormats = player.streamingData?.formats ?? [];
+  const adaptiveFormats = player.streamingData?.adaptiveFormats ?? [];
+  const defaultAudio = pickDefaultAudioFormat(adaptiveFormats);
+
   const variants: HlsVariant[] = [];
-  for (const f of allFormats) {
-    const v = formatToVariant(f);
+  // Progressive itags (18, 22, 36) carry audio + video in one file —
+  // no pairing needed.
+  for (const f of progressiveFormats) {
+    const v = variantFromFormat(f);
+    if (v) variants.push(v);
+  }
+  // Adaptive video formats need audio pairing.
+  for (const f of adaptiveFormats) {
+    const v = variantFromFormat(f, defaultAudio);
     if (v) variants.push(v);
   }
   if (variants.length === 0) return [];

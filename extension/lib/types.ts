@@ -74,6 +74,18 @@ export interface HlsVariant {
    * unset — the popup falls back to bandwidth × duration / 8.
    */
   contentLength?: number;
+  /**
+   * Companion audio stream URL for adaptive video-only variants
+   * (YouTube adaptiveFormats). The downloader fetches both and muxes
+   * into a single MP4. Unset for progressive variants (audio already
+   * embedded) and HLS variants (audio is in the same TS segments).
+   */
+  pairedAudioUrl?: string;
+  /**
+   * Byte length of the paired audio stream when declared. Used by the
+   * popup to add the audio size into the displayed estimate.
+   */
+  pairedAudioContentLength?: number;
 }
 
 export interface HlsAlternate {

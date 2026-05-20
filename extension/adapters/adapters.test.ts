@@ -235,7 +235,9 @@ describe('buildStreamsFromPlayerResponse', () => {
           {
             itag: 18,
             url: 'https://x/18',
-            mimeType: 'video/mp4',
+            // H.264 codec is required by the v0.11 filter — bare
+            // "video/mp4" without a codecs= attribute is rejected.
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
             bitrate: 500_000,
             width: 640,
             height: 360,
@@ -244,6 +246,113 @@ describe('buildStreamsFromPlayerResponse', () => {
       },
     });
     expect(out[0].url).toBe('https://x/18');
+  });
+
+  it('pairs adaptive video variants with the highest-bitrate AAC audio', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc' },
+      streamingData: {
+        formats: [
+          {
+            itag: 18,
+            url: 'https://x/18',
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            bitrate: 500_000,
+            width: 640,
+            height: 360,
+          },
+        ],
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://x/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+            contentLength: '9876543',
+          },
+          {
+            itag: 140,
+            url: 'https://x/140-aac-128',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+            contentLength: '512000',
+          },
+          {
+            itag: 139,
+            url: 'https://x/139-aac-48',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 48_000,
+            contentLength: '256000',
+          },
+        ],
+      },
+    });
+    // Adaptive variant (itag=137) gets the higher-bitrate audio paired.
+    const adaptive = out[0].variants?.find((v) => v.url === 'https://x/137');
+    expect(adaptive?.pairedAudioUrl).toBe('https://x/140-aac-128');
+    expect(adaptive?.pairedAudioContentLength).toBe(512000);
+    // Progressive itag (itag=18) already has muxed audio — no pairing.
+    const progressive = out[0].variants?.find((v) => v.url === 'https://x/18');
+    expect(progressive?.pairedAudioUrl).toBeUndefined();
+  });
+
+  it('omits pairedAudioUrl when no compatible audio format exists', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://x/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          // Only opus audio — v0.11's H.264+AAC-only filter excludes
+          // it, so the variant ends up with no paired audio. The
+          // adaptive download path will recognize this and surface a
+          // typed error rather than silently producing a video-only
+          // file.
+          {
+            itag: 251,
+            url: 'https://x/251',
+            mimeType: 'audio/webm; codecs="opus"',
+            bitrate: 160_000,
+          },
+        ],
+      },
+    });
+    expect(out[0].variants?.[0].pairedAudioUrl).toBeUndefined();
+  });
+
+  it('skips VP9 / AV1 video formats (v0.11 ships H.264-only)', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 248,
+            url: 'https://x/248',
+            mimeType: 'video/webm; codecs="vp09.00.40.08"',
+            bitrate: 3_000_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 401,
+            url: 'https://x/401',
+            mimeType: 'video/mp4; codecs="av01.0.13M.08"',
+            bitrate: 5_000_000,
+            width: 3840,
+            height: 2160,
+          },
+        ],
+      },
+    });
+    expect(out).toEqual([]);
   });
 });
 

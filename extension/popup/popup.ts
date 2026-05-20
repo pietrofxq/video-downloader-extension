@@ -138,13 +138,18 @@ function resolveDurationSeconds(entry: MediaEntry, variantUrl: string | undefine
 // Resolve estimated (or exact) byte size for the chosen variant.
 // Priority:
 //   1. Variant's declared `contentLength` (YouTube publishes this).
+//      For adaptive variants with a paired audio stream, the audio's
+//      contentLength is added so the displayed estimate reflects the
+//      final muxed MP4.
 //   2. BANDWIDTH × duration / 8 (HLS — master declares bandwidth, media
 //      playlist has duration).
 // Returns 0 when neither path resolves; the popup hides the badge.
 function resolveSizeBytes(entry: MediaEntry, variantUrl: string | undefined): number {
   if (variantUrl && Array.isArray(entry.variants)) {
     const v = entry.variants.find((x) => x.url === variantUrl);
-    if (v?.contentLength && v.contentLength > 0) return v.contentLength;
+    if (v?.contentLength && v.contentLength > 0) {
+      return v.contentLength + (v.pairedAudioContentLength ?? 0);
+    }
     const dur = resolveDurationSeconds(entry, variantUrl);
     if (dur > 0 && v && v.bandwidth > 0) return Math.round((v.bandwidth * dur) / 8);
   }
