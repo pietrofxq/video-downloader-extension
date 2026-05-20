@@ -54,6 +54,48 @@ describe('classifyUrl', () => {
     // Path segments: /metakeys.json/  → ext is .json, not .key
     expect(classifyUrl('https://x.com/metakeys.json')).toBeNull();
   });
+
+  describe('YouTube videoplayback', () => {
+    const yt = (itag: string, mime = 'video/mp4'): string =>
+      `https://rr3---sn-xyz.googlevideo.com/videoplayback?expire=1&itag=${itag}&mime=${encodeURIComponent(mime)}&range=0-1000`;
+
+    it('classifies muxed itags (18, 22, 36) as progressive', () => {
+      expect(classifyUrl(yt('18'))).toBe(KINDS.PROGRESSIVE);
+      expect(classifyUrl(yt('22'))).toBe(KINDS.PROGRESSIVE);
+      expect(classifyUrl(yt('36'))).toBe(KINDS.PROGRESSIVE);
+    });
+
+    it('classifies video-only adaptive itags as dash', () => {
+      expect(classifyUrl(yt('137'))).toBe(KINDS.DASH); // 1080p H.264 video-only
+      expect(classifyUrl(yt('299'))).toBe(KINDS.DASH); // 1080p60 video-only
+    });
+
+    it('classifies audio-only adaptive itags as dash', () => {
+      expect(classifyUrl(yt('140', 'audio/mp4'))).toBe(KINDS.DASH);
+      expect(classifyUrl(yt('251', 'audio/webm'))).toBe(KINDS.DASH);
+    });
+
+    it('returns null when mime is missing or non-AV', () => {
+      expect(classifyUrl('https://rr3---sn-xyz.googlevideo.com/videoplayback?itag=18')).toBeNull();
+      expect(
+        classifyUrl(
+          'https://rr3---sn-xyz.googlevideo.com/videoplayback?itag=18&mime=application/x-mpegURL',
+        ),
+      ).toBeNull();
+    });
+
+    it('only matches the /videoplayback path, not arbitrary paths', () => {
+      expect(
+        classifyUrl('https://rr3---sn-xyz.googlevideo.com/api/stats?mime=video/mp4&itag=18'),
+      ).toBeNull();
+    });
+
+    it('only matches the googlevideo.com host, not lookalikes', () => {
+      expect(
+        classifyUrl('https://googlevideo.com.evil.example/videoplayback?mime=video/mp4&itag=18'),
+      ).toBeNull();
+    });
+  });
 });
 
 describe('isPrimary', () => {
