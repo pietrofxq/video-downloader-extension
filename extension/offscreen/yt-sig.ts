@@ -25,6 +25,7 @@ import { JsAnalyzer, type ExtractionConfig } from '../vendor/youtubei-js/JsAnaly
 import { JsExtractor } from '../vendor/youtubei-js/JsExtractor.js';
 import { nsigMatcher } from '../vendor/youtubei-js/matchers.js';
 import { fetchText, type ProxyFetch } from './downloader.js';
+import { evalInSandbox } from './sandbox-bridge.js';
 import { log, redactUrl } from '../lib/log.js';
 
 const NSIG_EXPORT_NAME = 'nsigFunction';
@@ -52,8 +53,12 @@ export interface CompiledSolver {
    * Errors are caught + logged; the input is returned unchanged so a
    * subsequent fetch produces a deterministic failure mode (403 from
    * the CDN) rather than vanishing silently.
+   *
+   * Async because the actual eval happens in a sandboxed iframe (the
+   * offscreen document's CSP forbids `new Function`); each call is a
+   * postMessage round-trip.
    */
-  decipher(input: DecipherInput): string;
+  decipher(input: DecipherInput): Promise<string>;
 
   /** Per-input cache so repeat n values across chunk URLs only
    * transform once. Shared across all decipher() calls on this
@@ -112,9 +117,9 @@ async function compileSolver(args: {
 
   const nCache = new Map<string, string>();
 
-  const decipher = (input: DecipherInput): string => {
+  const decipher = async (input: DecipherInput): Promise<string> => {
     try {
-      return runDecipher(built, input, nCache);
+      return await runDecipher(built, input, nCache);
     } catch (err) {
       log.warn('yt-sig decipher failed; returning unchanged URL', {
         err: err instanceof Error ? err.message : String(err),
@@ -156,11 +161,11 @@ export function buildExtractedScript(source: string): string {
  *  - For a signatureCipher input, the URL is reconstructed from the
  *    encoded `url=...&s=...&sp=...` triple.
  */
-function runDecipher(
+async function runDecipher(
   extractedSource: string,
   input: DecipherInput,
   nCache: Map<string, string>,
-): string {
+): Promise<string> {
   // Pull s/sp/url out of signatureCipher; build the working URL.
   let workingUrlStr: string;
   let s: string | null = null;
@@ -204,8 +209,7 @@ function runDecipher(
   const processorSrc = buildProcessorWrapper();
   const fullScript = `${extractedSource}\n${processorSrc}\nreturn __vdl_process(${JSON.stringify(evalArgs)});`;
 
-  const fn = new Function(fullScript);
-  const result = fn() as { n?: string; sig?: string };
+  const result = (await evalInSandbox(fullScript)) as { n?: string; sig?: string } | null;
   if (typeof result !== 'object' || result === null) {
     throw new Error('decipher script returned non-object');
   }

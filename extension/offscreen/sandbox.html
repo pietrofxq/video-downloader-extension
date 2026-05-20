@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VDL sandbox</title>
+  </head>
+  <body>
+    <!--
+      Sandbox page used by extension/offscreen/yt-sig.ts to evaluate
+      YouTube's extracted n/sig decipher function. MV3 declares this
+      page under "sandbox" in manifest.json; pages listed there run
+      with a relaxed CSP that allows `new Function(...)` / eval.
+      They CANNOT use chrome.* APIs — communication with the parent
+      offscreen document is strictly via window.postMessage.
+    -->
+    <script src="sandbox.js"></script>
+  </body>
+</html>

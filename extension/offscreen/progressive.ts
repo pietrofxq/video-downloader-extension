@@ -67,7 +67,7 @@ export async function downloadProgressive(
   if (isYouTubeMediaUrl(variantUrl)) {
     try {
       const solver = await getYouTubeSolver({ proxyFetch, tabId, frameId, signal });
-      fetchUrl = solver.decipher(variantUrl);
+      fetchUrl = await solver.decipher(variantUrl);
     } catch (err) {
       log.warn('yt-sig: solver setup failed; proceeding with original URL', {
         requestId,

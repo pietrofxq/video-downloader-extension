@@ -31,6 +31,9 @@
       "world": "MAIN"
     }
   ],
+  "sandbox": {
+    "pages": ["offscreen/sandbox.html"]
+  },
   "options_page": "options/options.html",
   "action": {
     "default_popup": "popup/popup.html",
