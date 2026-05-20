@@ -155,60 +155,6 @@ function parseYtPlayerResponse(doc: Document): YtPlayerResponse | null {
   return null;
 }
 
-/**
- * Find the player `base.js` URL on the page. YouTube has shipped
- * several path shapes over the years; we try them in order:
- *
- *   1. ytcfg.set({"PLAYER_JS_URL": "/s/player/.../base.js"}) inline
- *      — most reliable; YouTube always sets this when it ships a
- *      player. Survives DOM mutations that swap out script tags.
- *   2. `<script src=".../base.js">` matching `/player/.../vflset/.../base.js`
- *      — generic player.js path shape, covers `player_ias`,
- *      `player_ias_tce`, `player-plasma-ias-*` and future variants.
- *   3. Any `<script>` whose `src` ends in `/base.js` under
- *      youtube.com — last-resort fallback so we at least try
- *      something on builds that move the script entirely.
- *
- * Returns an absolute URL. Exported so tests can verify against
- * captured HTML fixtures without spinning up a DOM.
- */
-export function extractPlayerJsUrlFromScripts(doc: Document): string | null {
-  const resolve = (href: string): string => {
-    try {
-      return new URL(href, doc.baseURI || 'https://www.youtube.com/').href;
-    } catch {
-      return href;
-    }
-  };
-
-  // Strategy 1: ytcfg's PLAYER_JS_URL — the canonical source.
-  for (const s of doc.querySelectorAll('script')) {
-    const t = s.textContent ?? '';
-    if (!t.includes('PLAYER_JS_URL')) continue;
-    const m = t.match(/"PLAYER_JS_URL"\s*:\s*"([^"]+)"/);
-    if (m && m[1]) return resolve(m[1]);
-  }
-
-  // Strategy 2: <script src=".../vflset/.../base.js">. Use a tolerant
-  // path shape — match anything that LOOKS like the player JS by
-  // ending in /base.js under a /player/ prefix.
-  const VFLSET_RE = /\/player\/[^/]+\/[^/]+\.vflset\/[^/]+\/base\.js/;
-  for (const el of doc.querySelectorAll<HTMLScriptElement>('script[src*="base.js"]')) {
-    const src = el.getAttribute('src');
-    if (!src) continue;
-    if (VFLSET_RE.test(src)) return resolve(src);
-  }
-
-  // Strategy 3: any script whose src ends in /base.js. Last resort.
-  for (const el of doc.querySelectorAll<HTMLScriptElement>('script[src*="base.js"]')) {
-    const src = el.getAttribute('src');
-    if (!src) continue;
-    if (/\/base\.js(?:\?|$)/.test(src)) return resolve(src);
-  }
-
-  return null;
-}
-
 // Bitrate fallback for older / minified `streamingData` payloads that
 // drop `bitrate`. Keeps the size estimator from going to zero on streams
 // that only carry width/height.
@@ -289,7 +235,6 @@ function pickDefaultAudioFormat(adaptiveFormats: YtFormat[]): YtFormat | undefin
  */
 export function buildStreamsFromPlayerResponse(
   player: YtPlayerResponse | null,
-  opts: { playerJsUrl?: string } = {},
 ): DiscoveredStream[] {
   if (!player) return [];
 
@@ -321,7 +266,6 @@ export function buildStreamsFromPlayerResponse(
     progressive: progressiveFormats.map(summarize),
     adaptive: adaptiveFormats.map(summarize),
     defaultAudio: defaultAudio ? summarize(defaultAudio) : null,
-    playerJsUrl: opts.playerJsUrl ?? null,
   });
 
   const variants: HlsVariant[] = [];
@@ -360,7 +304,6 @@ export function buildStreamsFromPlayerResponse(
       kind: 'dash',
       ...(lengthSecs > 0 ? { totalDuration: lengthSecs } : {}),
       variants,
-      ...(opts.playerJsUrl ? { playerJsUrl: opts.playerJsUrl } : {}),
     },
   ];
 }
@@ -418,8 +361,7 @@ const youtubeAdapter: Adapter = {
   },
   discoverStreams(doc) {
     const player = parseYtPlayerResponse(doc);
-    const playerJsUrl = extractPlayerJsUrlFromScripts(doc) ?? undefined;
-    return buildStreamsFromPlayerResponse(player, { playerJsUrl });
+    return buildStreamsFromPlayerResponse(player);
   },
   deriveFilename({ pageMeta }) {
     const title = pageMeta?.title || pageMeta?.ogTitle || '';

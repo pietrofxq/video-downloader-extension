@@ -561,7 +561,6 @@ async function handleStreamsDiscovered({
       // step needed. isMaster=true so the popup picker treats them as
       // multi-quality the same way it treats parsed HLS masters.
       ...(s.variants ? { variants: s.variants, isMaster: true } : {}),
-      ...(s.playerJsUrl ? { playerJsUrl: s.playerJsUrl } : {}),
     };
     const stored = await addEntry(tabId, entry);
     if (stored) anyAdded = true;
@@ -802,7 +801,6 @@ async function handleStartDownload(payload: {
     frameId: entry.frameId ?? 0,
     headers: entry.headers,
     filename,
-    ...(entry.playerJsUrl ? { playerJsUrl: entry.playerJsUrl } : {}),
   };
 
   // Seed the per-request state BEFORE forwarding to the offscreen, so the
@@ -834,7 +832,6 @@ async function handleStartDownload(payload: {
     adapter: entry.adapterId,
     filename: `${filename}.mp4`,
     kind: downloadKind,
-    hasPlayerJsUrl: !!entry.playerJsUrl,
     queued: activeRequestId !== requestId,
   });
   return { requestId, filename: `${filename}.mp4` };
@@ -859,7 +856,6 @@ interface RunPayload {
   frameId: number;
   headers?: Record<string, string>;
   filename: string;
-  playerJsUrl?: string;
 }
 
 let activeRequestId: string | null = null;
