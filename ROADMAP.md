@@ -282,25 +282,25 @@ Goal: migrate before the adapter/message/download APIs grow further, so new feat
 
 Goal: make large downloads predictable instead of relying on one giant JS heap pipeline.
 
-- [ ] Introduce an OPFS-backed download workspace in the offscreen document:
-  - decrypted HLS segments
-  - intermediate remux buffers when needed
-  - subtitle sidecars later
-  - cleanup metadata per request
-- [ ] Set size thresholds for in-memory vs OPFS paths. Small downloads can stay in memory; larger lessons must spill to OPFS before remux.
-- [ ] Add a single-download queue or explicit concurrency limit. The UI should show queued/in-progress states instead of starting multiple multi-GB jobs at once.
-- [ ] Add cancellation:
-  - popup cancel button
-  - `AbortController` for proxy fetches
-  - offscreen cleanup of partial OPFS files
-  - download state transitions to canceled
-- [ ] Add retry policy for transient segment failures:
-  - retry 429/5xx/network errors with bounded backoff
-  - do not retry 403 token-expired failures blindly
-  - keep per-segment failure context for error messages
-- [ ] Close the offscreen document after all active downloads finish and Blob URLs are revoked, with an idle grace period so back-to-back downloads are cheap.
-- [ ] Persist enough state in `chrome.storage.session` to recover the UI after a service-worker restart while the offscreen document is still active.
-- [ ] Add temp-file cleanup on extension startup/offscreen startup to remove abandoned OPFS workspaces.
+- [x] Introduce an OPFS-backed download workspace in the offscreen document:
+  - [x] decrypted HLS segments (`extension/offscreen/storage.ts` writes each segment to `/vdl-workspaces/<requestId>/seg-NNNNNN.ts`; the downloader streams them back via `RemuxSegmentSource`)
+  - [ ] intermediate remux buffers when needed (mux.js output still buffers in memory through the final concat; deferred — saves ~half the heap already without it; revisit only if multi-GB outputs OOM)
+  - [ ] subtitle sidecars later (slots in once v0.9-deferred subtitle support lands)
+  - [x] cleanup metadata per request (`workspace.dispose()` in the downloader's finally; idempotent on success / error / abort)
+- [ ] Set size thresholds for in-memory vs OPFS paths. Small downloads can stay in memory; larger lessons must spill to OPFS before remux. (Deferred — v0.10 always uses OPFS for simplicity. The I/O overhead is dwarfed by network latency, and skipping the threshold removes a branch that would otherwise need its own fixture coverage. Revisit if profiling shows OPFS hurts on <100 MB downloads.)
+- [x] Add a single-download queue or explicit concurrency limit. Phase C: SW serializes via `activeRequestId` + `downloadQueue`; popup shows a "Queued" pill with cancel.
+- [x] Add cancellation. Phase A:
+  - [x] popup cancel button (× on in-flight rows + queued rows)
+  - [x] `AbortController` for proxy fetches (offscreen tracks one per requestId; aborted on CANCEL_DOWNLOAD)
+  - [x] offscreen cleanup of partial OPFS files (workspace.dispose() in the finally block fires on abort too)
+  - [x] download state transitions to canceled (DownloadStatus += 'canceled'; SW transitions synchronously on the cancel click)
+- [x] Add retry policy for transient segment failures. Phase B:
+  - [x] retry 429/5xx/network errors with bounded backoff (500ms · 1s · 2s · 4s + ≤300ms jitter, max 4 attempts ≈ ~7.5s)
+  - [x] do not retry 403 token-expired failures blindly (`isRetryableReply` allowlist; 403 short-circuits via `throwFromReply` → `TokenExpiredError`)
+  - [x] keep per-segment failure context for error messages (`throwFromReply` now appends `(HTTP <status>)`; the segment URL is in the message)
+- [x] Close the offscreen document after all active downloads finish and Blob URLs are revoked, with an idle grace period so back-to-back downloads are cheap. Phase F: `scheduleIdleTeardown()` arms a 30s timer when no in-flight / queued state and no outstanding blob URLs remain.
+- [x] Persist enough state in `chrome.storage.session` to recover the UI after a service-worker restart while the offscreen document is still active. Phase E: `downloadStates` + `downloadQueue` mirrored on every mutation; SW startup restores both and re-derives `activeRequestId` from the restored statuses.
+- [x] Add temp-file cleanup on extension startup/offscreen startup to remove abandoned OPFS workspaces. Phase D: `OpfsWorkspace.cleanupAllStale()` runs fire-and-forget when the offscreen module loads.
 
 **Ship criterion:** a long lesson can download without unbounded JS heap growth, the user can cancel safely, and retry/cleanup behavior is deterministic.
 
