@@ -246,3 +246,13 @@ mux.js was built for `SourceBuffer.appendBuffer()` — it expects the player to 
 - The current milestone and checkbox list is in `ROADMAP.md`. Pick up from the first unchecked item under the current version header.
 - If a checkbox is ambiguous, prefer the simplest implementation that satisfies it and leaves room for the next milestone.
 - If you're tempted to special-case a site in core, stop — write or extend an adapter instead. See §4.
+
+---
+
+## 12. Branching & shipping
+
+- **One branch per version.** When you start a new `v0.x` / `v1.x` milestone, switch to a branch named after that version (e.g. `v0.11-youtube`) before touching code. `main` should always be in a shippable state and never carry half-built milestones.
+- Branch name format: `v<version>-<short-slug>` (e.g. `v0.11-youtube`, `v0.12-hls-completeness`). The slug matches the ROADMAP header.
+- Tactical fixes that aren't part of a milestone (a bug fix, a typo) can land directly on `main`.
+- Merge the version branch into `main` only when the milestone's ship criterion is met and `npm run check` is green.
+- Within a milestone, commit in coherent slices (one architectural change per commit) rather than one giant blob — the recent v0.10 history is a reasonable reference for granularity.
