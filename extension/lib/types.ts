@@ -158,6 +158,49 @@ export interface AdapterFilenameInput {
   mediaEntry?: MediaEntry;
 }
 
+/**
+ * Stream surfaced by an adapter that read it out of page-loaded JSON
+ * rather than waiting for a webRequest to fire. Used by sites whose
+ * media URLs aren't observable through the normal detection layer —
+ * e.g. YouTube's `ytInitialPlayerResponse.streamingData`, where the
+ * catalog of available formats is in the page DOM and webRequest only
+ * sees one chunk at a time of whichever quality is currently playing.
+ *
+ * The SW promotes each entry into a MediaEntry, filling in the fields
+ * the adapter can't know (id, capturedAt, pageUrl).
+ */
+export interface DiscoveredStream {
+  url: string;
+  kind: MediaKind;
+  headers?: Record<string, string>;
+  /** "1920x1080" — same shape as HlsVariant.resolution. */
+  resolution?: string;
+  /** Bits per second. */
+  bandwidth?: number;
+  /** RFC 6381 codec list. */
+  codecs?: string;
+  /** Seconds. Pre-filled when the platform publishes it (YouTube does). */
+  totalDuration?: number;
+  /**
+   * Pre-declared byte size. When set, the popup skips its
+   * bandwidth × duration estimate and shows the exact figure.
+   */
+  contentLength?: number;
+  /** True for adaptive audio-only renditions. */
+  audioOnly?: boolean;
+  /** Marks the stream as DRM-gated. Same semantics as MediaEntry.drm. */
+  drm?: boolean;
+}
+
+/**
+ * Context passed to Adapter.transformUrl so the adapter can decide
+ * whether the rewrite applies (some signing schemes only apply to
+ * segment URLs, not manifest URLs).
+ */
+export interface TransformUrlContext {
+  purpose: 'manifest' | 'segment' | 'key';
+}
+
 export interface Adapter {
   id: AdapterId;
   /** True iff this adapter handles a detection on `pageUrl`. */
@@ -170,8 +213,25 @@ export interface Adapter {
    * return a cleanup function. If unset, only the initial scrape is used.
    */
   observe?(document: Document, onUpdate: (meta: PageMeta) => void): () => void;
+  /**
+   * Optional. Read available media streams out of the page DOM/JSON.
+   * Called from the content script after the initial scrape, and again
+   * when `observe` fires (SPA navigation). Returning an empty list is
+   * fine — passive webRequest detection still runs alongside.
+   *
+   * MUST NOT make network calls; same constraint as scrapePageMeta.
+   */
+  discoverStreams?(document: Document): DiscoveredStream[];
   /** Returns a sanitized filename (no extension). Always produces a non-empty string. */
   deriveFilename(params: AdapterFilenameInput): string;
   /** Optional. Patch outbound headers before segment fetches. */
   transformHeaders?(headers?: Record<string, string>): Record<string, string> | undefined;
+  /**
+   * Optional. Rewrite a URL before the downloader fetches it — e.g.
+   * YouTube's `n` parameter has to be re-signed via an obfuscated JS
+   * function pulled from `base.js` or the CDN throttles the response.
+   * Returning the input unchanged is the no-op default. May be async
+   * so the adapter can lazy-load and cache its signing material.
+   */
+  transformUrl?(url: string, ctx: TransformUrlContext): string | Promise<string>;
 }
