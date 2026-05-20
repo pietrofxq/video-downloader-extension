@@ -14,7 +14,50 @@ function isYouTubeMediaUrl(url: string): boolean {
   }
 }
 
-const OUTPUT_FILE_NAME = 'out.mp4';
+/**
+ * Pick the output file extension for the saved file. Progressive
+ * downloads pass the source bytes through unchanged — we don't remux —
+ * so the on-disk filename must match the actual container or the
+ * user's media player won't recognize the file.
+ *
+ * Priority:
+ *   1. YouTube videoplayback URLs declare `mime=...` (video/mp4,
+ *      video/webm, video/3gpp). Use that.
+ *   2. Generic progressive sources put the format in the URL path
+ *      (e.g. `.mp4`, `.webm`). Use the last path segment's extension
+ *      if it's one we recognize as a video container.
+ *   3. Fall back to `mp4` (the most common shape, and what every
+ *      itag the v0.11 path actually serves uses).
+ *
+ * Exported for unit tests.
+ */
+export function deriveProgressiveExtension(url: string): string {
+  try {
+    const u = new URL(url);
+    const mime = u.searchParams.get('mime');
+    if (mime) {
+      if (mime.startsWith('video/mp4')) return 'mp4';
+      if (mime.startsWith('video/webm')) return 'webm';
+      if (mime.startsWith('video/3gpp')) return '3gp';
+    }
+    const last = u.pathname.split('/').filter(Boolean).pop() ?? '';
+    const dot = last.lastIndexOf('.');
+    if (dot > 0) {
+      const ext = last.slice(dot + 1).toLowerCase();
+      if (ext === 'mp4' || ext === 'webm' || ext === '3gp' || ext === 'm4v') {
+        return ext === 'm4v' ? 'mp4' : ext;
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return 'mp4';
+}
+
+// OPFS staging filename — the actual container doesn't matter here
+// because the saved-to-disk name (and what chrome.downloads sees) is
+// driven by the outcome.filename below, not this on-disk path.
+const OUTPUT_FILE_NAME = 'out.bin';
 
 /**
  * Single-URL download routed through the content-script proxy. Used for
@@ -148,12 +191,13 @@ export async function downloadProgressive(
 
     const outputFile = await workspace.getOutputFile(OUTPUT_FILE_NAME);
     const blobUrl = URL.createObjectURL(outputFile);
+    const ext = deriveProgressiveExtension(variantUrl);
     succeeded = true;
     return {
       outcome: {
         requestId,
         blobUrl,
-        filename: `${filename}.mp4`,
+        filename: `${filename}.${ext}`,
         bytes: bytes.byteLength,
         // Progressive has one logical "segment" — the whole file.
         segments: 1,
