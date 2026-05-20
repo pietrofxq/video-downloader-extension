@@ -306,9 +306,38 @@ Goal: make large downloads predictable instead of relying on one giant JS heap p
 
 ---
 
-## v0.11 - HLS completeness
+## v0.11 - YouTube support
 
-Goal: make the HLS claim accurate before calling the extension broadly usable.
+Goal: download YouTube videos end-to-end as the second real adapter. YouTube uses DASH-style adaptive streams (separate audio + video) on `videoplayback?...` URLs plus a small set of progressive single-stream itags, *not* HLS — so v0.11 brings parts of the v1.2 DASH and v1.3 progressive milestones forward for one site rather than depending on the HLS completeness work (parked in v0.12).
+
+Constraints to acknowledge up front:
+- **`n`-param throttling.** YouTube applies a per-request "n" parameter; unless the value is re-signed by an obfuscated JS function pulled from `base.js`, segment fetches are throttled to ~50–100 KB/s. The fix is real engineering (extracting + evaluating YouTube's JS function in a sandboxed context) and may slip to v0.11.1. Until it lands, low-bitrate itags are typically less throttled and the docs should call this out.
+- **Most YouTube content is non-DRM.** Rentals, Movies & TV purchases, and some music videos use Widevine; existing v0.6 DRM detection already flags those as `DRM-protected`.
+- **Live streams** are out of scope (same place HLS live is parked).
+- **Age-gated / region-locked** content is out of scope for v0.11; would need cookie / auth handling beyond the existing header capture.
+
+Tasks:
+
+- [ ] webRequest patterns + URL classification: detect `*://*.googlevideo.com/videoplayback*` URLs and classify them via the `mime=` query param (no clean file extension). Tag with `kind: 'progressive'` for muxed itags and `kind: 'dash'` for adaptive video/audio streams.
+- [ ] `adapters/youtube.ts`: `matches` on `youtube.com/watch*`, `youtu.be/*`, `youtube.com/embed/*`; `scrapePageMeta` reads `<title>` / `<meta property="og:title">` / channel name and parses `ytInitialPlayerResponse` for `videoDetails` (videoId, title, lengthSeconds, channelTitle).
+- [ ] Enumerate formats from `ytInitialPlayerResponse.streamingData` (`formats[]` for progressive itags, `adaptiveFormats[]` for DASH-style streams). Surface them in the popup quality picker with resolution + codec + filesize (YouTube declares contentLength when available — no estimation needed).
+- [ ] Progressive single-stream path (cheapest win — covers `itag=18` 360p MP4 + `itag=22` 720p MP4 where present). Stream the chosen URL straight to OPFS with the v0.10 download workspace; no remux needed since these are already MP4 with audio+video muxed. Implementation extracted into `lib/progressive-download.ts` so v1.3's broader progressive milestone just lights it up for arbitrary sites.
+- [ ] Adaptive HD path: fetch the chosen video adaptiveFormat + the default audio adaptiveFormat in parallel; combine into one MP4. Both are fMP4 (init segment + media segments), so the mux step layers two tracks rather than the HLS TS→fMP4 transmux v0.7 added. This work also unlocks the HLS alt-audio + fMP4/CMAF cases parked in v0.12 — keep the muxer module agnostic to format origin.
+- [ ] `n`-param throttling: spike a solver that extracts the `n` transform from `base.js` and re-signs URLs before they leave the SW. If feasible inside a single milestone, land it; otherwise document the limitation in the README and aim for v0.11.1.
+- [ ] DRM handling: if `playabilityStatus.status !== 'OK'` or `streamingData` is empty, the player is gated (DRM, age-restricted, region-locked, members-only). Flag the entry's `drm: true` so the existing popup label fires; do not attempt any download.
+- [ ] Filename: adapter's `deriveFilename` returns sanitized `{channelTitle} - {videoTitle}.mp4` (so files group together in the user's downloads when they grab a series).
+- [ ] Verify: download a public non-DRM video at 360p (progressive) and 1080p (adaptive) — both play in VLC + QuickTime with audio/video sync and accurate duration.
+- [ ] Verify: SPA navigation between watch pages updates the popup metadata each time.
+- [ ] Verify: a DRM-gated YouTube rental shows as DRM-protected and the Download button is replaced.
+- [ ] Verify: `npm run check` passes; YouTube adapter unit tests cover format enumeration + DRM detection on saved fixture HTML.
+
+**Ship criterion:** a public non-DRM YouTube video downloads to a playable MP4 at the user's chosen quality. If `n`-throttling isn't solved in this milestone the README documents the limitation honestly and points to v0.11.1.
+
+---
+
+## v0.12 - HLS completeness
+
+Goal: make the HLS claim accurate before calling the extension broadly usable. Parked behind v0.11 so YouTube support ships first; the muxer module v0.11 introduces also lights up the alt-audio + fMP4 work below.
 
 - [ ] Support HLS alternate-audio renditions. When a master playlist declares `EXT-X-MEDIA TYPE=AUDIO` separate from the video variant, fetch the default/chosen audio rendition alongside the video, transmux both, and combine them into one MP4.
 - [ ] Surface audio rendition choice in the popup only when multiple meaningful audio tracks exist; otherwise choose the manifest default.
@@ -337,7 +366,7 @@ Goal: make the HLS claim accurate before calling the extension broadly usable.
 
 ## v1.0 - Polish, settings, disclaimer
 
-Goal: shippable to friends - covers common HLS VOD end-to-end, with first-class Hotmart support.
+Goal: shippable to friends - covers common HLS VOD end-to-end plus YouTube, with first-class Hotmart support.
 
 - [ ] First-run modal in the popup with the legal disclaimer ("only download content you have the right to"); acceptance stored in `chrome.storage.local`.
 - [ ] `options.html` page with:
@@ -357,11 +386,11 @@ Goal: shippable to friends - covers common HLS VOD end-to-end, with first-class 
   - query-param redaction covers known CDN token names
   - no third-party network calls
 - [ ] Write `CHANGELOG.md` and tag `v1.0.0`.
-- [ ] Manual smoke test on 3 sites: a Hotmart course, a public HLS demo, a generic third-party site with HTML5 HLS.
+- [ ] Manual smoke test on 4 sites: a Hotmart course, YouTube (one progressive + one HD adaptive video), a public HLS demo, a generic third-party site with HTML5 HLS.
 - [ ] Test on a fresh Chrome profile using only the unpacked `dist/` extension.
-- [ ] Update `README.md` install section with the final unpacked-load steps and the support matrix from v0.11.
+- [ ] Update `README.md` install section with the final unpacked-load steps and the support matrix from v0.12.
 
-**Ship criterion:** the extension is usable end-to-end on Hotmart and on at least two unrelated HLS VOD sites by a non-technical user on a fresh Chrome profile.
+**Ship criterion:** the extension is usable end-to-end on Hotmart, YouTube, and at least one unrelated HLS VOD site by a non-technical user on a fresh Chrome profile.
 
 ---
 
@@ -420,9 +449,9 @@ Goal: when a site serves a single non-segmented `.mp4` or `.webm` via `<video sr
 
 ---
 
-## v1.4 - Adapter SDK + a second real adapter
+## v1.4 - Adapter SDK + a third real adapter
 
-Goal: adding a new site adapter is a documented, typed, small task.
+Goal: adding a new site adapter is a documented, typed, small task. Hotmart and YouTube are already in tree (v0.x); this milestone formalizes the contract and adds one more concrete adapter to prove the SDK.
 
 - [ ] Write `docs/adapters.md` with the full TypeScript adapter contract, lifecycle, and a worked example end-to-end.
 - [ ] Extend the typed adapter interface with capability hints where useful:
@@ -431,15 +460,15 @@ Goal: adding a new site adapter is a documented, typed, small task.
   - `filenameTemplateDefaults`
   - `qualityPreferenceHints`
 - [ ] Pick one additional real-world target and implement it as `adapters/{name}.ts`. Suggested targets:
-  - **YouTube adapter** - detect YouTube watch/embed pages, extract usable metadata, and route only non-DRM media URLs through the normal adapter/download pipeline.
   - **Generic Video.js detector** - matches any page where `videojs` is on `window` and pulls metadata from the player's data attributes.
   - **Bunny CDN** or **public Vimeo embeds**.
-- [ ] Document adapter boundaries in the SDK: adapters may target YouTube and other large platforms, but must still respect the project-wide constraints of no DRM decryption, no backend service, no telemetry, and no site-specific logic outside `extension/adapters/`.
+  - **Twitch VODs** (non-live, non-DRM clips and past broadcasts).
+- [ ] Document adapter boundaries in the SDK: adapters may target large platforms, but must still respect the project-wide constraints of no DRM decryption, no backend service, no telemetry, and no site-specific logic outside `extension/adapters/`.
 - [ ] Add an adapter-matching dev tool: in the options page, a "Test URL" field that shows which adapter would match.
 - [ ] Add adapter conformance fixtures covering: `matches`, `scrapePageMeta` on saved HTML, `deriveFilename`, and any capability hints.
 - [ ] Verify: with the new adapter installed, the popup correctly tags streams from that site with the new adapter id and produces a properly named MP4.
 
-**Ship criterion:** the project has two non-trivial typed adapters and a contributor can write a third by following `docs/adapters.md`.
+**Ship criterion:** the project has three non-trivial typed adapters and a contributor can write a fourth by following `docs/adapters.md`.
 
 ---
 
