@@ -135,16 +135,18 @@ function resolveDurationSeconds(entry: MediaEntry, variantUrl: string | undefine
   return 0;
 }
 
-// Estimate file size from BANDWIDTH × duration / 8. Requires the master
-// playlist to declare BANDWIDTH on the chosen variant AND that variant's
-// media playlist to have been parsed (so we know its totalDuration). For
-// single-bitrate streams we don't have a bandwidth value — return 0.
+// Resolve estimated (or exact) byte size for the chosen variant.
+// Priority:
+//   1. Variant's declared `contentLength` (YouTube publishes this).
+//   2. BANDWIDTH × duration / 8 (HLS — master declares bandwidth, media
+//      playlist has duration).
+// Returns 0 when neither path resolves; the popup hides the badge.
 function resolveSizeBytes(entry: MediaEntry, variantUrl: string | undefined): number {
-  const dur = resolveDurationSeconds(entry, variantUrl);
-  if (dur <= 0) return 0;
   if (variantUrl && Array.isArray(entry.variants)) {
     const v = entry.variants.find((x) => x.url === variantUrl);
-    if (v && v.bandwidth > 0) return Math.round((v.bandwidth * dur) / 8);
+    if (v?.contentLength && v.contentLength > 0) return v.contentLength;
+    const dur = resolveDurationSeconds(entry, variantUrl);
+    if (dur > 0 && v && v.bandwidth > 0) return Math.round((v.bandwidth * dur) / 8);
   }
   return 0;
 }

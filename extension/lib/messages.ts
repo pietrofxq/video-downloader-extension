@@ -11,6 +11,7 @@
 //   3. Add the new interface to ExtensionMessage's union.
 
 import type {
+  DiscoveredStream,
   DownloadOutcome,
   DownloadRequest,
   DownloadState,
@@ -36,6 +37,7 @@ export const MSG = Object.freeze({
   DISMISS_DOWNLOAD: 'DISMISS_DOWNLOAD',
   CANCEL_DOWNLOAD: 'CANCEL_DOWNLOAD',
   RESET_TAB: 'RESET_TAB',
+  STREAMS_DISCOVERED: 'STREAMS_DISCOVERED',
 } as const);
 
 export type MessageType = (typeof MSG)[keyof typeof MSG];
@@ -153,6 +155,15 @@ export interface ResetTabMessage extends MessageBase<typeof MSG.RESET_TAB> {
   payload: { tabId: number };
 }
 
+// Content script → SW: catalog of streams the adapter found in the
+// page DOM/JSON. Used by sites whose media URLs aren't visible to
+// webRequest (YouTube's ytInitialPlayerResponse.streamingData). The SW
+// promotes each into a MediaEntry, picking the adapter from the
+// sender's pageUrl just like MEDIA_URL_DETECTED.
+export interface StreamsDiscoveredMessage extends MessageBase<typeof MSG.STREAMS_DISCOVERED> {
+  payload: { adapterId: string; streams: DiscoveredStream[] };
+}
+
 export type ExtensionMessage =
   | PingMessage
   | MediaUrlDetectedMessage
@@ -170,7 +181,8 @@ export type ExtensionMessage =
   | ShowInFolderMessage
   | DismissDownloadMessage
   | CancelDownloadMessage
-  | ResetTabMessage;
+  | ResetTabMessage
+  | StreamsDiscoveredMessage;
 
 // ---------- popup ↔ SW port wire ----------
 //

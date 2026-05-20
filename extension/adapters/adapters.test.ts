@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { pickAdapter, getAdapter, ADAPTERS } from './index.js';
 import hotmart from './hotmart.js';
-import youtube, { parseYtPlayerResponseFromScript } from './youtube.js';
+import youtube, {
+  buildStreamsFromPlayerResponse,
+  parseYtPlayerResponseFromScript,
+} from './youtube.js';
 import defaultAdapter from './default.js';
 
 describe('pickAdapter', () => {
@@ -140,6 +143,107 @@ describe('parseYtPlayerResponseFromScript', () => {
   it('handles escaped quotes inside strings without confusing the bracket walker', () => {
     const text = `ytInitialPlayerResponse = {"videoDetails":{"title":"a } and a { inside"}};`;
     expect(parseYtPlayerResponseFromScript(text)?.videoDetails?.title).toBe('a } and a { inside');
+  });
+});
+
+describe('buildStreamsFromPlayerResponse', () => {
+  it('returns empty when player is null', () => {
+    expect(buildStreamsFromPlayerResponse(null)).toEqual([]);
+  });
+
+  it('returns empty when playabilityStatus is not OK', () => {
+    expect(
+      buildStreamsFromPlayerResponse({
+        playabilityStatus: { status: 'UNPLAYABLE' },
+        streamingData: { formats: [{ itag: 18, url: 'https://x', mimeType: 'video/mp4' }] },
+      }),
+    ).toEqual([]);
+  });
+
+  it('returns one stream with video variants sorted by bandwidth descending', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc', lengthSeconds: '42' },
+      streamingData: {
+        formats: [
+          {
+            itag: 18,
+            url: 'https://x/18',
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            bitrate: 500_000,
+            width: 640,
+            height: 360,
+            contentLength: '1234567',
+          },
+        ],
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://x/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+            contentLength: '9876543',
+          },
+          {
+            itag: 140,
+            url: 'https://x/140',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+            contentLength: '512000',
+          },
+        ],
+      },
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('dash');
+    expect(out[0].url).toBe('youtube:abc');
+    expect(out[0].totalDuration).toBe(42);
+    // Two video variants, sorted by bandwidth descending. Audio (itag
+    // 140) is excluded — the downloader pairs it internally.
+    expect(out[0].variants).toHaveLength(2);
+    expect(out[0].variants?.[0].url).toBe('https://x/137');
+    expect(out[0].variants?.[0].resolution).toBe('1920x1080');
+    expect(out[0].variants?.[0].contentLength).toBe(9876543);
+    expect(out[0].variants?.[1].url).toBe('https://x/18');
+  });
+
+  it('skips formats without a direct url (signatureCipher path is deferred)', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'xyz' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            signatureCipher: 's=AAA&sp=sig&url=https%3A%2F%2Fexample',
+            mimeType: 'video/mp4',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+        ],
+      },
+    });
+    // All formats gated by signatureCipher → no playable variants → empty.
+    expect(out).toEqual([]);
+  });
+
+  it('falls back to the first variant url when videoId is missing', () => {
+    const out = buildStreamsFromPlayerResponse({
+      streamingData: {
+        formats: [
+          {
+            itag: 18,
+            url: 'https://x/18',
+            mimeType: 'video/mp4',
+            bitrate: 500_000,
+            width: 640,
+            height: 360,
+          },
+        ],
+      },
+    });
+    expect(out[0].url).toBe('https://x/18');
   });
 });
 

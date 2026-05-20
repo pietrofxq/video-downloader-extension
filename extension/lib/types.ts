@@ -68,6 +68,12 @@ export interface HlsVariant {
   resolution: string | null;
   /** RFC 6381 codec list (`avc1.64...`, `mp4a.40.2`) or null. */
   codecs: string | null;
+  /**
+   * Exact byte length when the platform declares it (YouTube does via
+   * `streamingData.formats[].contentLength`). HLS variants leave this
+   * unset — the popup falls back to bandwidth × duration / 8.
+   */
+  contentLength?: number;
 }
 
 export interface HlsAlternate {
@@ -168,37 +174,41 @@ export interface AdapterFilenameInput {
 }
 
 /**
- * Stream surfaced by an adapter that read it out of page-loaded JSON
- * rather than waiting for a webRequest to fire. Used by sites whose
- * media URLs aren't observable through the normal detection layer —
- * e.g. YouTube's `ytInitialPlayerResponse.streamingData`, where the
- * catalog of available formats is in the page DOM and webRequest only
- * sees one chunk at a time of whichever quality is currently playing.
+ * Catalog of media surfaced by an adapter that read it out of
+ * page-loaded JSON rather than waiting for a webRequest to fire. Used
+ * by sites whose media URLs aren't observable through the normal
+ * detection layer — e.g. YouTube's `ytInitialPlayerResponse.streamingData`,
+ * where the full catalog of available formats is in the page DOM and
+ * webRequest only sees one chunk at a time of whichever quality the
+ * player is currently fetching.
  *
- * The SW promotes each entry into a MediaEntry, filling in the fields
- * the adapter can't know (id, capturedAt, pageUrl).
+ * One `DiscoveredStream` represents one *video* (not one quality). The
+ * available qualities go in `variants[]` so the popup ends up with one
+ * row + a quality picker, the same shape an HLS master playlist
+ * produces. The SW promotes each into a MediaEntry, filling in the
+ * fields the adapter can't know (id, capturedAt, pageUrl).
  */
 export interface DiscoveredStream {
+  /**
+   * Identity URL — the value the SW writes into MediaEntry.url. Used
+   * for dedupe. For sites with variants, an anchor (highest-quality
+   * video URL, or a synthetic key) is fine.
+   */
   url: string;
   kind: MediaKind;
   headers?: Record<string, string>;
-  /** "1920x1080" — same shape as HlsVariant.resolution. */
-  resolution?: string;
-  /** Bits per second. */
-  bandwidth?: number;
-  /** RFC 6381 codec list. */
-  codecs?: string;
-  /** Seconds. Pre-filled when the platform publishes it (YouTube does). */
+  /** Seconds. Pre-filled when the platform publishes it. */
   totalDuration?: number;
-  /**
-   * Pre-declared byte size. When set, the popup skips its
-   * bandwidth × duration estimate and shows the exact figure.
-   */
-  contentLength?: number;
-  /** True for adaptive audio-only renditions. */
-  audioOnly?: boolean;
   /** Marks the stream as DRM-gated. Same semantics as MediaEntry.drm. */
   drm?: boolean;
+  /**
+   * Per-quality formats. Shape matches HlsVariant so the popup quality
+   * picker works uniformly across adapter-supplied + manifest-parsed
+   * entries. Audio-only renditions are excluded here — the downloader
+   * pairs a chosen video variant with a default audio variant
+   * internally for the adaptive HD path.
+   */
+  variants?: HlsVariant[];
 }
 
 /**

@@ -23,7 +23,7 @@ import {
   setAdapterMeta,
   setTabUrl,
 } from '../lib/media-store.js';
-import type { DownloadState, MediaEntry, PageMeta } from '../lib/types.ts';
+import type { DiscoveredStream, DownloadState, MediaEntry, PageMeta } from '../lib/types.ts';
 
 const BADGE_COLOR = '#ff5d2e';
 
@@ -256,6 +256,23 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     }
+    case MSG.STREAMS_DISCOVERED: {
+      const tabId = sender.tab?.id;
+      const p = msg.payload ?? {};
+      if (tabId == null || tabId < 0 || !Array.isArray(p.streams)) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void handleStreamsDiscovered({
+        tabId,
+        frameId: sender.frameId ?? 0,
+        pageUrl: sender.tab?.url || '',
+        adapterId: p.adapterId,
+        streams: p.streams,
+      });
+      sendResponse({ ok: true });
+      return false;
+    }
     case MSG.START_DOWNLOAD: {
       const p = msg.payload ?? {};
       if (typeof p.mediaId !== 'string') {
@@ -458,6 +475,71 @@ async function handleDetection({
   // by the time the user opens it. ensureParsed is idempotent.
   if (stored.kind === 'hls') {
     void ensureParsed(tabId, stored);
+  }
+}
+
+interface StreamsDiscoveredInput {
+  tabId: number;
+  frameId: number;
+  pageUrl: string;
+  adapterId: string;
+  streams: DiscoveredStream[];
+}
+
+/**
+ * Promote the adapter-supplied catalog of streams into MediaEntries.
+ * Mirrors handleDetection — resolve pageUrl, pick adapter, addEntry,
+ * dedupe by URL, badge + broadcast. The crucial differences are that
+ * variants come pre-populated (no HLS parse step needed) and the
+ * `kind` is whatever the adapter declared (typically 'dash' for
+ * YouTube's mixed progressive + adaptive catalog).
+ */
+async function handleStreamsDiscovered({
+  tabId,
+  frameId,
+  pageUrl,
+  adapterId,
+  streams,
+}: StreamsDiscoveredInput): Promise<void> {
+  if (streams.length === 0) return;
+  await seedTabs();
+
+  let resolvedPageUrl = pageUrl;
+  if (!resolvedPageUrl) {
+    resolvedPageUrl = await getTabUrl(tabId);
+  }
+  if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
+
+  let anyAdded = false;
+  for (const s of streams) {
+    if (typeof s.url !== 'string' || !s.url) continue;
+    const entry: Omit<MediaEntry, 'id'> = {
+      kind: s.kind,
+      url: s.url,
+      pageUrl: resolvedPageUrl,
+      adapterId,
+      capturedAt: Date.now(),
+      frameId,
+      ...(s.headers ? { headers: s.headers } : {}),
+      ...(s.totalDuration ? { totalDuration: s.totalDuration } : {}),
+      ...(s.drm ? { drm: true } : {}),
+      // Adapter-supplied variants are authoritative — no manifest parse
+      // step needed. isMaster=true so the popup picker treats them as
+      // multi-quality the same way it treats parsed HLS masters.
+      ...(s.variants ? { variants: s.variants, isMaster: true } : {}),
+    };
+    const stored = await addEntry(tabId, entry);
+    if (stored) anyAdded = true;
+  }
+
+  if (anyAdded) {
+    log.info('streams discovered', {
+      tabId,
+      adapterId,
+      streams: streams.length,
+    });
+    await updateBadge(tabId);
+    await broadcastTabState(tabId);
   }
 }
 

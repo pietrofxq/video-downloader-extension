@@ -1,5 +1,5 @@
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
-import type { Adapter, PageMeta } from '../lib/types.ts';
+import type { Adapter, DiscoveredStream, HlsVariant, PageMeta } from '../lib/types.ts';
 
 // Match watch / shorts / embed under the canonical YouTube hosts, plus
 // the youtu.be short-link form. We deliberately don't match the home
@@ -87,6 +87,31 @@ export interface YtPlayerResponse {
       ownerChannelName?: string;
     };
   };
+  playabilityStatus?: {
+    status?: string;
+    reason?: string;
+  };
+  streamingData?: {
+    formats?: YtFormat[];
+    adaptiveFormats?: YtFormat[];
+  };
+}
+
+interface YtFormat {
+  itag?: number;
+  url?: string;
+  /** Newer YouTube serves the URL as `s` (sig) + `sp` (sigParam) inside
+   * this percent-encoded query string. v0.11 doesn't decode it yet — we
+   * skip formats that lack a direct `url`. */
+  signatureCipher?: string;
+  mimeType?: string;
+  bitrate?: number;
+  width?: number;
+  height?: number;
+  /** Stringified bytes. */
+  contentLength?: string;
+  /** Frames per second when declared. */
+  fps?: number;
 }
 
 /**
@@ -127,6 +152,99 @@ function parseYtPlayerResponse(doc: Document): YtPlayerResponse | null {
     if (parsed) return parsed;
   }
   return null;
+}
+
+// Bitrate fallback for older / minified `streamingData` payloads that
+// drop `bitrate`. Keeps the size estimator from going to zero on streams
+// that only carry width/height.
+const DEFAULT_BITRATE = 0;
+
+function mimeCodecs(mimeType: string | undefined): string | null {
+  if (!mimeType) return null;
+  const m = mimeType.match(/codecs=["']([^"']+)["']/);
+  return m ? m[1] : null;
+}
+
+function isVideoFormat(mimeType: string | undefined): boolean {
+  return !!mimeType && mimeType.startsWith('video/');
+}
+
+function formatToVariant(f: YtFormat): HlsVariant | null {
+  // Skip protected formats. signatureCipher requires the n-param /
+  // signature solver — v0.11.1+ work. Emitting these now would surface
+  // unplayable URLs in the picker.
+  if (!f.url) return null;
+  // Skip non-video — audio formats are paired internally at download
+  // time, not surfaced as user-pickable variants.
+  if (!isVideoFormat(f.mimeType)) return null;
+  const resolution = f.width && f.height ? `${f.width}x${f.height}` : null;
+  return {
+    url: f.url,
+    bandwidth: f.bitrate ?? DEFAULT_BITRATE,
+    resolution,
+    codecs: mimeCodecs(f.mimeType),
+    ...(f.contentLength ? { contentLength: Number(f.contentLength) } : {}),
+  };
+}
+
+/**
+ * Turn a parsed ytInitialPlayerResponse into the DiscoveredStream
+ * catalog the SW will promote to a MediaEntry. Returns an empty array
+ * when the payload signals DRM / unplayable status, or when no usable
+ * formats remain (all gated by signatureCipher in current YouTube
+ * builds — fixed once v0.11.1's solver lands).
+ *
+ * Exported for unit tests.
+ */
+export function buildStreamsFromPlayerResponse(
+  player: YtPlayerResponse | null,
+): DiscoveredStream[] {
+  if (!player) return [];
+
+  const status = player.playabilityStatus?.status ?? 'OK';
+  // Anything other than OK means the player couldn't initialize:
+  // - LOGIN_REQUIRED / AGE_VERIFICATION_REQUIRED / CONTENT_CHECK_REQUIRED
+  // - UNPLAYABLE (region-locked, members-only, premium-only)
+  // - ERROR (deleted / privated)
+  // None of these are downloadable through the public web stream path,
+  // so emit nothing rather than show a broken row.
+  if (status !== 'OK') return [];
+
+  const allFormats: YtFormat[] = [
+    ...(player.streamingData?.formats ?? []),
+    ...(player.streamingData?.adaptiveFormats ?? []),
+  ];
+  const variants: HlsVariant[] = [];
+  for (const f of allFormats) {
+    const v = formatToVariant(f);
+    if (v) variants.push(v);
+  }
+  if (variants.length === 0) return [];
+
+  // Sort highest-quality first so the popup default (variants[0]) is
+  // the best available — matches the HLS path.
+  variants.sort((a, b) => b.bandwidth - a.bandwidth);
+
+  const videoId = player.videoDetails?.videoId ?? '';
+  const lengthSecs = Number(player.videoDetails?.lengthSeconds ?? '0');
+
+  // The "identity URL" for the catalog. videoId is the natural key — a
+  // synthetic scheme (`youtube:VID`) lets the SW dedupe per-tab on
+  // re-discoveries without confusing the URL classifier (which only
+  // cares about real http(s) URLs and would skip this anyway).
+  const identityUrl = videoId ? `youtube:${videoId}` : variants[0].url;
+
+  // Adaptive variants are the modern norm — mark the entry kind as
+  // 'dash'. The download dispatch later inspects the chosen variant's
+  // itag to pick the progressive-vs-adaptive path.
+  return [
+    {
+      url: identityUrl,
+      kind: 'dash',
+      ...(lengthSecs > 0 ? { totalDuration: lengthSecs } : {}),
+      variants,
+    },
+  ];
 }
 
 function scrapeYouTubeMeta(doc: Document): PageMeta {
@@ -179,6 +297,10 @@ const youtubeAdapter: Adapter = {
     });
     observer.observe(head, { childList: true, subtree: true, characterData: true });
     return () => observer.disconnect();
+  },
+  discoverStreams(doc) {
+    const player = parseYtPlayerResponse(doc);
+    return buildStreamsFromPlayerResponse(player);
   },
   deriveFilename({ pageMeta }) {
     const title = pageMeta?.title || pageMeta?.ogTitle || '';
