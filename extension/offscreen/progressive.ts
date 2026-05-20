@@ -1,7 +1,7 @@
 import { log, redactUrl } from '../lib/log.js';
 import { fetchArrayBuffer, type ProxyFetch } from './downloader.js';
 import { OpfsWorkspace } from './storage.js';
-import { applyNTransform, getSolver } from './yt-sig.js';
+import { getSolver } from './yt-sig.js';
 import type { DownloadProgress, DownloadResult } from './downloader.js';
 import type { DownloadRequest } from '../lib/types.ts';
 
@@ -48,12 +48,13 @@ export async function downloadProgressive(
 
   signal?.throwIfAborted();
 
-  // YouTube n-param transform. The signed `n=...` value on a
-  // videoplayback URL must be re-signed by a function pulled from
-  // YouTube's base.js or the CDN 403s the request. If playerJsUrl
-  // is set on the request, the adapter knows about the solver and we
-  // apply it before any fetch. Non-YouTube progressive sources leave
-  // playerJsUrl unset and skip this step entirely.
+  // YouTube URL signing. The signed `n=...` value on a videoplayback
+  // URL must be re-signed by a function from base.js or the CDN 403s
+  // the request. Higher-quality URLs additionally come as
+  // `signatureCipher` and need a separate decipher. The solver
+  // handles both transparently — `decipher(plainUrl)` is a no-op
+  // when there's nothing to transform. Non-YouTube progressive
+  // sources leave playerJsUrl unset and skip this entire step.
   let fetchUrl = variantUrl;
   if (playerJsUrl) {
     try {
@@ -64,7 +65,7 @@ export async function downloadProgressive(
         frameId,
         signal,
       });
-      fetchUrl = applyNTransform(variantUrl, solver);
+      fetchUrl = solver.decipher(variantUrl);
     } catch (err) {
       log.warn('yt-sig: solver setup failed; proceeding with original URL', {
         requestId,

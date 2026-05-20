@@ -1,53 +1,75 @@
-// YouTube URL signing — the "n parameter" solver.
+// YouTube URL signing — n-param + signature decipher.
 //
-// Every `videoplayback?...` URL carries an `n=<obfuscated>` query
-// parameter. YouTube's player runs a JS function from `base.js` that
-// transforms `n` → `n'` before fetching; the CDN rejects (modern: 403,
-// historic: heavy throttling) requests where `n` hasn't been resigned.
+// Every `videoplayback?...` URL on modern YouTube carries an `n=...`
+// query parameter that must be re-signed by an obfuscated JS function
+// from `base.js`, or the CDN 403s the request. Higher-quality formats
+// additionally come as `signatureCipher=url=...&s=...&sp=...` — the
+// URL is encoded and the signature has to be deciphered through a
+// separate function from the same base.js.
 //
-// This module:
-//   1. Fetches base.js once per player URL via the content-script
-//      proxy (so cookies + origin match what YouTube expects).
-//   2. Extracts the n-transform function definition using regex
-//      patterns. These ARE the brittle bit — YouTube rotates the
-//      obfuscation periodically. The patterns here are intentionally
-//      structural (looking for `.split("...")` + `.join("...")` and
-//      the get("n") callsite) so small renames don't break us.
-//   3. Compiles the extracted source via `Function()` and caches the
-//      result keyed by the player URL. Subsequent transforms are O(1).
+// We use the AST-based extractor vendored from LuanRT/YouTube.js
+// (extension/vendor/youtubei-js/) to find the URL-preparation function
+// that handles BOTH transforms. The matcher's anchor is the
+// `.set("alr","yes")` call inside the function body — that's the
+// YouTube player-contract literal that hasn't moved across multiple
+// player rotations.
 //
-// Reference: @distube/ytdl-core's lib/sig.js (MIT) — same problem,
-// same approach. When YouTube ships a player build this code can't
-// parse, update the regex set below; check ytdl-core's recent commits
-// for the working pattern.
-//
-// CSP / sandbox: the offscreen document is a regular HTML page in the
-// extension origin. `new Function(...)` works there (CSP allows it).
-// Compiling in the SW would NOT work — service worker CSP forbids
-// eval / Function() — which is why the solver lives here.
+// Evaluation happens inside the offscreen document via `new Function()`
+// (CSP for service workers forbids eval / Function; the offscreen page
+// is regular DOM context where it works). The vendored extractor
+// wraps everything in an IIFE with fake globals (window, document,
+// self) and filters out side-effect initializers — see
+// `extension/vendor/youtubei-js/JsExtractor.ts:329-513`.
 
+import { JsAnalyzer, type ExtractionConfig } from '../vendor/youtubei-js/JsAnalyzer.js';
+import { JsExtractor } from '../vendor/youtubei-js/JsExtractor.js';
+import { nsigMatcher } from '../vendor/youtubei-js/matchers.js';
 import { fetchText, type ProxyFetch } from './downloader.js';
 import { log, redactUrl } from '../lib/log.js';
 
-export interface CompiledSolver {
-  /** Apply the n-transform to a single n value. Throws if the
-   * compiled function throws (e.g. unexpected input shape). */
-  transformN: (n: string) => string;
-  /** Extracted source, kept for diagnostics — never logged with the
-   * caller's data. */
-  source: string;
+const NSIG_EXPORT_NAME = 'nsigFunction';
+
+export interface SignatureCipherInput {
+  /** Raw value of `signatureCipher` (or `cipher`) from a YouTube
+   * format. URL-encoded `url=...&s=...&sp=...`. */
+  signatureCipher: string;
 }
 
-// Memoize the compile per player URL. YouTube rotates base.js URLs
-// when it deploys a new player (the hash in the path changes), so a
-// URL-keyed cache survives until the next rotation. Promise-valued
-// so concurrent first-callers share one fetch + compile.
+export type DecipherInput = string | SignatureCipherInput;
+
+export interface CompiledSolver {
+  /**
+   * Apply n-transform + signature-decipher to whatever URL form the
+   * caller has. Returns a fetchable absolute URL.
+   *
+   * - Pass a plain URL string → only the `n` query param is
+   *   transformed (signature pass is skipped).
+   * - Pass `{ signatureCipher }` → the encoded triple is parsed,
+   *   both transforms are applied, the deciphered signature is
+   *   written under the parameter name from `sp`, and the result
+   *   URL is returned.
+   *
+   * Errors are caught + logged; the input is returned unchanged so a
+   * subsequent fetch produces a deterministic failure mode (403 from
+   * the CDN) rather than vanishing silently.
+   */
+  decipher(input: DecipherInput): string;
+
+  /** Per-input cache so repeat n values across chunk URLs only
+   * transform once. Shared across all decipher() calls on this
+   * solver. */
+  readonly nCache: Map<string, string>;
+}
+
+// Memoize compile by base.js URL. YouTube rotates the URL on every
+// player redeploy (the hash in the path changes), so this naturally
+// invalidates when YouTube ships a new player.
 const solverCache = new Map<string, Promise<CompiledSolver>>();
 
 /**
- * Idempotently fetch + compile the n-transform for a given base.js.
- * Subsequent calls with the same URL share the cached promise. If
- * the compile fails, the entry is dropped so the next call retries.
+ * Idempotently fetch + compile the signer for a given base.js URL.
+ * Concurrent first-callers share one fetch + compile. On compile
+ * failure the cache entry is dropped so the next call retries.
  */
 export function getSolver(args: {
   playerJsUrl: string;
@@ -79,194 +101,169 @@ async function compileSolver(args: {
     url: args.playerJsUrl,
     signal: args.signal,
   });
-  const source = extractNTransformSource(baseJsText);
-  if (!source) {
-    throw new Error(
-      `yt-sig: could not locate n-transform function in ${redactUrl(args.playerJsUrl)}`,
-    );
-  }
-  const transformN = compileTransform(source);
-  log.info('yt-sig compiled', { url: redactUrl(args.playerJsUrl), len: source.length });
-  return { transformN, source };
+
+  // Parse base.js → AST → extract the URL-prep function + its
+  // transitive dependencies via the vendored analyzer.
+  const built = buildExtractedScript(baseJsText);
+  log.info('yt-sig compiled', {
+    url: redactUrl(args.playerJsUrl),
+    bytes: built.length,
+  });
+
+  const nCache = new Map<string, string>();
+
+  const decipher = (input: DecipherInput): string => {
+    try {
+      return runDecipher(built, input, nCache);
+    } catch (err) {
+      log.warn('yt-sig decipher failed; returning unchanged URL', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return typeof input === 'string' ? input : `signatureCipher=${input.signatureCipher}`;
+    }
+  };
+
+  return { decipher, nCache };
 }
 
 /**
- * Walk `base.js` looking for the n-transform function definition.
- * Strategy:
- *   1. Find the `.get("n")` callsite to identify the function NAME
- *      that's invoked on the result (the n-transform).
- *   2. Look up `var <NAME> = function(a){var b=a.split("...")...
- *      return b.join("...")};` and return the full definition.
+ * Run the vendored analyzer + extractor against base.js to produce
+ * the IIFE source that exports `exportedVars.nsigFunction`.
  *
- * Exported for fixture-based unit tests. Brittle to YouTube changes —
- * if it returns null on a new build, add a new pattern to either step
- * and back-port via tests.
+ * Exported for unit tests so they can compile a synthetic base.js
+ * fixture without going through the proxyFetch path.
  */
-export function extractNTransformSource(baseJs: string): string | null {
-  const name = findNTransformName(baseJs);
-  if (!name) return null;
-  return findNTransformDefinition(baseJs, name);
-}
-
-// Pattern variants observed across YouTube player builds. The first
-// capture group is always the function name. Patterns are tried in
-// order until one matches. `\s*` everywhere so unminified / dev builds
-// match the same as production minified output.
-const ID = `[a-zA-Z0-9$_]+`;
-const W = `\\s*`;
-const NAME_NEAR_GET_N: ReadonlyArray<RegExp> = [
-  // ...&&(b=a.get("n"))&&(b=NAME[idx](b))...    (array dispatch, common 2023+)
-  new RegExp(
-    `\\.get\\("n"\\)\\)${W}&&${W}\\(${W}${ID}${W}=${W}(${ID})${W}\\[${W}\\d+${W}\\]${W}\\(${W}${ID}${W}\\)${W}\\)`,
-  ),
-  // ...&&(b=a.get("n"))&&(b=NAME(b))...    (direct call, common form)
-  new RegExp(
-    `\\.get\\("n"\\)\\)${W}&&${W}\\(${W}${ID}${W}=${W}(${ID})${W}\\(${W}${ID}${W}\\)${W}\\)`,
-  ),
-  // (a=c.get("n"))&&(a=NAME(...))            (assign-and-call, weaker anchor)
-  new RegExp(
-    `\\(${W}${ID}${W}=${W}${ID}\\.get\\("n"\\)${W}\\)${W}&&${W}\\(${W}${ID}${W}=${W}(${ID})${W}\\(`,
-  ),
-];
-
-function findNTransformName(text: string): string | null {
-  for (const pat of NAME_NEAR_GET_N) {
-    const m = text.match(pat);
-    if (m && m[1]) return m[1];
+export function buildExtractedScript(source: string): string {
+  const extractions: ExtractionConfig[] = [{ friendlyName: NSIG_EXPORT_NAME, match: nsigMatcher }];
+  const analyzer = new JsAnalyzer(source, { extractions });
+  const extractor = new JsExtractor(analyzer);
+  const result = extractor.buildScript({
+    disallowSideEffectInitializers: true,
+  });
+  if (!result.exported.includes(NSIG_EXPORT_NAME)) {
+    throw new Error('yt-sig: AST extraction failed to locate the n/sig decipher function');
   }
-  return null;
+  return result.output;
 }
 
 /**
- * Given a function NAME, find its full `var NAME = function(arg){...};`
- * definition. Uses a balanced-brace walker (the body is large, and a
- * naive `[\s\S]+?\}` regex backtracks horribly on the megabyte-sized
- * base.js). Returns the full `function(arg){...}` source — what
- * `compileTransform` evaluates.
- */
-function findNTransformDefinition(text: string, name: string): string | null {
-  // Match `var NAME = function(arg) {` or `NAME = function(arg) {`.
-  const escName = name.replace(/[$]/g, '\\$&');
-  const headerRe = new RegExp(
-    `(?:^|[^\\w$])${escName}\\s*=\\s*function\\s*\\([a-zA-Z0-9$_]+\\)\\s*\\{`,
-    'm',
-  );
-  const m = headerRe.exec(text);
-  if (!m) return null;
-  const fnStart = m.index + m[0].length - 1; // points at the opening `{`
-  const fnSource = walkBalancedBraces(text, fnStart);
-  if (!fnSource) return null;
-  const fnStartInText = text.indexOf('function', m.index);
-  if (fnStartInText < 0) return null;
-  return text.slice(fnStartInText, fnStart + fnSource.length);
-}
-
-function walkBalancedBraces(text: string, openBraceIdx: number): string | null {
-  if (text[openBraceIdx] !== '{') return null;
-  let depth = 0;
-  let inString: '"' | "'" | '`' | null = null;
-  let inRegex = false;
-  let escape = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-  for (let i = openBraceIdx; i < text.length; i += 1) {
-    const ch = text[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (inLineComment) {
-      if (ch === '\n') inLineComment = false;
-      continue;
-    }
-    if (inBlockComment) {
-      if (ch === '*' && text[i + 1] === '/') {
-        inBlockComment = false;
-        i += 1;
-      }
-      continue;
-    }
-    if (inString) {
-      if (ch === '\\') escape = true;
-      else if (ch === inString) inString = null;
-      continue;
-    }
-    if (inRegex) {
-      if (ch === '\\') escape = true;
-      else if (ch === '/') inRegex = false;
-      else if (ch === '\n') inRegex = false; // unterminated — bail
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      inString = ch;
-      continue;
-    }
-    if (ch === '/' && text[i + 1] === '/') {
-      inLineComment = true;
-      i += 1;
-      continue;
-    }
-    if (ch === '/' && text[i + 1] === '*') {
-      inBlockComment = true;
-      i += 1;
-      continue;
-    }
-    // Regex literal detection is genuinely hard in JS (depends on
-    // preceding token). We don't try — minified base.js doesn't
-    // typically expose unterminated-looking slashes in function
-    // bodies. False matches here would manifest as undercount.
-    if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) return text.slice(openBraceIdx, i + 1);
-    }
-  }
-  return null;
-}
-
-/**
- * Compile the extracted `function(a){...}` source into a callable.
- * Wrap rather than `eval` so the function runs in its own scope and
- * we can pass arguments explicitly.
+ * Compose the IIFE source + the process wrapper, evaluate via
+ * `new Function()`, and return the deciphered URL. Mirrors the
+ * pattern in YouTube.js `src/utils/Utils.ts:266` (getNsigProcessorFn)
+ * and `src/core/Player.ts:129-225` (Player.decipher).
  *
- * Exported for tests so they can verify a known-good fixture
- * end-to-end without going through the cache.
+ *  - For a plain URL string, only the n-transform applies.
+ *  - For a signatureCipher input, the URL is reconstructed from the
+ *    encoded `url=...&s=...&sp=...` triple.
  */
-export function compileTransform(source: string): (n: string) => string {
-  // Defensive: ensure we got something that starts with `function`.
-  // A bad extractor result would otherwise be a syntax error inside
-  // the Function() constructor, which throws.
-  const trimmed = source.trim();
-  if (!/^function\s*\(/.test(trimmed)) {
-    throw new Error(`yt-sig: extracted source is not a function literal`);
+function runDecipher(
+  extractedSource: string,
+  input: DecipherInput,
+  nCache: Map<string, string>,
+): string {
+  // Pull s/sp/url out of signatureCipher; build the working URL.
+  let workingUrlStr: string;
+  let s: string | null = null;
+  let sp: string | null = null;
+  if (typeof input === 'string') {
+    workingUrlStr = input;
+  } else {
+    const params = new URLSearchParams(input.signatureCipher);
+    workingUrlStr = params.get('url') || '';
+    s = params.get('s');
+    sp = params.get('sp');
+    if (!workingUrlStr) {
+      throw new Error('signatureCipher missing url= component');
+    }
   }
-  // The function takes one argument and returns a string. The wrapper
-  // body parenthesizes the literal so it parses as an expression.
-  const fn = new Function('n', `return (${trimmed})(n);`) as (n: string) => string;
-  return fn;
+
+  const url = new URL(workingUrlStr);
+  const n = url.searchParams.get('n');
+
+  const evalArgs: { n?: string | null; sp?: string | null; s?: string | null } = {};
+  if (s) {
+    evalArgs.s = s;
+    evalArgs.sp = sp;
+  }
+  if (n) {
+    // n-cache hit — skip the eval entirely, this is the hot path on
+    // adaptive segment URLs that all share the same n.
+    const hit = nCache.get(n);
+    if (hit !== undefined) {
+      url.searchParams.set('n', hit);
+    } else {
+      evalArgs.n = n;
+    }
+  }
+
+  // Nothing to transform? Return the working URL unchanged.
+  if (evalArgs.n === undefined && evalArgs.s === undefined) {
+    return url.href;
+  }
+
+  const processorSrc = buildProcessorWrapper();
+  const fullScript = `${extractedSource}\n${processorSrc}\nreturn __vdl_process(${JSON.stringify(evalArgs)});`;
+
+  const fn = new Function(fullScript);
+  const result = fn() as { n?: string; sig?: string };
+  if (typeof result !== 'object' || result === null) {
+    throw new Error('decipher script returned non-object');
+  }
+
+  if (typeof result.sig === 'string') {
+    const targetParam = sp || 'signature';
+    url.searchParams.set(targetParam, result.sig);
+  }
+  if (typeof result.n === 'string' && evalArgs.n) {
+    if (result.n.startsWith('enhanced_except_')) {
+      log.warn('yt-sig: n-transform returned an error sentinel', {
+        n: evalArgs.n,
+        result: result.n,
+      });
+    } else {
+      nCache.set(evalArgs.n, result.n);
+    }
+    url.searchParams.set('n', result.n);
+  }
+
+  return url.href;
 }
 
 /**
- * Rewrite a videoplayback URL with the transformed `n`. Idempotent
- * on URLs with no `n` parameter (returns input unchanged). Catches
- * solver errors and returns the input — the download will then fail
- * with a 403 / throttle, which the dispatch path surfaces; we don't
- * want to silently make an obviously-broken URL invisible.
+ * Build the process wrapper called inside the eval. Pulled from
+ * YouTube.js `src/utils/Utils.ts:266`. The URL-prep function returns
+ * a URL-like object whose prototype methods are the actual decipher
+ * operations — we have to call each non-blacklisted method to apply
+ * them, then read back the transformed values via `.get(...)`.
  */
-export function applyNTransform(url: string, solver: CompiledSolver): string {
-  try {
-    const u = new URL(url);
-    const n = u.searchParams.get('n');
-    if (!n) return url;
-    const transformed = solver.transformN(n);
-    if (typeof transformed !== 'string' || transformed.length === 0) {
-      return url;
+function buildProcessorWrapper(): string {
+  return `
+function __vdl_process(args) {
+  var n = args.n || "";
+  var sp = args.sp || "";
+  var s = args.s || "";
+  var mockUrl = "https://vdl.googlevideo.com/videoplayback?expire=1234567890&n=" + encodeURIComponent(n);
+  var urlCtorFn = exportedVars && exportedVars.${NSIG_EXPORT_NAME};
+  if (!urlCtorFn) throw new Error("nsigFunction missing");
+  var urlCtor = urlCtorFn(mockUrl, sp, s);
+  var proto = Object.getPrototypeOf(urlCtor);
+  var props = Object.getOwnPropertyNames(proto);
+  var blacklist = { constructor: 1, clone: 1, set: 1, get: 1 };
+  for (var i = 0; i < props.length; i++) {
+    var p = props[i];
+    if (blacklist[p]) continue;
+    if (typeof urlCtor[p] === "function") {
+      try { urlCtor[p](); } catch (e) {}
     }
-    u.searchParams.set('n', transformed);
-    return u.href;
-  } catch {
-    return url;
   }
+  var sigResult = sp ? urlCtor.get(sp) : null;
+  var nResult = urlCtor.get("n");
+  return {
+    sig: sigResult ? decodeURIComponent(sigResult) : undefined,
+    n: nResult ? decodeURIComponent(nResult) : undefined
+  };
+}
+`;
 }
 
 /** Test helper — wipe the solver cache between cases. */
