@@ -23,7 +23,13 @@ import {
   setAdapterMeta,
   setTabUrl,
 } from '../lib/media-store.js';
-import type { DiscoveredStream, DownloadState, MediaEntry, PageMeta } from '../lib/types.ts';
+import type {
+  DiscoveredStream,
+  DownloadState,
+  MediaEntry,
+  MediaKind,
+  PageMeta,
+} from '../lib/types.ts';
 
 const BADGE_COLOR = '#ff5d2e';
 
@@ -450,6 +456,24 @@ async function handleDetection({
   if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
 
   const adapter = pickAdapter(resolvedPageUrl, url);
+
+  // Adapters with discoverStreams (YouTube) are the canonical catalog
+  // source for their pages. Passive webRequest captures of their CDN
+  // URLs typically duplicate the catalog AND pollute the list with
+  // range-fetched chunk URLs that aren't user-pickable (each chunk has
+  // a different `range=` query so the URL dedupe doesn't catch them).
+  // Skip the entry — the adapter will push the canonical streams via
+  // STREAMS_DISCOVERED instead.
+  if (typeof adapter.discoverStreams === 'function') {
+    log.debug('passive capture suppressed (adapter is canonical)', {
+      tabId,
+      adapter: adapter.id,
+      url,
+      source,
+    });
+    return;
+  }
+
   const entry: Omit<MediaEntry, 'id'> = {
     kind,
     url,
@@ -738,9 +762,20 @@ async function handleStartDownload(payload: {
   const requestId = crypto.randomUUID();
   const finalVariantUrl = variantUrl && /^https?:/.test(variantUrl) ? variantUrl : entry.url;
 
+  // Determine the dispatch kind from the picked variant, not the entry.
+  // YouTube's catalog entry is tagged 'dash' overall (adaptive is the
+  // modern norm) but variants[] mixes progressive itags (18/22/36) with
+  // adaptive ones — picking 360p must route to the progressive
+  // downloader, picking 1080p must route to the adaptive path.
+  // classifyUrl reads itag/mime/ext and returns the right kind for
+  // googlevideo URLs; HLS variants fall through to entry.kind because
+  // every HLS variant URL inherits the master's media type.
+  const variantKind = classifyUrl(finalVariantUrl);
+  const downloadKind: MediaKind = isPrimary(variantKind) ? variantKind : entry.kind;
+
   const runPayload: RunPayload = {
     requestId,
-    kind: entry.kind,
+    kind: downloadKind,
     variantUrl: finalVariantUrl,
     tabId: entryTabId,
     frameId: entry.frameId ?? 0,
