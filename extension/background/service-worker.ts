@@ -122,6 +122,14 @@ const isHttpUrl = (u: string | undefined | null): u is string =>
   typeof u === 'string' && /^https?:/.test(u);
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  // Chrome clears per-tab badge state on every tab navigation —
+  // including same-URL refreshes that don't fire the URL branch
+  // below. Repaint from current tab state once the load settles so
+  // the count survives refresh. No-op when the tab has no entries.
+  if (changeInfo.status === 'complete') {
+    void updateBadge(tabId);
+  }
+
   if (!changeInfo.url) {
     // Initial load may give us a URL via `tab.url` before changeInfo.url ever
     // fires; cache it so detections aren't blind. Same http(s) guard as
