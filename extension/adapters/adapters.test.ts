@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { pickAdapter, getAdapter, ADAPTERS } from './index.js';
 import hotmart from './hotmart.js';
+import youtube from './youtube.js';
 import defaultAdapter from './default.js';
 
 describe('pickAdapter', () => {
@@ -36,10 +37,55 @@ describe('pickAdapter', () => {
 describe('getAdapter', () => {
   it('returns the named adapter when registered', () => {
     expect(getAdapter('hotmart')).toBe(hotmart);
+    expect(getAdapter('youtube')).toBe(youtube);
     expect(getAdapter('default')).toBe(defaultAdapter);
   });
   it('returns default for unknown ids', () => {
     expect(getAdapter('unknown-site')).toBe(defaultAdapter);
+  });
+});
+
+describe('youtube.matches', () => {
+  it('picks youtube on canonical watch / shorts / embed / live paths', () => {
+    expect(pickAdapter('https://www.youtube.com/watch?v=abc', '').id).toBe('youtube');
+    expect(pickAdapter('https://www.youtube.com/shorts/abc', '').id).toBe('youtube');
+    expect(pickAdapter('https://www.youtube.com/embed/abc', '').id).toBe('youtube');
+    expect(pickAdapter('https://www.youtube.com/live/abc', '').id).toBe('youtube');
+    expect(pickAdapter('https://youtube.com/watch?v=abc', '').id).toBe('youtube');
+    expect(pickAdapter('https://m.youtube.com/watch?v=abc', '').id).toBe('youtube');
+  });
+
+  it('picks youtube on youtu.be short links', () => {
+    expect(pickAdapter('https://youtu.be/abc123', '').id).toBe('youtube');
+  });
+
+  it('falls back to default on non-video YouTube pages', () => {
+    expect(pickAdapter('https://www.youtube.com/', '').id).toBe('default');
+    expect(pickAdapter('https://www.youtube.com/feed/subscriptions', '').id).toBe('default');
+    expect(pickAdapter('https://www.youtube.com/@channelhandle', '').id).toBe('default');
+    // Bare youtu.be host with no video id is meaningless — default.
+    expect(pickAdapter('https://youtu.be/', '').id).toBe('default');
+  });
+
+  it('does not match imposter hosts', () => {
+    expect(pickAdapter('https://evilyoutube.com/watch?v=abc', '').id).toBe('default');
+    expect(pickAdapter('https://youtube.com.evil.example/watch?v=abc', '').id).toBe('default');
+    expect(pickAdapter('https://youtu.be.evil.example/abc', '').id).toBe('default');
+  });
+});
+
+describe('youtube.deriveFilename', () => {
+  it('uses ogTitle / title and sanitizes', () => {
+    expect(
+      youtube.deriveFilename({
+        url: '',
+        pageMeta: { title: 'Some / Video : Title?' },
+      }),
+    ).not.toMatch(/[/:?]/);
+  });
+
+  it('falls back to the stub default when meta is empty', () => {
+    expect(youtube.deriveFilename({ url: '', pageMeta: {} })).toBe('youtube-video');
   });
 });
 
