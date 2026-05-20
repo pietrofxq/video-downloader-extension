@@ -50,18 +50,183 @@ export function remuxTsToMp4(
   onProgress?: (p: RemuxProgress) => void,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
-  const source: RemuxSegmentSource = Array.isArray(segmentsOrSource)
-    ? {
-        count: segmentsOrSource.length,
-        getSegment: (i) => Promise.resolve(segmentsOrSource[i]),
-      }
-    : segmentsOrSource;
+  const source = normalizeSource(segmentsOrSource);
   if (source.count === 0) {
     return Promise.reject(new RemuxError('remuxTsToMp4: expected at least one segment'));
   }
   if (signal?.aborted) {
     return Promise.reject(signal.reason ?? new DOMException('aborted', 'AbortError'));
   }
+  const moofs: Uint8Array[] = [];
+  const mdats: Uint8Array[] = [];
+  return pumpTransmuxer(
+    source,
+    (moof, mdat) => {
+      moofs.push(moof);
+      mdats.push(mdat);
+    },
+    onProgress,
+    signal,
+  ).then((initSegment) => {
+    if (moofs.length === 0) {
+      throw new RemuxError('transmuxer produced no media data');
+    }
+    return assembleAndPatchInMemory(initSegment, moofs, mdats);
+  });
+}
+
+/**
+ * Streaming counterpart to `remuxTsToMp4`. Writes the assembled MP4
+ * directly to an OPFS file as fragments emit from mux.js, keeping only
+ * the (small) moof + init headers in JS heap. After all fragments are
+ * written, applies the moof tfdt / moov duration / cto-promotion patches
+ * via positioned writes back into the OPFS file.
+ *
+ * The full MP4 is never materialized in memory. Memory footprint while
+ * streaming is bounded by `init segment + sum(moof bytes)` — on the
+ * order of hundreds of kilobytes even for hour-long videos.
+ *
+ * @returns total bytes written to OPFS.
+ */
+export async function remuxTsToMp4ToOpfs(
+  source: RemuxSegmentSource,
+  outputHandle: FileSystemFileHandle,
+  onProgress?: (p: RemuxProgress) => void,
+  signal?: AbortSignal,
+): Promise<{ bytes: number }> {
+  if (source.count === 0) {
+    throw new RemuxError('remuxTsToMp4ToOpfs: expected at least one segment');
+  }
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException('aborted', 'AbortError');
+  }
+
+  // Phase 1 — sequential stream. Open a writable, append init + each
+  // emitted (moof + mdat) pair as they arrive. Track moof bytes + their
+  // file offsets so we can patch them in phase 2 without reading mdat
+  // back from OPFS.
+  const writable = await outputHandle.createWritable({ keepExistingData: false });
+  let cursor = 0;
+  const moofs: Array<{ offset: number; bytes: Uint8Array }> = [];
+  let initBytes: Uint8Array | null = null;
+  try {
+    initBytes = await pumpTransmuxer(
+      source,
+      async (moof, mdat) => {
+        const moofOffset = cursor;
+        await writable.write(moof as Uint8Array<ArrayBuffer>);
+        await writable.write(mdat as Uint8Array<ArrayBuffer>);
+        cursor += moof.byteLength + mdat.byteLength;
+        // Snapshot moof bytes — the buffer we just wrote may be reused
+        // by mux.js for subsequent fragments. We patch this copy and
+        // write it back in phase 2.
+        moofs.push({ offset: moofOffset, bytes: new Uint8Array(moof) });
+      },
+      onProgress,
+      signal,
+      // Init segment goes ahead of the first fragment.
+      async (init) => {
+        await writable.write(init as Uint8Array<ArrayBuffer>);
+        cursor += init.byteLength;
+      },
+    );
+  } catch (err) {
+    // Drop the partially-written file before the workspace cleanup runs.
+    await writable.abort().catch(() => {});
+    throw err;
+  }
+  await writable.close();
+
+  if (moofs.length === 0) {
+    throw new RemuxError('transmuxer produced no media data');
+  }
+
+  // Phase 2 — patch in memory, write back.
+  //
+  // The existing patch functions walk a single buffer looking for moov
+  // (in init) and moofs (in file order). Concatenating init + all moofs
+  // into a small in-memory buffer preserves the file order the patches
+  // need while leaving mdat untouched on OPFS. After patching we slice
+  // the patched bytes out and positioned-write them back at their
+  // original offsets.
+  const initCopy = new Uint8Array(initBytes);
+  const totalPatchableBytes =
+    initCopy.byteLength + moofs.reduce((sum, m) => sum + m.bytes.byteLength, 0);
+  const patchable = new Uint8Array(totalPatchableBytes);
+  patchable.set(initCopy, 0);
+  let pOffset = initCopy.byteLength;
+  const moofOffsetsInPatchable: number[] = [];
+  for (const m of moofs) {
+    moofOffsetsInPatchable.push(pOffset);
+    patchable.set(m.bytes, pOffset);
+    pOffset += m.bytes.byteLength;
+  }
+
+  try {
+    const trackTimescales = collectTrackTimescales(patchable);
+    const trackTotals = patchMoofTfdtsFromContent(patchable, trackTimescales);
+    patchHeaderDurations(patchable, trackTotals, trackTimescales);
+    promoteSignedCtoTruns(patchable);
+  } catch {
+    // Best-effort patching — even on failure we still have a playable
+    // (if mis-timed) MP4 already on OPFS from phase 1.
+  }
+
+  // Write patched init back at offset 0; write each patched moof back
+  // at its original OPFS offset.
+  const writable2 = await outputHandle.createWritable({ keepExistingData: true });
+  try {
+    await writable2.write({
+      type: 'write',
+      position: 0,
+      data: patchable.subarray(0, initCopy.byteLength) as Uint8Array<ArrayBuffer>,
+    });
+    for (let i = 0; i < moofs.length; i += 1) {
+      const moofSize = moofs[i].bytes.byteLength;
+      const start = moofOffsetsInPatchable[i];
+      await writable2.write({
+        type: 'write',
+        position: moofs[i].offset,
+        data: patchable.subarray(start, start + moofSize) as Uint8Array<ArrayBuffer>,
+      });
+    }
+  } finally {
+    await writable2.close();
+  }
+
+  return { bytes: cursor };
+}
+
+function normalizeSource(
+  segmentsOrSource: RemuxSegment[] | RemuxSegmentSource,
+): RemuxSegmentSource {
+  if (Array.isArray(segmentsOrSource)) {
+    return {
+      count: segmentsOrSource.length,
+      getSegment: (i) => Promise.resolve(segmentsOrSource[i]),
+    };
+  }
+  return segmentsOrSource;
+}
+
+/**
+ * Drive mux.js segment-by-segment. For each emitted (moof, mdat) pair,
+ * the sink is invoked (synchronously or async). The init segment is
+ * captured once and either forwarded via `onInit` (so a streaming sink
+ * can write it ahead of the first fragment) or returned at the end (for
+ * the in-memory caller, which prepends it during final assembly).
+ *
+ * Errors during normalization or the sink callback reject the returned
+ * promise via the shared `aborted` flag so an in-flight loop unwinds
+ * cleanly.
+ */
+function pumpTransmuxer(
+  source: RemuxSegmentSource,
+  onFragment: (moof: Uint8Array, mdat: Uint8Array) => void | Promise<void>,
+  onProgress?: (p: RemuxProgress) => void,
+  signal?: AbortSignal,
+  onInit?: (initBytes: Uint8Array) => void | Promise<void>,
+): Promise<Uint8Array> {
   return new Promise<Uint8Array>((resolve, reject) => {
     let transmuxer: Transmuxer;
     try {
@@ -72,8 +237,8 @@ export function remuxTsToMp4(
     }
 
     let initSegment: Uint8Array | null = null;
-    const chunks: Uint8Array[] = [];
-    let currentFragment: Uint8Array[] | null = null;
+    let initForwarded = false;
+    let pendingPairs: Array<{ moof: Uint8Array; mdat: Uint8Array }> = [];
     let pendingDone: (() => void) | null = null;
     let aborted = false;
     let nextFragmentSequence = 1;
@@ -86,8 +251,7 @@ export function remuxTsToMp4(
         if (segment.data) {
           const normalized = normalizeMuxjsFragment(segment.data, nextFragmentSequence);
           nextFragmentSequence = normalized.nextSequence;
-          if (!currentFragment) currentFragment = [];
-          for (const c of normalized.chunks) currentFragment.push(c);
+          pendingPairs.push({ moof: normalized.moof, mdat: normalized.mdat });
         }
       } catch (err) {
         aborted = true;
@@ -96,13 +260,34 @@ export function remuxTsToMp4(
     });
 
     transmuxer.on('done', () => {
-      if (currentFragment) {
-        for (const c of currentFragment) chunks.push(c);
-        currentFragment = null;
-      }
+      const pairs = pendingPairs;
+      pendingPairs = [];
       const resolver = pendingDone;
       pendingDone = null;
-      resolver?.();
+      // The sink may be async (OPFS writes). Drain pairs in order
+      // before unblocking the next per-segment flush, so writes stay
+      // serialized and offset tracking remains correct.
+      (async () => {
+        // Forward init the first time it appears, before any fragment.
+        if (initSegment && !initForwarded && onInit) {
+          initForwarded = true;
+          await onInit(initSegment);
+        } else if (initSegment && !initForwarded) {
+          initForwarded = true;
+        }
+        for (const p of pairs) {
+          if (aborted) return;
+          await onFragment(p.moof, p.mdat);
+        }
+      })().then(
+        () => resolver?.(),
+        (err) => {
+          if (aborted) return;
+          aborted = true;
+          reject(new RemuxError(`fragment sink failed: ${errMsg(err)}`));
+          resolver?.();
+        },
+      );
     });
 
     function flushSegment(): Promise<void> {
@@ -133,6 +318,7 @@ export function remuxTsToMp4(
           transmuxer.setBaseMediaDecodeTime(cumulative90k);
           transmuxer.push(seg.bytes);
           await flushSegment();
+          if (aborted) return;
           const segSecs = seg.duration > 0 ? seg.duration : 6;
           cumulative90k += Math.round(segSecs * HLS_TIMESCALE);
           onProgress?.({ done: i + 1, totalSegs: source.count });
@@ -148,56 +334,62 @@ export function remuxTsToMp4(
         reject(new RemuxError('transmuxer produced no init segment — invalid MPEG-TS input?'));
         return;
       }
-      if (chunks.length === 0) {
-        reject(new RemuxError('transmuxer produced no media data'));
-        return;
-      }
-      // Local non-null re-binding — control-flow narrowing on `initSegment`
-      // is lost across the closure boundary in the for-loops below.
-      const initBytes: Uint8Array = initSegment;
-
-      // Concatenate init + all media chunks into a single MP4 buffer.
-      let total = initBytes.byteLength;
-      for (const c of chunks) total += c.byteLength;
-      const out = new Uint8Array(total);
-      out.set(initBytes, 0);
-      let offset = initBytes.byteLength;
-      for (const c of chunks) {
-        out.set(c, offset);
-        offset += c.byteLength;
-      }
-
-      // Patch the MP4 in place:
-      //  1. Walk every moof in file order, sum per-track sample durations
-      //     to derive cumulative tfdt values, and rewrite each moof's tfdt.
-      //     mux.js always writes tfdt=0 (it expects MSE to layer the
-      //     timeline). Without this, VLC plays every fragment at t=0.
-      //  2. Use the per-track cumulative totals to patch mvhd / tkhd /
-      //     mdhd duration fields (mux.js leaves them at the 0xFFFFFFFF
-      //     sentinel, which VLC reports as ~13 hours).
-      //
-      // Using sample-duration sums (not EXTINF) closes the gaps that
-      // appear when mux.js's emitted content is slightly shorter than the
-      // declared HLS segment duration — those gaps would surface as blank
-      // playback at the start of the file.
-      try {
-        const trackTimescales = collectTrackTimescales(out);
-        const trackTotals = patchMoofTfdtsFromContent(out, trackTimescales);
-        patchHeaderDurations(out, trackTotals, trackTimescales);
-        // mux.js emits B-frame composition offsets as negative values but
-        // leaves the trun version at 0 (unsigned). VLC reads those bits as
-        // ~4.29e9 — a 13-hour PTS offset — and shows blank until it gives
-        // up and resyncs. Promote any trun carrying a negative-looking cto
-        // to version 1 (signed) so the offsets read correctly.
-        promoteSignedCtoTruns(out);
-      } catch {
-        // Patching is best-effort. The MP4 plays either way; if a patch
-        // step fails we still hand back what mux.js produced.
-      }
-
-      resolve(out);
+      resolve(initSegment);
     })();
   });
+}
+
+/**
+ * In-memory assembly + patching used by `remuxTsToMp4`. Allocates one
+ * Uint8Array sized to the whole MP4, concatenates init + each fragment,
+ * runs the patches in place, returns the result.
+ */
+function assembleAndPatchInMemory(
+  initBytes: Uint8Array,
+  moofs: Uint8Array[],
+  mdats: Uint8Array[],
+): Uint8Array {
+  let total = initBytes.byteLength;
+  for (let i = 0; i < moofs.length; i += 1) {
+    total += moofs[i].byteLength + mdats[i].byteLength;
+  }
+  const out = new Uint8Array(total);
+  out.set(initBytes, 0);
+  let offset = initBytes.byteLength;
+  for (let i = 0; i < moofs.length; i += 1) {
+    out.set(moofs[i], offset);
+    offset += moofs[i].byteLength;
+    out.set(mdats[i], offset);
+    offset += mdats[i].byteLength;
+  }
+  // Patch the MP4 in place:
+  //  1. Walk every moof in file order, sum per-track sample durations
+  //     to derive cumulative tfdt values, and rewrite each moof's tfdt.
+  //     mux.js always writes tfdt=0 (it expects MSE to layer the
+  //     timeline). Without this, VLC plays every fragment at t=0.
+  //  2. Use the per-track cumulative totals to patch mvhd / tkhd /
+  //     mdhd duration fields (mux.js leaves them at the 0xFFFFFFFF
+  //     sentinel, which VLC reports as ~13 hours).
+  //
+  // Using sample-duration sums (not EXTINF) closes the gaps that appear
+  // when mux.js's emitted content is slightly shorter than the declared
+  // HLS segment duration — those gaps would surface as blank playback at
+  // the start of the file.
+  try {
+    const trackTimescales = collectTrackTimescales(out);
+    const trackTotals = patchMoofTfdtsFromContent(out, trackTimescales);
+    patchHeaderDurations(out, trackTotals, trackTimescales);
+    // mux.js emits B-frame composition offsets as negative values but
+    // leaves the trun version at 0 (unsigned). VLC reads those bits as
+    // ~4.29e9 — a 13-hour PTS offset — and shows blank until it gives
+    // up and resyncs. Promote any trun carrying a negative-looking cto
+    // to version 1 (signed) so the offsets read correctly.
+    promoteSignedCtoTruns(out);
+  } catch {
+    // Patching is best-effort. The MP4 plays either way; if a patch
+    // step fails we still hand back what mux.js produced.
+  }
+  return out;
 }
 
 // ---------- mux.js output normalization ----------
@@ -227,10 +419,13 @@ interface MoofMdatPair {
 function normalizeMuxjsFragment(
   data: Uint8Array,
   sequenceNumber: number,
-): { chunks: Uint8Array[]; nextSequence: number } {
+): { moof: Uint8Array; mdat: Uint8Array; nextSequence: number } {
   const pairs = readMoofMdatPairs(data);
   if (!pairs || pairs.length === 0) {
-    return { chunks: [data], nextSequence: sequenceNumber };
+    // mux.js's data event should always be one or more moof+mdat pairs.
+    // If we get something else, the downstream patching code wouldn't
+    // produce a playable file — better to fail loud than ship garbage.
+    throw new RemuxError('mux.js emitted unexpected fragment shape (no moof+mdat pairs found)');
   }
 
   const trafs: Uint8Array[] = [];
@@ -238,8 +433,8 @@ function normalizeMuxjsFragment(
   for (const pair of pairs) {
     const pairTrafs = extractTrafs(data, pair.moofStart + 8, pair.moofEnd);
     if (pairTrafs.length !== 1) {
-      // Already combined, or not a mux.js shape we know how to rewrite.
-      return { chunks: [data], nextSequence: sequenceNumber };
+      // Already-combined trafs / unknown shape — see comment above.
+      throw new RemuxError('mux.js emitted unexpected fragment shape (traf count mismatch)');
     }
     trafs.push(pairTrafs[0]);
     payloads.push(data.subarray(pair.mdatStart + 8, pair.mdatEnd));
@@ -255,7 +450,7 @@ function normalizeMuxjsFragment(
 
   const moof = makeBox('moof', mfhd, ...trafs);
   const mdat = makeBox('mdat', ...payloads);
-  return { chunks: [concatUint8([moof, mdat])], nextSequence: sequenceNumber + 1 };
+  return { moof, mdat, nextSequence: sequenceNumber + 1 };
 }
 
 function readMoofMdatPairs(buf: Uint8Array): MoofMdatPair[] | null {
@@ -336,16 +531,6 @@ function makeBox(type: string, ...payloads: Uint8Array[]): Uint8Array {
   for (const payload of payloads) {
     out.set(payload, offset);
     offset += payload.byteLength;
-  }
-  return out;
-}
-
-function concatUint8(chunks: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
   }
   return out;
 }

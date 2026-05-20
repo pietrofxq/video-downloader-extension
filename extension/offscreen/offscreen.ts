@@ -26,6 +26,12 @@ void OpfsWorkspace.cleanupAllStale().catch((err) =>
 // throwIfAborted check.
 const abortControllers = new Map<string, AbortController>();
 
+// Per-blob-URL cleanup hooks. The downloader's output File lives in OPFS,
+// so the workspace must stay alive until the SW signals REVOKE_BLOB
+// (chrome.downloads has finished reading from the Blob URL). Keyed by
+// the blob URL we hand to the SW.
+const blobCleanups = new Map<string, () => Promise<void>>();
+
 chrome.runtime.onMessage.addListener(
   (rawMsg: unknown, _sender, sendResponse: (response: unknown) => void) => {
     const msg = parseExtensionMessage(rawMsg);
@@ -38,6 +44,11 @@ chrome.runtime.onMessage.addListener(
           URL.revokeObjectURL(url);
         } catch {
           // ignore
+        }
+        const cleanup = blobCleanups.get(url);
+        if (cleanup) {
+          blobCleanups.delete(url);
+          cleanup().catch((err) => log.warn('[offscreen] workspace cleanup failed', err));
         }
       }
       sendResponse({ ok: true });
@@ -101,14 +112,19 @@ async function handleDownload(req: DownloadRequest): Promise<DownloadOutcome> {
   abortControllers.set(req.requestId, ctrl);
 
   try {
-    const outcome = await downloadHlsAsTs({ proxyFetch, onProgress, signal: ctrl.signal }, req);
+    const result = await downloadHlsAsTs({ proxyFetch, onProgress, signal: ctrl.signal }, req);
+    // Register the workspace cleanup against the blob URL. REVOKE_BLOB
+    // arrives once chrome.downloads has finished reading the file (or
+    // immediately, if the SW suppressed the save because the user
+    // canceled past the abort window).
+    blobCleanups.set(result.outcome.blobUrl, result.cleanup);
     await chrome.runtime
       .sendMessage({
         type: MSG.DOWNLOAD_DONE,
-        payload: outcome,
+        payload: result.outcome,
       })
       .catch(() => {});
-    return outcome;
+    return result.outcome;
   } catch (err) {
     // AbortError → user-initiated cancel. We still emit DOWNLOAD_ERROR so
     // the SW gets to see SOMETHING terminal land for this requestId, but

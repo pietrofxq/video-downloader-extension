@@ -9,7 +9,7 @@ import {
   UnsupportedFormatError,
 } from '../lib/errors.js';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
-import { remuxTsToMp4, type RemuxSegmentSource } from './remux.js';
+import { remuxTsToMp4ToOpfs, type RemuxSegmentSource } from './remux.js';
 import { OpfsWorkspace } from './storage.js';
 import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
 
@@ -104,6 +104,19 @@ export interface ParsedMediaPlaylist {
   segments: ParsedSegment[];
 }
 
+/**
+ * Resolves to the download outcome plus a `cleanup` callback that
+ * disposes the OPFS workspace backing the output file. The caller is
+ * responsible for invoking `cleanup` once the Blob URL has been read
+ * (i.e. when REVOKE_BLOB lands) — the file lives in OPFS, so the
+ * workspace cannot be disposed at function-return time the way it was
+ * when the output Blob was held in JS heap.
+ */
+export interface DownloadResult {
+  outcome: DownloadOutcome;
+  cleanup: () => Promise<void>;
+}
+
 export async function downloadHlsAsTs(
   io: {
     proxyFetch: ProxyFetch;
@@ -112,7 +125,7 @@ export async function downloadHlsAsTs(
     signal?: AbortSignal;
   },
   req: DownloadRequest,
-): Promise<DownloadOutcome> {
+): Promise<DownloadResult> {
   const { proxyFetch, onProgress, signal } = io;
   const { requestId, variantUrl, tabId, frameId, headers, filename } = req;
 
@@ -191,6 +204,7 @@ export async function downloadHlsAsTs(
   //    A 2GB lesson that used to peak at ~2GB of accumulated TS now
   //    peaks at ~SEGMENT_CONCURRENCY × max-segment-size (~16-32 MB).
   const workspace = await OpfsWorkspace.open(requestId);
+  let succeeded = false;
   try {
     let fetched = 0;
     let decrypted = 0;
@@ -254,38 +268,50 @@ export async function downloadHlsAsTs(
         return { bytes, duration: segments[index].duration };
       },
     };
-    const mp4Bytes = await remuxTsToMp4(
+    // 4b. Stream the remux output straight to an OPFS file. The whole
+    //     MP4 is never materialized in JS heap — only the small init
+    //     segment + per-moof headers stay in memory long enough to be
+    //     patched + written back. The downloader returns a File-backed
+    //     Blob URL; chrome.downloads.download reads from OPFS directly.
+    const outputHandle = await workspace.createOutputFile(OUTPUT_FILE_NAME);
+    const { bytes: outputBytes } = await remuxTsToMp4ToOpfs(
       segmentSource,
+      outputHandle,
       ({ done, totalSegs }) => {
         remuxedCount = done;
         emit('remux', done, totalSegs);
       },
       signal,
     );
-    // NOTE: the mux.js output is still buffered in JS heap here — the
-    // chunk collector inside remux.ts + the final concat into a single
-    // Uint8Array peaks around the full MP4 size. Decrypted segments
-    // are bounded by SEGMENT_CONCURRENCY × segment_size via OPFS, but
-    // the remux phase is the next memory cliff. See ROADMAP v0.10 note
-    // on "intermediate remux buffers (deferred)".
+    signal?.throwIfAborted();
 
     // 5. Make a Blob URL for the SW to hand to chrome.downloads.download.
-    const blob = new Blob([mp4Bytes as Uint8Array<ArrayBuffer>], { type: 'video/mp4' });
-    const blobUrl = URL.createObjectURL(blob);
+    //    The File is backed by OPFS; the Blob URL streams from disk.
+    const outputFile = await workspace.getOutputFile(OUTPUT_FILE_NAME);
+    const blobUrl = URL.createObjectURL(outputFile);
+    succeeded = true;
     return {
-      requestId,
-      blobUrl,
-      filename: `${filename}.mp4`,
-      bytes: mp4Bytes.length,
-      segments: total,
+      outcome: {
+        requestId,
+        blobUrl,
+        filename: `${filename}.mp4`,
+        bytes: outputBytes,
+        segments: total,
+      },
+      // Workspace stays alive until REVOKE_BLOB arrives so chrome.downloads
+      // can read the OPFS-backed Blob URL without races.
+      cleanup: () => workspace.dispose(),
     };
   } finally {
-    // Dispose unconditionally — on success, error, AND abort. The Blob
-    // URL the SW holds is the in-memory snapshot; cleaning up the OPFS
-    // directory afterward is safe.
-    await workspace.dispose();
+    // On error / abort we still own the workspace cleanup. Success path
+    // hands ownership to the caller via `cleanup` above.
+    if (!succeeded) {
+      await workspace.dispose();
+    }
   }
 }
+
+const OUTPUT_FILE_NAME = 'out.mp4';
 
 // ---------- helpers ----------
 

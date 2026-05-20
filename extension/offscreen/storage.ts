@@ -74,6 +74,49 @@ export class OpfsWorkspace {
   }
 
   /**
+   * Create (truncating any prior file) an output file in this workspace.
+   * Returns the handle. Caller uses `openOutputWritable` to stream bytes
+   * in, then `getOutputFile` to read it back as a Blob-compatible File.
+   */
+  async createOutputFile(name: string): Promise<FileSystemFileHandle> {
+    this.assertOpen();
+    // Remove first so we always start from zero bytes. `create: true`
+    // alone doesn't truncate an existing file.
+    try {
+      await this.dir.removeEntry(name);
+    } catch {
+      // not present — fine.
+    }
+    return this.dir.getFileHandle(name, { create: true });
+  }
+
+  /**
+   * Open a writable stream for an output file. `keepExisting` controls
+   * whether prior contents survive (needed for the patch-back pass, which
+   * does positioned writes into specific moof byte ranges).
+   */
+  async openOutputWritable(
+    name: string,
+    opts: { keepExisting?: boolean } = {},
+  ): Promise<FileSystemWritableFileStream> {
+    this.assertOpen();
+    const fh = await this.dir.getFileHandle(name);
+    return fh.createWritable({ keepExistingData: opts.keepExisting ?? false });
+  }
+
+  /**
+   * Read a previously-written output file back as a `File`. Browsers
+   * back `URL.createObjectURL(file)` with the file source directly, so
+   * chrome.downloads.download can stream from OPFS without copying the
+   * full payload into JS heap.
+   */
+  async getOutputFile(name: string): Promise<File> {
+    this.assertOpen();
+    const fh = await this.dir.getFileHandle(name);
+    return fh.getFile();
+  }
+
+  /**
    * Best-effort delete the workspace directory + all files. Called on
    * download completion, error, and cancel. Idempotent.
    */
