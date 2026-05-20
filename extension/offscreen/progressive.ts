@@ -1,6 +1,7 @@
 import { log, redactUrl } from '../lib/log.js';
 import { fetchArrayBuffer, type ProxyFetch } from './downloader.js';
 import { OpfsWorkspace } from './storage.js';
+import { applyNTransform, getSolver } from './yt-sig.js';
 import type { DownloadProgress, DownloadResult } from './downloader.js';
 import type { DownloadRequest } from '../lib/types.ts';
 
@@ -43,9 +44,37 @@ export async function downloadProgressive(
   req: DownloadRequest,
 ): Promise<DownloadResult> {
   const { proxyFetch, onProgress, signal } = io;
-  const { requestId, variantUrl, tabId, frameId, headers, filename } = req;
+  const { requestId, variantUrl, tabId, frameId, headers, filename, playerJsUrl } = req;
 
   signal?.throwIfAborted();
+
+  // YouTube n-param transform. The signed `n=...` value on a
+  // videoplayback URL must be re-signed by a function pulled from
+  // YouTube's base.js or the CDN 403s the request. If playerJsUrl
+  // is set on the request, the adapter knows about the solver and we
+  // apply it before any fetch. Non-YouTube progressive sources leave
+  // playerJsUrl unset and skip this step entirely.
+  let fetchUrl = variantUrl;
+  if (playerJsUrl) {
+    try {
+      const solver = await getSolver({
+        playerJsUrl,
+        proxyFetch,
+        tabId,
+        frameId,
+        signal,
+      });
+      fetchUrl = applyNTransform(variantUrl, solver);
+    } catch (err) {
+      log.warn('yt-sig: solver setup failed; proceeding with original URL', {
+        requestId,
+        playerJsUrl: redactUrl(playerJsUrl),
+        err: err instanceof Error ? err.message : String(err),
+      });
+      // Fall through with the un-transformed URL — better to fail
+      // with a clean 403 than to silently abort the download.
+    }
+  }
 
   const workspace = await OpfsWorkspace.open(requestId);
   let succeeded = false;
@@ -75,7 +104,7 @@ export async function downloadProgressive(
       bytes = await fetchArrayBuffer(proxyFetch, {
         tabId,
         frameId,
-        url: variantUrl,
+        url: fetchUrl,
         headers: mergedHeaders,
         signal,
       });
@@ -84,7 +113,7 @@ export async function downloadProgressive(
       // and compare against the SW's error. Redacts signing params.
       log.warn('progressive fetch failed', {
         requestId,
-        url: redactUrl(variantUrl),
+        url: redactUrl(fetchUrl),
         err: err instanceof Error ? err.message : String(err),
       });
       throw err;
