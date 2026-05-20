@@ -1,3 +1,4 @@
+import { log } from '../lib/log.js';
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import type { Adapter, DiscoveredStream, HlsVariant, PageMeta } from '../lib/types.ts';
 
@@ -165,16 +166,16 @@ function mimeCodecs(mimeType: string | undefined): string | null {
   return m ? m[1] : null;
 }
 
-// v0.11 ships H.264 + AAC only. VP9 and AV1 muxing into MP4 (or WebM
-// muxing for opus audio) is more box-format work than the milestone can
-// absorb; the existing v0.7 mux.js pipeline is AVC/AAC-shaped. Lifting
-// these filters is a clean follow-up — until then we cap YouTube at the
-// best AVC variant the page exposes (typically 1080p).
-function isH264VideoMp4(mimeType: string | undefined): boolean {
-  if (!mimeType) return false;
-  return mimeType.startsWith('video/mp4') && /\bavc1\./i.test(mimeType);
+function isVideoFormat(mimeType: string | undefined): boolean {
+  return !!mimeType && mimeType.startsWith('video/');
 }
 
+// Audio pairing is still limited to AAC/mp4a — that's what the future
+// fMP4 two-track combine muxer (v0.11.1) will be able to handle without
+// re-encoding. Opus-in-MP4 / Opus-in-WebM muxing is deferred. Adaptive
+// VP9 / AV1 variants surface in the picker but get no paired audio, so
+// the adaptive download attempt fails fast (UnsupportedFormatError)
+// instead of silently producing a video-only file.
 function isAacAudioMp4(mimeType: string | undefined): boolean {
   if (!mimeType) return false;
   return mimeType.startsWith('audio/mp4') && /\bmp4a\./i.test(mimeType);
@@ -185,7 +186,13 @@ function variantFromFormat(f: YtFormat, pairedAudio?: YtFormat): HlsVariant | nu
   // signature solver — v0.11.1+ work. Emitting these now would surface
   // unplayable URLs in the picker.
   if (!f.url) return null;
-  if (!isH264VideoMp4(f.mimeType)) return null;
+  // Accept any video mimeType (mp4 / webm / etc). Codec filtering used to
+  // happen here for muxer compatibility, but modern YouTube serves
+  // adaptive video mostly as VP9 / AV1 — pre-filtering on AVC made the
+  // picker empty on the majority of current uploads. Codec compatibility
+  // is enforced where it matters (the dispatch + future muxer) so users
+  // see the full inventory.
+  if (!isVideoFormat(f.mimeType)) return null;
   const resolution = f.width && f.height ? `${f.width}x${f.height}` : null;
   const v: HlsVariant = {
     url: f.url,
@@ -243,6 +250,23 @@ export function buildStreamsFromPlayerResponse(
   const progressiveFormats = player.streamingData?.formats ?? [];
   const adaptiveFormats = player.streamingData?.adaptiveFormats ?? [];
   const defaultAudio = pickDefaultAudioFormat(adaptiveFormats);
+
+  // One-line diagnostic so the SW console reveals what YouTube served
+  // for this video — formats with signatureCipher only (no direct
+  // url) silently drop, and without this it's hard to tell whether
+  // an empty result means "no usable URLs" or "filter rejected
+  // everything". The log fires only when streamingData is present.
+  const summarize = (f: YtFormat): string =>
+    [
+      `itag=${f.itag ?? '?'}`,
+      f.url ? 'url' : f.signatureCipher ? 'sig' : 'no-url',
+      f.mimeType?.split(';')[0] ?? 'no-mime',
+    ].join(' ');
+  log.info('youtube discoverStreams', {
+    progressive: progressiveFormats.map(summarize),
+    adaptive: adaptiveFormats.map(summarize),
+    defaultAudio: defaultAudio ? summarize(defaultAudio) : null,
+  });
 
   const variants: HlsVariant[] = [];
   // Progressive itags (18, 22, 36) carry audio + video in one file —

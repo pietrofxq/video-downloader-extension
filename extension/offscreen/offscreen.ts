@@ -169,7 +169,10 @@ function dispatchDownload(
     case 'hls':
       return downloadHlsAsTs(io, req);
     case 'progressive':
-      return downloadProgressive({ onProgress: io.onProgress, signal: io.signal }, req);
+      return downloadProgressive(
+        { proxyFetch: io.proxyFetch, onProgress: io.onProgress, signal: io.signal },
+        req,
+      );
     case 'dash':
       // Adaptive HD path (separate video + audio fMP4 muxed into one
       // MP4) ships in a follow-up commit; until then, fail loud rather

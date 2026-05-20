@@ -328,7 +328,12 @@ describe('buildStreamsFromPlayerResponse', () => {
     expect(out[0].variants?.[0].pairedAudioUrl).toBeUndefined();
   });
 
-  it('skips VP9 / AV1 video formats (v0.11 ships H.264-only)', () => {
+  it('admits VP9 / AV1 video variants (codec compatibility is enforced at dispatch)', () => {
+    // discoverStreams no longer filters by video codec — the picker
+    // surfaces the full inventory, and the dispatch + future muxer
+    // throw a typed UnsupportedFormatError when the user picks a
+    // variant the pipeline can't process. Hiding VP9/AV1 made the
+    // picker empty on the majority of current YouTube uploads.
     const out = buildStreamsFromPlayerResponse({
       videoDetails: { videoId: 'abc' },
       streamingData: {
@@ -352,7 +357,8 @@ describe('buildStreamsFromPlayerResponse', () => {
         ],
       },
     });
-    expect(out).toEqual([]);
+    expect(out).toHaveLength(1);
+    expect(out[0].variants).toHaveLength(2);
   });
 });
 
