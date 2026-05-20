@@ -178,9 +178,19 @@ export async function downloadHlsAsTs(
         return { bytes, duration: segments[index].duration };
       },
     };
-    const mp4Bytes = await remuxTsToMp4(segmentSource, ({ done, totalSegs }) => {
-      onProgress({ stage: 'remux', current: done, total: totalSegs });
-    });
+    const mp4Bytes = await remuxTsToMp4(
+      segmentSource,
+      ({ done, totalSegs }) => {
+        onProgress({ stage: 'remux', current: done, total: totalSegs });
+      },
+      signal,
+    );
+    // NOTE: the mux.js output is still buffered in JS heap here — the
+    // chunk collector inside remux.ts + the final concat into a single
+    // Uint8Array peaks around the full MP4 size. Decrypted segments
+    // are bounded by SEGMENT_CONCURRENCY × segment_size via OPFS, but
+    // the remux phase is the next memory cliff. See ROADMAP v0.10 note
+    // on "intermediate remux buffers (deferred)".
 
     // 5. Make a Blob URL for the SW to hand to chrome.downloads.download.
     const blob = new Blob([mp4Bytes as Uint8Array<ArrayBuffer>], { type: 'video/mp4' });
@@ -309,10 +319,12 @@ interface FetchArgs {
   signal?: AbortSignal;
 }
 
-// Retry budget for transient segment / key failures. Total wall time at
-// max attempts ≈ 500 + 1000 + 2000 + 4000ms = ~7.5s plus jitter — well
-// inside the typical signed-URL TTL on Hotmart's hdntl token.
-const MAX_FETCH_ATTEMPTS = 4;
+// Retry budget for transient segment / key failures. 5 total attempts
+// means 4 backoff sleeps: 500ms · 1s · 2s · 4s (+ ≤300ms jitter each)
+// ≈ ~7.5s of total wall time — well inside the typical signed-URL TTL
+// on Hotmart's hdntl token. (4 attempts would cap the sleeps at 2s and
+// never reach the `Math.min(4000, …)` ceiling below.)
+const MAX_FETCH_ATTEMPTS = 5;
 
 // Classify a proxy reply as "retry might help":
 //  - HTTP 429 (rate-limited)

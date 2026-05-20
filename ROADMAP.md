@@ -283,8 +283,8 @@ Goal: migrate before the adapter/message/download APIs grow further, so new feat
 Goal: make large downloads predictable instead of relying on one giant JS heap pipeline.
 
 - [x] Introduce an OPFS-backed download workspace in the offscreen document:
-  - [x] decrypted HLS segments (`extension/offscreen/storage.ts` writes each segment to `/vdl-workspaces/<requestId>/seg-NNNNNN.ts`; the downloader streams them back via `RemuxSegmentSource`)
-  - [ ] intermediate remux buffers when needed (mux.js output still buffers in memory through the final concat; deferred — saves ~half the heap already without it; revisit only if multi-GB outputs OOM)
+  - [x] decrypted HLS segments (`extension/offscreen/storage.ts` writes each segment to `/vdl-workspaces/<requestId>/seg-NNNNNN.ts`; the downloader streams them back via `RemuxSegmentSource`). Heap bound during fetch+decrypt is SEGMENT_CONCURRENCY × max-segment-size (~16–32 MB). **The remux phase is NOT yet bounded** — mux.js's chunk collector + the final `Uint8Array` concat still buffer the full output in memory (~ full file size). This is the next memory cliff.
+  - [ ] intermediate remux buffers when needed (the deferred work above — streaming mux.js chunks straight to OPFS and reading the output back as a `File` for the Blob URL would cap the remux phase too).
   - [ ] subtitle sidecars later (slots in once v0.9-deferred subtitle support lands)
   - [x] cleanup metadata per request (`workspace.dispose()` in the downloader's finally; idempotent on success / error / abort)
 - [ ] Set size thresholds for in-memory vs OPFS paths. Small downloads can stay in memory; larger lessons must spill to OPFS before remux. (Deferred — v0.10 always uses OPFS for simplicity. The I/O overhead is dwarfed by network latency, and skipping the threshold removes a branch that would otherwise need its own fixture coverage. Revisit if profiling shows OPFS hurts on <100 MB downloads.)

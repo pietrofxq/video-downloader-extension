@@ -48,6 +48,7 @@ const HLS_TIMESCALE = 90_000;
 export function remuxTsToMp4(
   segmentsOrSource: RemuxSegment[] | RemuxSegmentSource,
   onProgress?: (p: RemuxProgress) => void,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   const source: RemuxSegmentSource = Array.isArray(segmentsOrSource)
     ? {
@@ -57,6 +58,9 @@ export function remuxTsToMp4(
     : segmentsOrSource;
   if (source.count === 0) {
     return Promise.reject(new RemuxError('remuxTsToMp4: expected at least one segment'));
+  }
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException('aborted', 'AbortError'));
   }
   return new Promise<Uint8Array>((resolve, reject) => {
     let transmuxer: Transmuxer;
@@ -119,6 +123,11 @@ export function remuxTsToMp4(
       try {
         for (let i = 0; i < source.count; i += 1) {
           if (aborted) return;
+          if (signal?.aborted) {
+            aborted = true;
+            reject(signal.reason ?? new DOMException('aborted', 'AbortError'));
+            return;
+          }
           const seg = await source.getSegment(i);
           if (aborted) return;
           transmuxer.setBaseMediaDecodeTime(cumulative90k);

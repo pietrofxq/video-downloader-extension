@@ -57,11 +57,11 @@ function seedTabs(): Promise<void> {
   return seedPromise;
 }
 seedTabs();
-// Restore in-flight + queued download state from chrome.storage.session
-// so a SW respawn during an active download doesn't lose the popup UI.
-// Fire-and-forget; the next DOWNLOAD_PROGRESS message from the
-// long-lived offscreen will patch the restored state forward.
-void restoreDownloadState();
+// NOTE: `void restoreDownloadState();` is invoked further down in the
+// file, after `downloadStates` / `downloadQueue` / the storage keys are
+// declared. Calling it here triggers a TDZ ReferenceError that the
+// function's try/catch silently swallows, leaving the SW with empty
+// state and the popup blank after a worker respawn.
 
 async function restoreDownloadState(): Promise<void> {
   try {
@@ -767,6 +767,12 @@ const downloadStates = new Map<string, DownloadState>();
 const DOWNLOAD_STATES_KEY = 'downloadStates';
 const DOWNLOAD_QUEUE_KEY = 'downloadQueue';
 
+// Has to live AFTER downloadStates / downloadQueue / the storage keys
+// are declared; otherwise the function body's first synchronous tick
+// hits TDZ on those identifiers and the try/catch turns it into a
+// silent no-op. See the comment near `seedTabs();`.
+void restoreDownloadState();
+
 async function persistDownloadStates(): Promise<void> {
   try {
     const states: Record<string, DownloadState> = {};
@@ -824,13 +830,19 @@ function handleDownloadError(payload: unknown): void {
   if (!payload || typeof payload !== 'object') return;
   const p = payload as { requestId?: unknown; code?: unknown; message?: unknown };
   if (typeof p.requestId !== 'string') return;
-  // If the popup already transitioned this request to 'canceled' (the SW
-  // does that synchronously on the cancel click), the late DOWNLOAD_ERROR
-  // arriving from the offscreen — even with code='Canceled' — must NOT
-  // overwrite the canceled state with 'error'. The 'canceled' state is
-  // final; we just confirm receipt.
   const existing = downloadStates.get(p.requestId);
-  if (existing?.status === 'canceled') return;
+  // 'canceled' is the user-initiated final state set synchronously by
+  // cancelDownload(). The DOWNLOAD_ERROR arriving from the offscreen
+  // here — even with code='Canceled' — must NOT overwrite it with
+  // 'error'. But we DO still drive the lifecycle forward: advance the
+  // queue (the offscreen has now unwound, so the next queued request
+  // can start) and re-arm the idle teardown.
+  if (existing?.status === 'canceled') {
+    clearPendingCancelTimeout(p.requestId);
+    advanceQueue(p.requestId);
+    scheduleIdleTeardown();
+    return;
+  }
   log.warn('download error', { requestId: p.requestId, code: p.code, message: p.message });
   setDownloadState(p.requestId, {
     status: 'error',
@@ -876,8 +888,41 @@ function cancelDownload(requestId: string): void {
   chrome.runtime.sendMessage({ type: MSG.CANCEL_DOWNLOAD, payload: { requestId } }).catch(() => {
     // offscreen may be down; nothing to abort.
   });
-  advanceQueue(requestId);
-  scheduleIdleTeardown();
+  // Do NOT advance the queue yet. The offscreen still has the in-flight
+  // download unwinding (fetches in-flight may take a few seconds to
+  // throw, remux loop may be mid-segment). Advancing now would start
+  // the next queued download in parallel, violating the
+  // one-download-at-a-time invariant the queue exists to enforce. Let
+  // handleDownloadError drive the advance when the offscreen confirms.
+  // Safety net: if the offscreen never confirms (crashed, killed),
+  // force-advance after 10s so the queue doesn't stick forever.
+  schedulePendingCancelTimeout(requestId);
+}
+
+// Maps requestId → safety-timeout timer ID, set when cancelDownload
+// sends the abort and cleared when handleDownloadError confirms.
+const pendingCancelTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+const CANCEL_CONFIRMATION_TIMEOUT_MS = 10_000;
+
+function schedulePendingCancelTimeout(requestId: string): void {
+  clearPendingCancelTimeout(requestId);
+  const timer = setTimeout(() => {
+    pendingCancelTimeouts.delete(requestId);
+    // Offscreen hasn't confirmed the cancel within the window — assume
+    // it's gone and unblock the queue.
+    log.warn('cancel confirmation timeout; force-advancing queue', { requestId });
+    advanceQueue(requestId);
+    scheduleIdleTeardown();
+  }, CANCEL_CONFIRMATION_TIMEOUT_MS);
+  pendingCancelTimeouts.set(requestId, timer);
+}
+
+function clearPendingCancelTimeout(requestId: string): void {
+  const timer = pendingCancelTimeouts.get(requestId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    pendingCancelTimeouts.delete(requestId);
+  }
 }
 
 async function handleDownloadDone(payload: unknown): Promise<void> {
@@ -893,6 +938,23 @@ async function handleDownloadDone(payload: unknown): Promise<void> {
   const blobUrl = p.blobUrl;
   const filename = p.filename;
   const requestId = typeof p.requestId === 'string' ? p.requestId : null;
+  // The user may have canceled between the offscreen producing the
+  // blob and this DOWNLOAD_DONE landing (remux can take several
+  // seconds; cancel mid-remux still aborts via the signal but a cancel
+  // very late in the loop can race past the throwIfAborted check).
+  // Don't save in that case — revoke the blob the offscreen created,
+  // drive the lifecycle forward, and bail.
+  if (requestId) {
+    const existing = downloadStates.get(requestId);
+    if (existing?.status === 'canceled') {
+      log.info('suppressed save for canceled request', { requestId });
+      chrome.runtime.sendMessage({ type: MSG.REVOKE_BLOB, payload: { blobUrl } }).catch(() => {});
+      clearPendingCancelTimeout(requestId);
+      advanceQueue(requestId);
+      scheduleIdleTeardown();
+      return;
+    }
+  }
   const downloadId = await chrome.downloads.download({
     url: blobUrl,
     filename,
