@@ -1,9 +1,18 @@
 import { log, redactUrl } from '../lib/log.js';
 import { fetchArrayBuffer, type ProxyFetch } from './downloader.js';
 import { OpfsWorkspace } from './storage.js';
-import { getSolver } from './yt-sig.js';
+import { getYouTubeSolver } from './yt-sig.js';
 import type { DownloadProgress, DownloadResult } from './downloader.js';
 import type { DownloadRequest } from '../lib/types.ts';
+
+function isYouTubeMediaUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === 'googlevideo.com' || host.endsWith('.googlevideo.com');
+  } catch {
+    return false;
+  }
+}
 
 const OUTPUT_FILE_NAME = 'out.mp4';
 
@@ -44,32 +53,25 @@ export async function downloadProgressive(
   req: DownloadRequest,
 ): Promise<DownloadResult> {
   const { proxyFetch, onProgress, signal } = io;
-  const { requestId, variantUrl, tabId, frameId, headers, filename, playerJsUrl } = req;
+  const { requestId, variantUrl, tabId, frameId, headers, filename } = req;
 
   signal?.throwIfAborted();
 
   // YouTube URL signing. The signed `n=...` value on a videoplayback
   // URL must be re-signed by a function from base.js or the CDN 403s
-  // the request. Higher-quality URLs additionally come as
-  // `signatureCipher` and need a separate decipher. The solver
-  // handles both transparently — `decipher(plainUrl)` is a no-op
-  // when there's nothing to transform. Non-YouTube progressive
-  // sources leave playerJsUrl unset and skip this entire step.
+  // the request. We detect googlevideo URLs by hostname and
+  // auto-discover the player JS via iframe_api (see yt-sig.ts —
+  // mirrors LuanRT/YouTube.js's approach). Non-YouTube progressive
+  // sources skip this entire step.
   let fetchUrl = variantUrl;
-  if (playerJsUrl) {
+  if (isYouTubeMediaUrl(variantUrl)) {
     try {
-      const solver = await getSolver({
-        playerJsUrl,
-        proxyFetch,
-        tabId,
-        frameId,
-        signal,
-      });
+      const solver = await getYouTubeSolver({ proxyFetch, tabId, frameId, signal });
       fetchUrl = solver.decipher(variantUrl);
     } catch (err) {
       log.warn('yt-sig: solver setup failed; proceeding with original URL', {
         requestId,
-        playerJsUrl: redactUrl(playerJsUrl),
+        url: redactUrl(variantUrl),
         err: err instanceof Error ? err.message : String(err),
       });
       // Fall through with the un-transformed URL — better to fail

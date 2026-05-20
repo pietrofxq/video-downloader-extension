@@ -266,7 +266,83 @@ function __vdl_process(args) {
 `;
 }
 
+// ---------- YouTube auto-discovery via iframe_api ----------
+//
+// Scraping <script src> from the watch page DOM proved unreliable
+// (player JS isn't always in the static DOM by document_idle time;
+// SPA-navigated states often miss it). YouTube.js sidesteps this by
+// fetching `/iframe_api` — a stable, tiny JS bundle that embeds the
+// current `player_id` — and deriving the canonical player URL from
+// there. We do the same. The fetch goes through the existing
+// proxyFetch so it originates from the YouTube tab (cookies + origin
+// match what YouTube's CDN expects).
+
+const YT_HOME = 'https://www.youtube.com';
+const IFRAME_API_URL = `${YT_HOME}/iframe_api`;
+// Matches `player\/<id>\/` in the iframe_api JS source. The slashes
+// are escaped (JS string literal in the response body), so the regex
+// looks for the literal backslash + slash on either side of the id.
+const PLAYER_ID_RE = /player\\\/([^\\\/]+)\\\//;
+
+// Player.js URL keyed by player_id. The id rotates only when YouTube
+// deploys a new player, so this cache survives the rest of the
+// session naturally.
+const youtubeSolverByPlayerId = new Map<string, Promise<CompiledSolver>>();
+
+export interface YouTubeSolverContext {
+  proxyFetch: ProxyFetch;
+  tabId: number;
+  frameId: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Discover + compile the YouTube signer for the current player.
+ * Two-step:
+ *   1. Fetch `/iframe_api`, regex-extract the player_id.
+ *   2. Build `https://www.youtube.com/s/player/<id>/player_es6.vflset/en_US/base.js`,
+ *      fetch + extract + compile via `getSolver`.
+ *
+ * The result is cached by player_id so callers from different
+ * downloads in the same session share one compilation.
+ */
+export async function getYouTubeSolver(ctx: YouTubeSolverContext): Promise<CompiledSolver> {
+  const playerId = await fetchPlayerId(ctx);
+  const cached = youtubeSolverByPlayerId.get(playerId);
+  if (cached) return cached;
+
+  const playerUrl = `${YT_HOME}/s/player/${playerId}/player_es6.vflset/en_US/base.js`;
+  log.info('yt-sig: resolved player', { playerId, playerUrl: redactUrl(playerUrl) });
+  const compiling = getSolver({
+    playerJsUrl: playerUrl,
+    proxyFetch: ctx.proxyFetch,
+    tabId: ctx.tabId,
+    frameId: ctx.frameId,
+    signal: ctx.signal,
+  }).catch((err) => {
+    youtubeSolverByPlayerId.delete(playerId);
+    throw err;
+  });
+  youtubeSolverByPlayerId.set(playerId, compiling);
+  return compiling;
+}
+
+async function fetchPlayerId(ctx: YouTubeSolverContext): Promise<string> {
+  const text = await fetchText(ctx.proxyFetch, {
+    tabId: ctx.tabId,
+    frameId: ctx.frameId,
+    url: IFRAME_API_URL,
+    signal: ctx.signal,
+  });
+  const m = text.match(PLAYER_ID_RE);
+  if (!m || !m[1]) {
+    throw new Error('yt-sig: could not extract player id from iframe_api response');
+  }
+  return m[1];
+}
+
 /** Test helper — wipe the solver cache between cases. */
 export function _clearSolverCacheForTests(): void {
   solverCache.clear();
+  youtubeSolverByPlayerId.clear();
 }
