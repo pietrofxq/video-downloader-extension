@@ -129,6 +129,15 @@ export interface DownloadRequest {
   headers?: Record<string, string>;
   /** Sanitized base name (no extension); orchestrator appends `.mp4`. */
   filename: string;
+  /**
+   * Companion audio stream URL for adaptive video-only variants —
+   * forwarded from `HlsVariant.pairedAudioUrl` for the variant the
+   * user picked. The adaptive HD downloader (v0.11.1) fetches both
+   * URLs and muxes them; the progressive path ignores this.
+   */
+  pairedAudioUrl?: string;
+  /** Byte length of the paired audio stream when known. */
+  pairedAudioContentLength?: number;
 }
 
 export interface DownloadOutcome {

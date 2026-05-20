@@ -793,6 +793,13 @@ async function handleStartDownload(payload: {
   const variantKind = classifyUrl(finalVariantUrl);
   const downloadKind: MediaKind = isPrimary(variantKind) ? variantKind : entry.kind;
 
+  // Look the picked variant up by url so we can carry pairedAudio*
+  // forward — the popup only sends variantUrl, but the adaptive
+  // downloader (v0.11.1) needs the audio sibling URL the YouTube
+  // adapter attached. No-op for HLS / progressive variants where
+  // pairedAudioUrl is unset.
+  const pickedVariant = entry.variants?.find((v) => v.url === finalVariantUrl);
+
   const runPayload: RunPayload = {
     requestId,
     kind: downloadKind,
@@ -801,6 +808,10 @@ async function handleStartDownload(payload: {
     frameId: entry.frameId ?? 0,
     headers: entry.headers,
     filename,
+    ...(pickedVariant?.pairedAudioUrl ? { pairedAudioUrl: pickedVariant.pairedAudioUrl } : {}),
+    ...(pickedVariant?.pairedAudioContentLength
+      ? { pairedAudioContentLength: pickedVariant.pairedAudioContentLength }
+      : {}),
   };
 
   // Seed the per-request state BEFORE forwarding to the offscreen, so the
@@ -856,6 +867,8 @@ interface RunPayload {
   frameId: number;
   headers?: Record<string, string>;
   filename: string;
+  pairedAudioUrl?: string;
+  pairedAudioContentLength?: number;
 }
 
 let activeRequestId: string | null = null;
