@@ -86,6 +86,54 @@ describe('runWithConcurrency', () => {
     expect(out).toEqual(['a', 'b']);
   });
 
+  it('rejects synchronously when called with an already-aborted signal', async () => {
+    const ac = new AbortController();
+    ac.abort(new Error('pre-aborted'));
+    const tasks = [() => Promise.resolve('a')];
+    await expect(runWithConcurrency(tasks, 2, undefined, ac.signal)).rejects.toThrow('pre-aborted');
+  });
+
+  it('stops starting new tasks once the signal aborts mid-run', async () => {
+    const started: number[] = [];
+    const ac = new AbortController();
+    // Both initial tasks hang on deferreds so the two workers are stuck
+    // and can't naturally advance to indices 2..5 — that way, any task
+    // beyond the first wave that DOES start can only have been picked
+    // up because the abort path didn't actually short-circuit.
+    const d0 = defer<string>();
+    const d1 = defer<string>();
+    const tasks = Array.from({ length: 6 }, (_, i) => async () => {
+      started.push(i);
+      if (i === 0) return d0.promise;
+      if (i === 1) return d1.promise;
+      return `r${i}`;
+    });
+    const runPromise = runWithConcurrency(tasks, 2, undefined, ac.signal);
+    // Yield once so both workers actually enter their first task.
+    await new Promise((r) => setTimeout(r, 5));
+    expect(started).toEqual([0, 1]);
+    ac.abort(new Error('user canceled'));
+    // Resolve both blockers — workers wake up, see aborted=true, and bail
+    // BEFORE pulling the next index out of the queue.
+    d0.resolve('a');
+    d1.resolve('b');
+    await expect(runPromise).rejects.toThrow('user canceled');
+    expect(started).toEqual([0, 1]);
+  });
+
+  it('rejects with the signal.reason when one is provided', async () => {
+    const ac = new AbortController();
+    const tasks = Array.from({ length: 4 }, () => async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return 'x';
+    });
+    const runPromise = runWithConcurrency(tasks, 2, undefined, ac.signal);
+    await new Promise((r) => setTimeout(r, 5));
+    const reason = new Error('custom abort reason');
+    ac.abort(reason);
+    await expect(runPromise).rejects.toBe(reason);
+  });
+
   it('does not start more tasks after an in-flight failure', async () => {
     const started: number[] = [];
     const d = defer<string>();

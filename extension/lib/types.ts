@@ -118,8 +118,21 @@ export interface DownloadState {
   filename: string;
   status: DownloadStatus;
   stage: DownloadStage;
+  /**
+   * Unified phase-weighted progress. `current/total` is the single 0-1
+   * fraction the popup turns into the bar percentage; it advances
+   * monotonically across fetch → decrypt → remux so the bar never
+   * resets between stages.
+   */
   current: number;
   total: number;
+  /**
+   * Raw per-stage segment counter for the "segment X/Y" label under the
+   * progress bar. Distinct from current/total because those are now
+   * weighted units, not segment counts.
+   */
+  segmentCurrent?: number;
+  segmentTotal?: number;
   /** Set when status === 'saved'. */
   downloadId?: number;
   bytes?: number;

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "build:prod": "NODE_ENV=production node build.mjs",
+    "build:prod": "cross-env NODE_ENV=production node build.mjs",
     "build:watch": "node build.mjs --watch",
     "clean": "rm -rf dist",
     "lint": "eslint .",
@@ -21,6 +21,7 @@
     "@types/chrome": "^0.1.42",
     "@types/node": "^25.9.1",
     "@vitest/web-worker": "^2.1.8",
+    "cross-env": "^10.1.0",
     "esbuild": "^0.24.0",
     "eslint": "^9.16.0",
     "globals": "^15.13.0",

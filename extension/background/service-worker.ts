@@ -1,5 +1,5 @@
 import { log } from '../lib/log.js';
-import { MSG, parseExtensionMessage } from '../lib/messages.js';
+import { MSG, assertNever, parseExtensionMessage } from '../lib/messages.js';
 import { pickAdapter, getAdapter } from '../adapters/index.js';
 import {
   classifyUrl,
@@ -71,9 +71,26 @@ async function restoreDownloadState(): Promise<void> {
       for (const [id, state] of Object.entries(persistedStates as Record<string, DownloadState>)) {
         downloadStates.set(id, state);
         // Re-derive activeRequestId from the restored states. There can
-        // only be one in-flight slot (queue discipline guarantees it).
+        // only be one in-flight slot (queue discipline guarantees it),
+        // so if persistence ever serialized two pending/progress states
+        // for any reason (writes interleaved with cancel/done) demote
+        // the runners-up to 'error' instead of leaving them visible as
+        // ghost downloads the offscreen will never report on.
         if (state.status === 'pending' || state.status === 'progress') {
-          activeRequestId = id;
+          if (activeRequestId !== null && activeRequestId !== id) {
+            log.warn('restored duplicate in-flight download; demoting to error', {
+              kept: activeRequestId,
+              demoted: id,
+            });
+            downloadStates.set(id, {
+              ...state,
+              status: 'error',
+              errorCode: 'Error',
+              errorMessage: 'Interrupted by extension restart.',
+            });
+          } else {
+            activeRequestId = id;
+          }
         }
       }
     }
@@ -324,8 +341,19 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
         });
       return true; // async sendResponse
     }
-    default:
+    // ---------- SW-originated messages echoed back to the SW ----------
+    // chrome.runtime.sendMessage delivers to every listener in the
+    // extension, including the SW itself. These message types are
+    // emitted by the SW for the offscreen (or vice versa) and the SW
+    // has no business acting on them — but we list each one explicitly
+    // so adding a new MSG.* without a handler is a compile error via
+    // assertNever() below.
+    case MSG.RUN_DOWNLOAD:
+    case MSG.TAB_STATE_UPDATED:
+    case MSG.REVOKE_BLOB:
       return false;
+    default:
+      return assertNever(msg);
   }
 });
 
@@ -625,6 +653,8 @@ async function handleStartDownload(payload: {
     stage: null,
     current: 0,
     total: 0,
+    segmentCurrent: 0,
+    segmentTotal: 0,
     startedAt: Date.now(),
   });
   broadcastDownloadState(downloadStates.get(requestId));
@@ -707,6 +737,8 @@ function advanceQueue(finishedRequestId: string): void {
     stage: null,
     current: 0,
     total: 0,
+    segmentCurrent: 0,
+    segmentTotal: 0,
   });
   runInOffscreen(next);
   void persistDownloadQueue();
@@ -816,13 +848,22 @@ function broadcastDownloadState(state: DownloadState | null | undefined): void {
 
 function handleDownloadProgress(payload: unknown): void {
   if (!payload || typeof payload !== 'object') return;
-  const p = payload as { requestId?: unknown; stage?: unknown; current?: unknown; total?: unknown };
+  const p = payload as {
+    requestId?: unknown;
+    stage?: unknown;
+    current?: unknown;
+    total?: unknown;
+    segmentCurrent?: unknown;
+    segmentTotal?: unknown;
+  };
   if (typeof p.requestId !== 'string') return;
   setDownloadState(p.requestId, {
     status: 'progress',
     stage: p.stage as DownloadState['stage'],
     current: Number(p.current),
     total: Number(p.total),
+    segmentCurrent: typeof p.segmentCurrent === 'number' ? p.segmentCurrent : undefined,
+    segmentTotal: typeof p.segmentTotal === 'number' ? p.segmentTotal : undefined,
   });
 }
 
@@ -1033,12 +1074,17 @@ function dismissDownloadStatesForMedia(mediaId: string): void {
   }
   // If a queued run for this mediaId hasn't started yet, drop it too —
   // otherwise the dismiss would clear the visible state while the run
-  // fires later and re-creates a new entry.
+  // fires later and re-creates a new entry. Also evict orphaned queue
+  // entries whose state was already wiped (e.g. by clearDownloadStatesForTab)
+  // — those are unrecoverable noise and we don't want enqueueOrStart to
+  // ever advance to them.
   let queueMutated = false;
   for (let i = downloadQueue.length - 1; i >= 0; i -= 1) {
     const run = downloadQueue[i];
     const state = downloadStates.get(run.requestId);
-    if (!state || state.mediaId === mediaId) {
+    const isOrphan = !state;
+    const matchesDismissedMedia = state?.mediaId === mediaId;
+    if (isOrphan || matchesDismissedMedia) {
       downloadQueue.splice(i, 1);
       queueMutated = true;
     }

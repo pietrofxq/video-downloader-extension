@@ -94,8 +94,12 @@ export interface DownloadProgressMessage extends MessageBase<typeof MSG.DOWNLOAD
   payload: {
     requestId: string;
     stage: 'fetch' | 'decrypt' | 'remux';
+    /** Phase-weighted units; current/total drives the unified 0-100% bar. */
     current: number;
     total: number;
+    /** Raw segment counter within the current stage (label only). */
+    segmentCurrent: number;
+    segmentTotal: number;
   };
 }
 

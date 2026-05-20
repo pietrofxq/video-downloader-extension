@@ -37,8 +37,57 @@ export type ProxyFetch = (payload: ProxyFetchPayload) => Promise<ProxyFetchReply
 
 export interface DownloadProgress {
   stage: 'fetch' | 'decrypt' | 'remux';
+  /**
+   * Phase-weighted progress units. `current/total` is the single 0-1
+   * fraction the popup turns into a monotonic 0-100% bar across all
+   * three stages. Without this the bar would reset to 0 each time the
+   * stage changed (fetch 0→100, decrypt 0→100, remux 0→100).
+   */
   current: number;
   total: number;
+  /** Raw segment count within the active stage (for the counter label). */
+  segmentCurrent: number;
+  segmentTotal: number;
+}
+
+// Relative wall-time weights per segment for the unified progress bar.
+// Picked from observed Hotmart lessons: fetch is network-bound and the
+// bulk of the time, decrypt is microseconds of CPU, remux is mux.js +
+// our moof/moov patching which is non-trivial for large files. The
+// numbers don't have to be precise — only the relative order matters
+// for the bar to feel honest. Exported as a frozen record so tests can
+// reason about the schedule the downloader will actually use.
+export const PROGRESS_WEIGHTS = Object.freeze({
+  fetch: 4,
+  decrypt: 1,
+  remux: 5,
+} as const);
+
+/**
+ * Pure (current, total) calculator for the unified progress bar. The
+ * downloader's emit() closure is the production caller, but the same
+ * math drives the tests that lock in the "bar never resets between
+ * stages" invariant.
+ *
+ * `current` is the sum of completed phase work in weighted units;
+ * `total` is the grand total across whatever phases this stream needs
+ * (fetch+remux for clear streams, fetch+decrypt+remux for encrypted).
+ *
+ * Both values are integers as long as the inputs are.
+ */
+export function computeUnifiedProgress(
+  segmentCount: number,
+  hasEncrypted: boolean,
+  fetched: number,
+  decrypted: number,
+  remuxed: number,
+  weights: { fetch: number; decrypt: number; remux: number } = PROGRESS_WEIGHTS,
+): { current: number; total: number } {
+  const fetchTotal = segmentCount * weights.fetch;
+  const decryptTotal = hasEncrypted ? segmentCount * weights.decrypt : 0;
+  const remuxTotal = segmentCount * weights.remux;
+  const current = fetched * weights.fetch + decrypted * weights.decrypt + remuxed * weights.remux;
+  return { current, total: fetchTotal + decryptTotal + remuxTotal };
 }
 
 interface ParsedSegment {
@@ -90,7 +139,28 @@ export async function downloadHlsAsTs(
     throw new ManifestParseError('Variant playlist contained no segments.');
   }
   const total = segments.length;
-  onProgress({ stage: 'fetch', current: 0, total });
+  // Unified progress accounting. Phases contribute weighted units into a
+  // single grand total so the bar advances 0→100% across fetch +
+  // decrypt + remux instead of resetting at each stage boundary.
+  const hasEncrypted = segments.some((s) => s.encrypted);
+  let fetchedCount = 0;
+  let decryptedCount = 0;
+  let remuxedCount = 0;
+  const emit = (
+    stage: DownloadProgress['stage'],
+    segmentCurrent: number,
+    segmentTotal: number,
+  ): void => {
+    const { current, total: totalUnits } = computeUnifiedProgress(
+      total,
+      hasEncrypted,
+      fetchedCount,
+      decryptedCount,
+      remuxedCount,
+    );
+    onProgress({ stage, current, total: totalUnits, segmentCurrent, segmentTotal });
+  };
+  emit('fetch', 0, total);
 
   // 2. Fetch + import the AES-128 key (if any). HLS supports per-segment
   //    key rotation, but in practice (and on Hotmart) one key covers all
@@ -135,7 +205,8 @@ export async function downloadHlsAsTs(
       });
       signal?.throwIfAborted();
       fetched += 1;
-      onProgress({ stage: 'fetch', current: fetched, total });
+      fetchedCount = fetched;
+      emit('fetch', fetched, total);
 
       let bytes: Uint8Array;
       if (!seg.encrypted) {
@@ -157,7 +228,8 @@ export async function downloadHlsAsTs(
           );
         }
         decrypted += 1;
-        onProgress({ stage: 'decrypt', current: decrypted, total });
+        decryptedCount = decrypted;
+        emit('decrypt', decrypted, total);
       }
       await workspace.writeSegment(idx, bytes);
     });
@@ -170,7 +242,11 @@ export async function downloadHlsAsTs(
     //    never held in memory all at once. Per-segment push + flush is
     //    mux.js's intended VOD pattern (single concatenation produces a
     //    wrong-tfdt giant moof — see AGENTS.md §8a).
-    onProgress({ stage: 'remux', current: 0, total: segments.length });
+    // Make sure fetch/decrypt counters are saturated before remux starts
+    // so the unified bar can never visually regress when the stage flips.
+    fetchedCount = total;
+    if (hasEncrypted) decryptedCount = total;
+    emit('remux', 0, segments.length);
     const segmentSource: RemuxSegmentSource = {
       count: segments.length,
       async getSegment(index) {
@@ -181,7 +257,8 @@ export async function downloadHlsAsTs(
     const mp4Bytes = await remuxTsToMp4(
       segmentSource,
       ({ done, totalSegs }) => {
-        onProgress({ stage: 'remux', current: done, total: totalSegs });
+        remuxedCount = done;
+        emit('remux', done, totalSegs);
       },
       signal,
     );
@@ -325,6 +402,11 @@ interface FetchArgs {
 // on Hotmart's hdntl token. (4 attempts would cap the sleeps at 2s and
 // never reach the `Math.min(4000, …)` ceiling below.)
 const MAX_FETCH_ATTEMPTS = 5;
+
+// Exported for the test suite — see downloader.test.ts. Internal callers
+// should not depend on this directly; the rest of the pipeline goes
+// through proxyFetchWithRetry which already uses it.
+export { isRetryableReply, proxyFetchWithRetry };
 
 // Classify a proxy reply as "retry might help":
 //  - HTTP 429 (rate-limited)

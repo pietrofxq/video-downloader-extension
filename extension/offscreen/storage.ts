@@ -15,7 +15,6 @@ const ROOT_DIR = 'vdl-workspaces';
 
 export class OpfsWorkspace {
   private readonly dir: FileSystemDirectoryHandle;
-  private maxSegmentIndex = -1;
   private closed = false;
 
   private constructor(dir: FileSystemDirectoryHandle) {
@@ -61,7 +60,6 @@ export class OpfsWorkspace {
     } finally {
       await writable.close();
     }
-    if (index > this.maxSegmentIndex) this.maxSegmentIndex = index;
   }
 
   /**

@@ -230,11 +230,16 @@ function renderActionForDownload(state: DownloadState): string {
         </button>
       </div>`;
   }
-  // pending / progress
+  // pending / progress. `current/total` is now weighted-unit progress
+  // (monotonic across fetch → decrypt → remux) so it drives the bar
+  // without resetting at stage boundaries; the "segment X/Y" counter
+  // pulls from segmentCurrent/segmentTotal which are per-stage.
   const total = state.total > 0 ? state.total : 0;
   const current = state.current > 0 ? state.current : 0;
   const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
-  const counter = total > 0 ? `segment ${current}/${total}` : '';
+  const segTotal = state.segmentTotal && state.segmentTotal > 0 ? state.segmentTotal : 0;
+  const segCurrent = state.segmentCurrent && state.segmentCurrent > 0 ? state.segmentCurrent : 0;
+  const counter = segTotal > 0 ? `segment ${segCurrent}/${segTotal}` : '';
   const label = [stageLabel(state.stage), counter].filter(Boolean).join(' · ');
   return `
     <div class="download-progress" role="progressbar"
@@ -433,17 +438,23 @@ function applyDownloadState(state: DownloadState): void {
     const row = $content.querySelector<HTMLElement>(
       `.row[data-media-id="${CSS.escape(state.mediaId)}"]`,
     );
-    const fill = row?.querySelector<HTMLElement>('.progress-fill');
-    const label = row?.querySelector<HTMLElement>('.progress-label');
-    if (fill && label) {
+    const progressBar = row?.querySelector<HTMLElement>('.download-progress');
+    const fill = progressBar?.querySelector<HTMLElement>('.progress-fill');
+    const label = progressBar?.querySelector<HTMLElement>('.progress-label');
+    if (progressBar && fill && label) {
       const total = state.total > 0 ? state.total : 0;
       const current = state.current > 0 ? state.current : 0;
       const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
-      const counter = total > 0 ? `segment ${current}/${total}` : '';
+      const segTotal = state.segmentTotal && state.segmentTotal > 0 ? state.segmentTotal : 0;
+      const segCurrent =
+        state.segmentCurrent && state.segmentCurrent > 0 ? state.segmentCurrent : 0;
+      const counter = segTotal > 0 ? `segment ${segCurrent}/${segTotal}` : '';
       const lbl = [stageLabel(state.stage), counter].filter(Boolean).join(' · ');
       fill.style.width = `${pct}%`;
       label.textContent = `${pct}% · ${lbl}`;
-      row?.setAttribute('aria-valuenow', String(pct));
+      // aria-valuenow belongs on the role="progressbar" element, not on
+      // the surrounding .row container.
+      progressBar.setAttribute('aria-valuenow', String(pct));
       return;
     }
   }
