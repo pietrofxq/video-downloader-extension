@@ -132,6 +132,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!isHttpUrl(changeInfo.url)) return;
   const { prev } = await setTabUrl(tabId, changeInfo.url);
   if (prev && prev !== changeInfo.url) {
+    log.info('tab navigated — clearing entries', { tabId, prev, next: changeInfo.url });
     clearDownloadStatesForTab(tabId);
     const had = await clearTab(tabId);
     if (had) await updateBadge(tabId);
@@ -535,6 +536,7 @@ async function handleStreamsDiscovered({
   if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
 
   let anyAdded = false;
+  let dedupedCount = 0;
   for (const s of streams) {
     if (typeof s.url !== 'string' || !s.url) continue;
     const entry: Omit<MediaEntry, 'id'> = {
@@ -554,6 +556,7 @@ async function handleStreamsDiscovered({
     };
     const stored = await addEntry(tabId, entry);
     if (stored) anyAdded = true;
+    else dedupedCount += 1;
   }
 
   if (anyAdded) {
@@ -564,6 +567,15 @@ async function handleStreamsDiscovered({
     });
     await updateBadge(tabId);
     await broadcastTabState(tabId);
+  } else if (dedupedCount > 0) {
+    // Adapter re-discovered the same catalog on a SPA-navigation or
+    // re-emission. Useful to see in the log so we can tell the
+    // difference between "no streams" and "streams already known".
+    log.debug('streams re-discovered (dedupe)', {
+      tabId,
+      adapterId,
+      deduped: dedupedCount,
+    });
   }
 }
 

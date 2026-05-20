@@ -1,3 +1,4 @@
+import { log, redactUrl } from '../lib/log.js';
 import { fetchArrayBuffer, type ProxyFetch } from './downloader.js';
 import { OpfsWorkspace } from './storage.js';
 import type { DownloadProgress, DownloadResult } from './downloader.js';
@@ -60,13 +61,34 @@ export async function downloadProgressive(
       segmentTotal: 1,
     });
 
-    const bytes = await fetchArrayBuffer(proxyFetch, {
-      tabId,
-      frameId,
-      url: variantUrl,
-      headers,
-      signal,
-    });
+    // Range: bytes=0- is what the YouTube player uses internally;
+    // googlevideo's CDN sometimes rejects naked GETs for video URLs.
+    // Merged with any adapter-supplied headers (none for YouTube
+    // today, but Hotmart-like adapters could set Authorization).
+    const mergedHeaders: Record<string, string> = {
+      Range: 'bytes=0-',
+      ...(headers ?? {}),
+    };
+
+    let bytes: Uint8Array;
+    try {
+      bytes = await fetchArrayBuffer(proxyFetch, {
+        tabId,
+        frameId,
+        url: variantUrl,
+        headers: mergedHeaders,
+        signal,
+      });
+    } catch (err) {
+      // Surface the URL on failure so the user can manually retry it
+      // and compare against the SW's error. Redacts signing params.
+      log.warn('progressive fetch failed', {
+        requestId,
+        url: redactUrl(variantUrl),
+        err: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
 
     signal?.throwIfAborted();
 
