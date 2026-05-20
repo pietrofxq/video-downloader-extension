@@ -57,6 +57,41 @@ function seedTabs(): Promise<void> {
   return seedPromise;
 }
 seedTabs();
+// Restore in-flight + queued download state from chrome.storage.session
+// so a SW respawn during an active download doesn't lose the popup UI.
+// Fire-and-forget; the next DOWNLOAD_PROGRESS message from the
+// long-lived offscreen will patch the restored state forward.
+void restoreDownloadState();
+
+async function restoreDownloadState(): Promise<void> {
+  try {
+    const got = await chrome.storage.session.get([DOWNLOAD_STATES_KEY, DOWNLOAD_QUEUE_KEY]);
+    const persistedStates = got[DOWNLOAD_STATES_KEY];
+    if (persistedStates && typeof persistedStates === 'object') {
+      for (const [id, state] of Object.entries(persistedStates as Record<string, DownloadState>)) {
+        downloadStates.set(id, state);
+        // Re-derive activeRequestId from the restored states. There can
+        // only be one in-flight slot (queue discipline guarantees it).
+        if (state.status === 'pending' || state.status === 'progress') {
+          activeRequestId = id;
+        }
+      }
+    }
+    const persistedQueue = got[DOWNLOAD_QUEUE_KEY];
+    if (Array.isArray(persistedQueue)) {
+      downloadQueue.push(...(persistedQueue as RunPayload[]));
+    }
+    if (downloadStates.size > 0 || downloadQueue.length > 0) {
+      log.info('restored download state', {
+        states: downloadStates.size,
+        queued: downloadQueue.length,
+        active: activeRequestId,
+      });
+    }
+  } catch (err) {
+    log.warn('restore download state failed', err);
+  }
+}
 
 // ---------- Tab lifecycle ----------
 
@@ -582,6 +617,7 @@ function enqueueOrStart(run: RunPayload): void {
   // Someone's already downloading. Park this one behind them.
   setDownloadState(run.requestId, { status: 'queued' });
   downloadQueue.push(run);
+  void persistDownloadQueue();
 }
 
 function runInOffscreen(run: RunPayload): void {
@@ -599,7 +635,10 @@ function advanceQueue(finishedRequestId: string): void {
   if (activeRequestId !== finishedRequestId) return;
   activeRequestId = null;
   const next = downloadQueue.shift();
-  if (!next) return;
+  if (!next) {
+    void persistDownloadQueue();
+    return;
+  }
   activeRequestId = next.requestId;
   // Promote 'queued' → 'pending' so the popup row repaints with the
   // initial progress UI before the offscreen's first DOWNLOAD_PROGRESS
@@ -611,6 +650,7 @@ function advanceQueue(finishedRequestId: string): void {
     total: 0,
   });
   runInOffscreen(next);
+  void persistDownloadQueue();
 }
 
 interface ProxyFetchPayload {
@@ -657,11 +697,35 @@ async function handleProxyFetch({
 //
 // Created when handleStartDownload accepts the request, updated on
 // every offscreen → SW progress / done / error message, then pushed to
-// any popup ports subscribed to the matching tab. The Map lives only in
-// memory — fine because the SW stays warm while a download runs (the
-// offscreen sends a progress message per segment) and because losing
-// the state on SW restart is a cosmetic issue, not a correctness one.
+// any popup ports subscribed to the matching tab. Mirrored to
+// chrome.storage.session (in-memory but survives SW restart) so a
+// killed worker can resume reporting state without losing in-flight
+// download UI. The offscreen document outlives the SW, so its
+// DOWNLOAD_PROGRESS messages land on the new SW and patch the
+// restored state normally.
 const downloadStates = new Map<string, DownloadState>();
+
+const DOWNLOAD_STATES_KEY = 'downloadStates';
+const DOWNLOAD_QUEUE_KEY = 'downloadQueue';
+
+async function persistDownloadStates(): Promise<void> {
+  try {
+    const states: Record<string, DownloadState> = {};
+    for (const [id, s] of downloadStates) states[id] = s;
+    await chrome.storage.session.set({ [DOWNLOAD_STATES_KEY]: states });
+  } catch {
+    // session storage momentarily unavailable; the next state change
+    // will retry.
+  }
+}
+
+async function persistDownloadQueue(): Promise<void> {
+  try {
+    await chrome.storage.session.set({ [DOWNLOAD_QUEUE_KEY]: downloadQueue });
+  } catch {
+    // see persistDownloadStates
+  }
+}
 
 function setDownloadState(requestId: string, patch: Partial<DownloadState>): DownloadState | null {
   const prev = downloadStates.get(requestId);
@@ -669,6 +733,7 @@ function setDownloadState(requestId: string, patch: Partial<DownloadState>): Dow
   const next: DownloadState = { ...prev, ...patch, updatedAt: Date.now() };
   downloadStates.set(requestId, next);
   broadcastDownloadState(next);
+  void persistDownloadStates();
   return next;
 }
 
@@ -730,7 +795,10 @@ function cancelDownload(requestId: string): void {
   // started it, so there's nothing to abort.
   if (state.status === 'queued') {
     const idx = downloadQueue.findIndex((r) => r.requestId === requestId);
-    if (idx !== -1) downloadQueue.splice(idx, 1);
+    if (idx !== -1) {
+      downloadQueue.splice(idx, 1);
+      void persistDownloadQueue();
+    }
     setDownloadState(requestId, {
       status: 'canceled',
       errorCode: 'Canceled',
@@ -799,14 +867,24 @@ async function handleDownloadDone(payload: unknown): Promise<void> {
 }
 
 function clearDownloadStatesForTab(tabId: number): void {
+  let stateMutated = false;
   for (const [requestId, state] of downloadStates) {
-    if (state.tabId === tabId) downloadStates.delete(requestId);
+    if (state.tabId === tabId) {
+      downloadStates.delete(requestId);
+      stateMutated = true;
+    }
   }
   // Also drop any queued runs for this tab so they don't fire later;
   // their state entries are already gone above.
+  let queueMutated = false;
   for (let i = downloadQueue.length - 1; i >= 0; i -= 1) {
-    if (downloadQueue[i].tabId === tabId) downloadQueue.splice(i, 1);
+    if (downloadQueue[i].tabId === tabId) {
+      downloadQueue.splice(i, 1);
+      queueMutated = true;
+    }
   }
+  if (stateMutated) void persistDownloadStates();
+  if (queueMutated) void persistDownloadQueue();
 }
 
 // Drop any cached DownloadState for this mediaId across all tabs and
@@ -814,20 +892,28 @@ function clearDownloadStatesForTab(tabId: number): void {
 // picker UI. Wired to the "Download again" / "Try again" buttons.
 function dismissDownloadStatesForMedia(mediaId: string): void {
   const dismissedTabIds = new Set<number>();
+  let stateMutated = false;
   for (const [requestId, state] of downloadStates) {
     if (state.mediaId === mediaId) {
       downloadStates.delete(requestId);
       dismissedTabIds.add(state.tabId);
+      stateMutated = true;
     }
   }
   // If a queued run for this mediaId hasn't started yet, drop it too —
   // otherwise the dismiss would clear the visible state while the run
   // fires later and re-creates a new entry.
+  let queueMutated = false;
   for (let i = downloadQueue.length - 1; i >= 0; i -= 1) {
     const run = downloadQueue[i];
     const state = downloadStates.get(run.requestId);
-    if (!state || state.mediaId === mediaId) downloadQueue.splice(i, 1);
+    if (!state || state.mediaId === mediaId) {
+      downloadQueue.splice(i, 1);
+      queueMutated = true;
+    }
   }
+  if (stateMutated) void persistDownloadStates();
+  if (queueMutated) void persistDownloadQueue();
   if (dismissedTabIds.size === 0) return;
   for (const [port, info] of popupPorts) {
     if (info.tabId !== null && dismissedTabIds.has(info.tabId)) {
