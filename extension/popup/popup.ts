@@ -1,6 +1,7 @@
 import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { log, redactUrl } from '../lib/log.js';
+import { classifyUrl } from '../lib/media-detection.js';
 import { MSG, parsePortMessageFromSW } from '../lib/messages.js';
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
@@ -165,13 +166,33 @@ function formatVariant(v: HlsVariant): string {
   return resPart || bwPart || 'variant';
 }
 
+// Variants whose URL classifies as `dash` are rejected by the offscreen
+// dispatch until v0.11.1 lands the fMP4 two-track combine muxer.
+// Surface them in the picker (so users see the full inventory) but
+// label them clearly + push them to the back so the browser's default
+// option is something that actually downloads.
+function isVariantDownloadable(v: HlsVariant): boolean {
+  return classifyUrl(v.url) !== 'dash';
+}
+
 function qualityOptionsHtml(entry: MediaEntry): string {
   if (entry.parseError) {
     return '<option value="auto">Manifest unavailable</option>';
   }
   if (Array.isArray(entry.variants) && entry.variants.length > 0) {
-    return entry.variants
-      .map((v) => `<option value="${escapeHtml(v.url)}">${escapeHtml(formatVariant(v))}</option>`)
+    const decorated = entry.variants.map((v) => ({
+      v,
+      ok: isVariantDownloadable(v),
+    }));
+    // Supported variants first so the default <option> is one the
+    // download dispatch accepts. Within each group the existing
+    // bandwidth-descending order is preserved (stable sort).
+    decorated.sort((a, b) => Number(b.ok) - Number(a.ok));
+    return decorated
+      .map(({ v, ok }) => {
+        const label = ok ? formatVariant(v) : `${formatVariant(v)} — HD (v0.11.1)`;
+        return `<option value="${escapeHtml(v.url)}">${escapeHtml(label)}</option>`;
+      })
       .join('');
   }
   if (entry.isMaster === false) {
