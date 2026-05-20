@@ -1,6 +1,8 @@
 import { MSG, parseExtensionMessage } from '../lib/messages.js';
 import { log, redactUrl } from '../lib/log.js';
-import { downloadHlsAsTs } from './downloader.js';
+import { UnsupportedFormatError } from '../lib/errors.js';
+import { downloadHlsAsTs, type DownloadResult } from './downloader.js';
+import { downloadProgressive } from './progressive.js';
 import { OpfsWorkspace } from './storage.js';
 import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
 
@@ -112,7 +114,7 @@ async function handleDownload(req: DownloadRequest): Promise<DownloadOutcome> {
   abortControllers.set(req.requestId, ctrl);
 
   try {
-    const result = await downloadHlsAsTs({ proxyFetch, onProgress, signal: ctrl.signal }, req);
+    const result = await dispatchDownload({ proxyFetch, onProgress, signal: ctrl.signal }, req);
     // Register the workspace cleanup against the blob URL. REVOKE_BLOB
     // arrives once chrome.downloads has finished reading the file (or
     // immediately, if the SW suppressed the save because the user
@@ -153,6 +155,38 @@ async function handleDownload(req: DownloadRequest): Promise<DownloadOutcome> {
     throw err;
   } finally {
     abortControllers.delete(req.requestId);
+  }
+}
+
+// Route to the right downloader for the entry's media kind. The SW
+// passes the kind through from MediaEntry.kind so the offscreen
+// doesn't have to guess at format from a URL.
+function dispatchDownload(
+  io: Parameters<typeof downloadHlsAsTs>[0],
+  req: DownloadRequest,
+): Promise<DownloadResult> {
+  switch (req.kind) {
+    case 'hls':
+      return downloadHlsAsTs(io, req);
+    case 'progressive':
+      return downloadProgressive({ onProgress: io.onProgress, signal: io.signal }, req);
+    case 'dash':
+      // Adaptive HD path (separate video + audio fMP4 muxed into one
+      // MP4) ships in a follow-up commit; until then, fail loud rather
+      // than silently route to the HLS pipeline.
+      return Promise.reject(
+        new UnsupportedFormatError(
+          'DASH / YouTube-adaptive downloads land in a follow-up v0.11 commit.',
+        ),
+      );
+    default: {
+      // Compile-time exhaustiveness: extending MediaKind without
+      // updating this switch is a type error.
+      const _exhaustive: never = req.kind;
+      return Promise.reject(
+        new UnsupportedFormatError(`unknown download kind: ${String(_exhaustive)}`),
+      );
+    }
   }
 }
 

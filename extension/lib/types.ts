@@ -103,6 +103,12 @@ export interface ParsedHlsManifest {
 
 export interface DownloadRequest {
   requestId: string;
+  /**
+   * Media format the downloader should use. The offscreen dispatches on
+   * this to pick between the HLS pipeline, progressive single-stream
+   * download, and the DASH/adaptive path. Comes from MediaEntry.kind.
+   */
+  kind: MediaKind;
   /** Chosen variant playlist URL (or media playlist for single-bitrate). */
   variantUrl: string;
   tabId: number;

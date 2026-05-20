@@ -715,9 +715,10 @@ async function handleStartDownload(payload: {
   }
   if (!entry || entryTabId === null) throw new Error(`unknown mediaId: ${mediaId}`);
 
-  if (entry.kind !== 'hls') {
-    throw new Error(`v0.6 supports HLS only; this entry is ${entry.kind}`);
-  }
+  // v0.6–v0.10 supported HLS only. v0.11 adds progressive (YouTube
+  // itag=18/22) and routes DASH-tagged entries through the adaptive
+  // path (also v0.11). The offscreen dispatches on `kind` and throws a
+  // typed UnsupportedFormatError for anything still un-implemented.
 
   const adapter = getAdapter(entry.adapterId);
   const meta = entry.meta ?? {};
@@ -739,6 +740,7 @@ async function handleStartDownload(payload: {
 
   const runPayload: RunPayload = {
     requestId,
+    kind: entry.kind,
     variantUrl: finalVariantUrl,
     tabId: entryTabId,
     frameId: entry.frameId ?? 0,
@@ -792,6 +794,7 @@ async function handleStartDownload(payload: {
 
 interface RunPayload {
   requestId: string;
+  kind: MediaEntry['kind'];
   variantUrl: string;
   tabId: number;
   frameId: number;
