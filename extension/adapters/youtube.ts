@@ -36,17 +36,124 @@ function stripYouTubeSuffix(title: string): string {
   return title.replace(/\s+-\s+YouTube\s*$/i, '').trim();
 }
 
+/**
+ * Walk a JSON object literal starting at `text[start]` (which must be
+ * `{`). Returns the JSON substring including the closing brace, or null
+ * if the structure is malformed. Used to extract YouTube's inline JSON
+ * blobs out of `<script>` bodies without involving Function() / eval.
+ */
+function extractJsonObject(text: string, start: number): string | null {
+  if (text[start] !== '{') return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+// Shape we care about from ytInitialPlayerResponse. Keep this narrow —
+// YouTube rotates field names occasionally, and the strict shape limits
+// the blast radius when something moves. Untouched fields can stay
+// untyped (`unknown`).
+export interface YtPlayerResponse {
+  videoDetails?: {
+    videoId?: string;
+    title?: string;
+    author?: string;
+    lengthSeconds?: string;
+  };
+  microformat?: {
+    playerMicroformatRenderer?: {
+      ownerChannelName?: string;
+    };
+  };
+}
+
+/**
+ * Extract ytInitialPlayerResponse from a single inline-script body.
+ * YouTube embeds the blob as either `var ytInitialPlayerResponse = {...};`
+ * or `window["ytInitialPlayerResponse"] = {...};`. Returns null when the
+ * needle isn't in this body — caller iterates scripts until one matches.
+ *
+ * Exported so unit tests can verify the extraction against captured
+ * script text without spinning up a DOM.
+ */
+export function parseYtPlayerResponseFromScript(scriptText: string): YtPlayerResponse | null {
+  const needle = scriptText.indexOf('ytInitialPlayerResponse');
+  if (needle < 0) return null;
+  const braceAt = scriptText.indexOf('{', needle);
+  if (braceAt < 0) return null;
+  const json = extractJsonObject(scriptText, braceAt);
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as YtPlayerResponse;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Walk inline `<script>` elements until one yields a parseable
+ * ytInitialPlayerResponse. The content script runs in an isolated world
+ * so `window.ytInitialPlayerResponse` from the page itself is not
+ * visible — we scrape the script text instead. Returns null when the
+ * blob is absent (embed pages without a player payload, network errors
+ * mid-render, etc.); the adapter falls back to og:meta in that case.
+ */
+function parseYtPlayerResponse(doc: Document): YtPlayerResponse | null {
+  const scripts = doc.querySelectorAll('script');
+  for (const s of scripts) {
+    const parsed = parseYtPlayerResponseFromScript(s.textContent ?? '');
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
 function scrapeYouTubeMeta(doc: Document): PageMeta {
   const og = (prop: string): string | null =>
     doc.querySelector(`meta[property="${prop}"]`)?.getAttribute('content') ?? null;
   const ogTitle = og('og:title');
   const docTitle = doc.title ? stripYouTubeSuffix(doc.title) : '';
+
+  // Prefer the player JSON when present — it carries the canonical
+  // title, the channel/owner name, and the videoId without the
+  // ambiguity of localized title suffixes.
+  const player = parseYtPlayerResponse(doc);
+  const videoDetails = player?.videoDetails ?? {};
+  const microformat = player?.microformat?.playerMicroformatRenderer ?? {};
+
+  const title = videoDetails.title || ogTitle || docTitle || '';
+  const channelTitle = videoDetails.author || microformat.ownerChannelName || '';
+  const videoId = videoDetails.videoId || '';
+
   return {
-    title: ogTitle || docTitle || '',
+    title,
     ogTitle,
     ogVideoTitle: og('og:video:title'),
     ogDescription: og('og:description'),
     ogSiteName: og('og:site_name') ?? 'YouTube',
+    ...(channelTitle ? { channelTitle } : {}),
+    ...(videoId ? { videoId } : {}),
   };
 }
 
@@ -74,10 +181,12 @@ const youtubeAdapter: Adapter = {
     return () => observer.disconnect();
   },
   deriveFilename({ pageMeta }) {
-    // Subsequent commits will enrich this with channelTitle ("{channel}
-    // - {video}") once discoverStreams + the catalog scrape lands. For
-    // the stub, just the video title gets us a reasonable name.
-    const raw = pageMeta?.title || pageMeta?.ogTitle || '';
+    const title = pageMeta?.title || pageMeta?.ogTitle || '';
+    const channel = pageMeta?.channelTitle || '';
+    // Prefix with the channel so files from the same creator group
+    // lexicographically in the user's downloads folder. Skip the prefix
+    // when channel is missing rather than emitting a leading " - ".
+    const raw = channel && title ? `${channel} - ${title}` : title;
     return sanitizeFilename(raw, { fallback: 'youtube-video' });
   },
 };

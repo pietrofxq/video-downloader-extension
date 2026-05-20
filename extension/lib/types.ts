@@ -17,6 +17,15 @@ export interface PageMeta {
   sectionTitle?: string;
   /** Site-supplied filename hint (e.g. Hotmart's iframe `cur` param). */
   filenameHint?: string;
+  /**
+   * Publisher / uploader name. YouTube populates this from the channel;
+   * other adapters with a clear "creator" concept can too. The downloader
+   * uses it to prefix filenames so a user grabbing a series ends up with
+   * files that group lexicographically.
+   */
+  channelTitle?: string;
+  /** Platform-stable identifier for the video. YouTube videoId. */
+  videoId?: string;
   ogTitle?: string | null;
   ogVideoTitle?: string | null;
   ogDescription?: string | null;

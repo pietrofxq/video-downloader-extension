@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { pickAdapter, getAdapter, ADAPTERS } from './index.js';
 import hotmart from './hotmart.js';
-import youtube from './youtube.js';
+import youtube, { parseYtPlayerResponseFromScript } from './youtube.js';
 import defaultAdapter from './default.js';
 
 describe('pickAdapter', () => {
@@ -75,7 +75,25 @@ describe('youtube.matches', () => {
 });
 
 describe('youtube.deriveFilename', () => {
-  it('uses ogTitle / title and sanitizes', () => {
+  it('prefixes channel when both channelTitle and title present', () => {
+    expect(
+      youtube.deriveFilename({
+        url: '',
+        pageMeta: { title: 'Some Video', channelTitle: 'A Channel' },
+      }),
+    ).toBe('A Channel - Some Video');
+  });
+
+  it('uses just the title when channelTitle is missing', () => {
+    expect(
+      youtube.deriveFilename({
+        url: '',
+        pageMeta: { title: 'Some Video' },
+      }),
+    ).toBe('Some Video');
+  });
+
+  it('sanitizes illegal characters', () => {
     expect(
       youtube.deriveFilename({
         url: '',
@@ -86,6 +104,42 @@ describe('youtube.deriveFilename', () => {
 
   it('falls back to the stub default when meta is empty', () => {
     expect(youtube.deriveFilename({ url: '', pageMeta: {} })).toBe('youtube-video');
+  });
+});
+
+describe('parseYtPlayerResponseFromScript', () => {
+  const sample = `
+    var foo = 1;
+    var ytInitialPlayerResponse = {"videoDetails":{"videoId":"abc","title":"Hello \\"World\\"","author":"A Channel","lengthSeconds":"42"},"microformat":{"playerMicroformatRenderer":{"ownerChannelName":"A Channel"}}};
+    (function() {})();
+  `;
+
+  it('extracts videoDetails from a typical YouTube watch-page script', () => {
+    const parsed = parseYtPlayerResponseFromScript(sample);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.videoDetails?.videoId).toBe('abc');
+    expect(parsed?.videoDetails?.author).toBe('A Channel');
+    expect(parsed?.videoDetails?.title).toBe('Hello "World"');
+  });
+
+  it('handles the window["..."] = {...} form', () => {
+    const text = `window["ytInitialPlayerResponse"] = {"videoDetails":{"videoId":"xyz"}};`;
+    expect(parseYtPlayerResponseFromScript(text)?.videoDetails?.videoId).toBe('xyz');
+  });
+
+  it('returns null when the needle is absent', () => {
+    expect(parseYtPlayerResponseFromScript('var something = {"a": 1};')).toBeNull();
+  });
+
+  it('returns null when the JSON is malformed', () => {
+    // Truncated payload — the brace walker still finds a close, but JSON
+    // parse fails on the bad string literal.
+    expect(parseYtPlayerResponseFromScript('ytInitialPlayerResponse = {"a": "broken}')).toBeNull();
+  });
+
+  it('handles escaped quotes inside strings without confusing the bracket walker', () => {
+    const text = `ytInitialPlayerResponse = {"videoDetails":{"title":"a } and a { inside"}};`;
+    expect(parseYtPlayerResponseFromScript(text)?.videoDetails?.title).toBe('a } and a { inside');
   });
 });
 
