@@ -833,6 +833,8 @@ async function handleStartDownload(payload: {
     frameId: entry.frameId ?? 0,
     adapter: entry.adapterId,
     filename: `${filename}.mp4`,
+    kind: downloadKind,
+    hasPlayerJsUrl: !!entry.playerJsUrl,
     queued: activeRequestId !== requestId,
   });
   return { requestId, filename: `${filename}.mp4` };

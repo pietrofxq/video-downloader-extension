@@ -156,29 +156,56 @@ function parseYtPlayerResponse(doc: Document): YtPlayerResponse | null {
 }
 
 /**
- * Find the player `base.js` URL on the page. YouTube serves it from
- * `/s/player/<HASH>/player_ias.vflset/<LOCALE>/base.js` (sometimes
- * `player_ias_tce.vflset` on newer builds). The HASH rotates roughly
- * every few weeks; the offscreen n-param solver caches the compiled
- * function keyed by the URL so the solver rebuilds when YouTube
- * deploys a new player.
+ * Find the player `base.js` URL on the page. YouTube has shipped
+ * several path shapes over the years; we try them in order:
  *
- * Exported so tests can verify the regex against captured HTML
- * fixtures without spinning up a DOM.
+ *   1. ytcfg.set({"PLAYER_JS_URL": "/s/player/.../base.js"}) inline
+ *      — most reliable; YouTube always sets this when it ships a
+ *      player. Survives DOM mutations that swap out script tags.
+ *   2. `<script src=".../base.js">` matching `/player/.../vflset/.../base.js`
+ *      — generic player.js path shape, covers `player_ias`,
+ *      `player_ias_tce`, `player-plasma-ias-*` and future variants.
+ *   3. Any `<script>` whose `src` ends in `/base.js` under
+ *      youtube.com — last-resort fallback so we at least try
+ *      something on builds that move the script entirely.
+ *
+ * Returns an absolute URL. Exported so tests can verify against
+ * captured HTML fixtures without spinning up a DOM.
  */
 export function extractPlayerJsUrlFromScripts(doc: Document): string | null {
-  const els = doc.querySelectorAll<HTMLScriptElement>('script[src*="base.js"]');
-  for (const el of els) {
+  const resolve = (href: string): string => {
+    try {
+      return new URL(href, doc.baseURI || 'https://www.youtube.com/').href;
+    } catch {
+      return href;
+    }
+  };
+
+  // Strategy 1: ytcfg's PLAYER_JS_URL — the canonical source.
+  for (const s of doc.querySelectorAll('script')) {
+    const t = s.textContent ?? '';
+    if (!t.includes('PLAYER_JS_URL')) continue;
+    const m = t.match(/"PLAYER_JS_URL"\s*:\s*"([^"]+)"/);
+    if (m && m[1]) return resolve(m[1]);
+  }
+
+  // Strategy 2: <script src=".../vflset/.../base.js">. Use a tolerant
+  // path shape — match anything that LOOKS like the player JS by
+  // ending in /base.js under a /player/ prefix.
+  const VFLSET_RE = /\/player\/[^/]+\/[^/]+\.vflset\/[^/]+\/base\.js/;
+  for (const el of doc.querySelectorAll<HTMLScriptElement>('script[src*="base.js"]')) {
     const src = el.getAttribute('src');
     if (!src) continue;
-    if (!/\/player\/[^/]+\/(?:player_ias[_a-z]*\.vflset)\/[^/]+\/base\.js/.test(src)) continue;
-    // Resolve relative URLs against the document.
-    try {
-      return new URL(src, doc.baseURI).href;
-    } catch {
-      return src;
-    }
+    if (VFLSET_RE.test(src)) return resolve(src);
   }
+
+  // Strategy 3: any script whose src ends in /base.js. Last resort.
+  for (const el of doc.querySelectorAll<HTMLScriptElement>('script[src*="base.js"]')) {
+    const src = el.getAttribute('src');
+    if (!src) continue;
+    if (/\/base\.js(?:\?|$)/.test(src)) return resolve(src);
+  }
+
   return null;
 }
 
@@ -294,6 +321,7 @@ export function buildStreamsFromPlayerResponse(
     progressive: progressiveFormats.map(summarize),
     adaptive: adaptiveFormats.map(summarize),
     defaultAudio: defaultAudio ? summarize(defaultAudio) : null,
+    playerJsUrl: opts.playerJsUrl ?? null,
   });
 
   const variants: HlsVariant[] = [];
