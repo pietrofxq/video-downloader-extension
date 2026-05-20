@@ -47,6 +47,13 @@ export interface MediaEntry {
   meta?: PageMeta;
   /** True if the manifest's encryption can't be handled (set by adapters / DASH). */
   drm?: boolean;
+  /**
+   * URL of the platform player JS bundle that contains the URL-
+   * signing / n-param transform functions. YouTube sets this to the
+   * `base.js` referenced from the watch page. Adapter-supplied;
+   * unused by HLS / DASH / Hotmart entries.
+   */
+  playerJsUrl?: string;
 
   // Populated after manifest parsing for HLS entries:
   isMaster?: boolean;
@@ -129,6 +136,13 @@ export interface DownloadRequest {
   headers?: Record<string, string>;
   /** Sanitized base name (no extension); orchestrator appends `.mp4`. */
   filename: string;
+  /**
+   * Platform player JS URL for URL-signing transforms (YouTube's
+   * n-param solver). Forwarded from MediaEntry.playerJsUrl. The
+   * downloader feeds it to the appropriate signing module before
+   * fetching segment URLs.
+   */
+  playerJsUrl?: string;
 }
 
 export interface DownloadOutcome {
@@ -227,6 +241,8 @@ export interface DiscoveredStream {
    * internally for the adaptive HD path.
    */
   variants?: HlsVariant[];
+  /** See MediaEntry.playerJsUrl. */
+  playerJsUrl?: string;
 }
 
 /**

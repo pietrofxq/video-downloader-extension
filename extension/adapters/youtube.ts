@@ -155,6 +155,33 @@ function parseYtPlayerResponse(doc: Document): YtPlayerResponse | null {
   return null;
 }
 
+/**
+ * Find the player `base.js` URL on the page. YouTube serves it from
+ * `/s/player/<HASH>/player_ias.vflset/<LOCALE>/base.js` (sometimes
+ * `player_ias_tce.vflset` on newer builds). The HASH rotates roughly
+ * every few weeks; the offscreen n-param solver caches the compiled
+ * function keyed by the URL so the solver rebuilds when YouTube
+ * deploys a new player.
+ *
+ * Exported so tests can verify the regex against captured HTML
+ * fixtures without spinning up a DOM.
+ */
+export function extractPlayerJsUrlFromScripts(doc: Document): string | null {
+  const els = doc.querySelectorAll<HTMLScriptElement>('script[src*="base.js"]');
+  for (const el of els) {
+    const src = el.getAttribute('src');
+    if (!src) continue;
+    if (!/\/player\/[^/]+\/(?:player_ias[_a-z]*\.vflset)\/[^/]+\/base\.js/.test(src)) continue;
+    // Resolve relative URLs against the document.
+    try {
+      return new URL(src, doc.baseURI).href;
+    } catch {
+      return src;
+    }
+  }
+  return null;
+}
+
 // Bitrate fallback for older / minified `streamingData` payloads that
 // drop `bitrate`. Keeps the size estimator from going to zero on streams
 // that only carry width/height.
@@ -235,6 +262,7 @@ function pickDefaultAudioFormat(adaptiveFormats: YtFormat[]): YtFormat | undefin
  */
 export function buildStreamsFromPlayerResponse(
   player: YtPlayerResponse | null,
+  opts: { playerJsUrl?: string } = {},
 ): DiscoveredStream[] {
   if (!player) return [];
 
@@ -304,6 +332,7 @@ export function buildStreamsFromPlayerResponse(
       kind: 'dash',
       ...(lengthSecs > 0 ? { totalDuration: lengthSecs } : {}),
       variants,
+      ...(opts.playerJsUrl ? { playerJsUrl: opts.playerJsUrl } : {}),
     },
   ];
 }
@@ -361,7 +390,8 @@ const youtubeAdapter: Adapter = {
   },
   discoverStreams(doc) {
     const player = parseYtPlayerResponse(doc);
-    return buildStreamsFromPlayerResponse(player);
+    const playerJsUrl = extractPlayerJsUrlFromScripts(doc) ?? undefined;
+    return buildStreamsFromPlayerResponse(player, { playerJsUrl });
   },
   deriveFilename({ pageMeta }) {
     const title = pageMeta?.title || pageMeta?.ogTitle || '';
