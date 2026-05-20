@@ -8,9 +8,26 @@
   <body>
     <header class="header">
       <h1>Video Downloader</h1>
-      <button type="button" class="gear" id="open-options" title="Settings" aria-label="Settings">
-        &#9881;
-      </button>
+      <div class="header-actions">
+        <button
+          type="button"
+          class="header-btn"
+          id="reset-tab"
+          title="Reset detected videos"
+          aria-label="Reset detected videos"
+        >
+          &#x21ba;
+        </button>
+        <button
+          type="button"
+          class="header-btn"
+          id="open-options"
+          title="Settings"
+          aria-label="Settings"
+        >
+          &#9881;
+        </button>
+      </div>
     </header>
     <main id="content"></main>
     <!-- v0.9 (subtitle support) will re-add a footer with a real

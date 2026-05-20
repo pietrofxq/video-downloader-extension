@@ -7,8 +7,23 @@ import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../li
 
 const $content = document.getElementById('content')!;
 const $gear = document.getElementById('open-options');
+const $reset = document.getElementById('reset-tab');
 
 $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
+
+// Reset clears the SW-side tab state for the active tab. The SW pushes
+// the resulting empty STATE through the popup port, so the row list
+// blanks out and the badge clears. PageMeta is preserved on the SW
+// side, so any newly-detected videos still get titled correctly.
+$reset?.addEventListener('click', async () => {
+  const tabId = await activeTabId();
+  if (tabId == null) return;
+  try {
+    await chrome.runtime.sendMessage({ type: MSG.RESET_TAB, payload: { tabId } });
+  } catch (err) {
+    log.warn('[VDL] reset failed', err);
+  }
+});
 
 // ---------- helpers ----------
 
@@ -98,6 +113,22 @@ function resolveDurationSeconds(entry: MediaEntry, variantUrl: string | undefine
     for (const e of entriesById.values()) {
       if (e.url === variantUrl && e.totalDuration && e.totalDuration > 0) {
         return e.totalDuration;
+      }
+    }
+  }
+  // Last resort: duration is identical across HLS variants of the same
+  // content (alternate encodings of the same video), so any sibling
+  // variant's parsed duration is a valid fallback. Without this, the
+  // size estimate blanks out as soon as the user picks a quality the
+  // browser hasn't played — only the currently-playing variant's media
+  // playlist gets fetched, so 240p / 360p stay duration-less until the
+  // user actually downloads them.
+  if (Array.isArray(entry.variants)) {
+    for (const v of entry.variants) {
+      for (const e of entriesById.values()) {
+        if (e.url === v.url && e.totalDuration && e.totalDuration > 0) {
+          return e.totalDuration;
+        }
       }
     }
   }
@@ -232,15 +263,13 @@ function renderActionForDownload(state: DownloadState): string {
   }
   // pending / progress. `current/total` is now weighted-unit progress
   // (monotonic across fetch → decrypt → remux) so it drives the bar
-  // without resetting at stage boundaries; the "segment X/Y" counter
-  // pulls from segmentCurrent/segmentTotal which are per-stage.
+  // without resetting at stage boundaries. The label shows just the
+  // current stage — the per-stage segment counter is intentionally
+  // omitted so the bar stays calm.
   const total = state.total > 0 ? state.total : 0;
   const current = state.current > 0 ? state.current : 0;
   const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
-  const segTotal = state.segmentTotal && state.segmentTotal > 0 ? state.segmentTotal : 0;
-  const segCurrent = state.segmentCurrent && state.segmentCurrent > 0 ? state.segmentCurrent : 0;
-  const counter = segTotal > 0 ? `segment ${segCurrent}/${segTotal}` : '';
-  const label = [stageLabel(state.stage), counter].filter(Boolean).join(' · ');
+  const label = stageLabel(state.stage);
   return `
     <div class="download-progress" role="progressbar"
          aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
@@ -294,27 +323,32 @@ function renderRow(entry: MediaEntry): string {
 
   // Best-effort duration / size — only known once a media playlist has
   // been parsed. The popup keeps both as separate badges so future
-  // additions (codec, etc.) can slot in alongside.
+  // additions (codec, etc.) can slot in alongside. Size is computed
+  // per-variant from BANDWIDTH × duration; the change handler below
+  // patches it when the user picks a different quality.
   const defaultVariantUrl =
     entry.isMaster === false ? entry.url : (entry.variants?.[0]?.url ?? entry.url);
   const dur = resolveDurationSeconds(entry, defaultVariantUrl);
   const size = resolveSizeBytes(entry, defaultVariantUrl);
-  const stats: string[] = [];
-  const durLabel = formatDuration(dur);
-  if (durLabel) stats.push(durLabel);
-  const sizeLabel = formatSize(size);
-  if (sizeLabel) stats.push(`~${sizeLabel}`);
   const metaParts: string[] = [];
-  for (const s of stats) metaParts.push(`<span class="stat">${escapeHtml(s)}</span>`);
+  const durLabel = formatDuration(dur);
+  if (durLabel) metaParts.push(`<span class="stat">${escapeHtml(durLabel)}</span>`);
+  const sizeLabel = formatSize(size);
+  if (sizeLabel) {
+    metaParts.push(`<span class="stat stat-size">~${escapeHtml(sizeLabel)}</span>`);
+  }
   for (const b of badges) metaParts.push(`<span class="badge">${escapeHtml(b)}</span>`);
   const metaHtml = metaParts.join(' &middot; ');
 
   // Editable filename — pre-filled with the adapter-derived name; the
   // download click reads the input's value and sanitizes it server-side.
   // Locked into a read-only static label once the download starts so the
-  // user can still see what was saved.
+  // user can still see what was saved. The locked label uses the SW's
+  // resolved filename (which honors the user's edit) rather than the
+  // adapter default, so an edited name doesn't visually revert at click.
+  const lockedFilename = downloadState?.filename?.replace(/\.mp4$/, '') || defaultFilename;
   const filenameField = downloadState
-    ? `<div class="filename-static" title="${escapeHtml(defaultFilename)}">${escapeHtml(defaultFilename)}</div>`
+    ? `<div class="filename-static" title="${escapeHtml(lockedFilename)}">${escapeHtml(lockedFilename)}</div>`
     : `<input type="text" class="filename-input" spellcheck="false" autocomplete="off"
          aria-label="Filename" value="${escapeHtml(defaultFilename)}"
          data-default="${escapeHtml(defaultFilename)}" />`;
@@ -445,11 +479,7 @@ function applyDownloadState(state: DownloadState): void {
       const total = state.total > 0 ? state.total : 0;
       const current = state.current > 0 ? state.current : 0;
       const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
-      const segTotal = state.segmentTotal && state.segmentTotal > 0 ? state.segmentTotal : 0;
-      const segCurrent =
-        state.segmentCurrent && state.segmentCurrent > 0 ? state.segmentCurrent : 0;
-      const counter = segTotal > 0 ? `segment ${segCurrent}/${segTotal}` : '';
-      const lbl = [stageLabel(state.stage), counter].filter(Boolean).join(' · ');
+      const lbl = stageLabel(state.stage);
       fill.style.width = `${pct}%`;
       label.textContent = `${pct}% · ${lbl}`;
       // aria-valuenow belongs on the role="progressbar" element, not on
@@ -479,6 +509,35 @@ function cancelDownload(requestId: string): void {
   // requestId is the canonical key and we want the SW's view to win.
   chrome.runtime.sendMessage({ type: MSG.CANCEL_DOWNLOAD, payload: { requestId } }).catch(() => {});
 }
+
+// Delegated change listener for the quality picker. Recomputes the
+// estimated file size from the picked variant's BANDWIDTH × duration
+// and patches the row's `.stat-size` text in place. No re-render — the
+// filename input + hover state stay intact.
+$content.addEventListener('change', (e: Event) => {
+  const target = e.target as HTMLElement | null;
+  const sel = target?.closest<HTMLSelectElement>('.quality');
+  if (!sel) return;
+  const row = sel.closest<HTMLElement>('.row');
+  const id = row?.dataset.mediaId;
+  if (!id) return;
+  const entry = entriesById.get(id);
+  if (!entry) return;
+  const chosen = sel.value;
+  const variantUrl = /^https?:/.test(chosen) ? chosen : entry.url;
+  const dur = resolveDurationSeconds(entry, variantUrl);
+  const bytes = resolveSizeBytes(entry, variantUrl);
+  const sizeStat = row?.querySelector<HTMLElement>('.stat-size');
+  if (!sizeStat) return;
+  if (bytes > 0 && dur > 0) {
+    sizeStat.textContent = `~${formatSize(bytes)}`;
+  } else {
+    // Some master playlists declare BANDWIDTH on every variant except
+    // one (e.g. an audio-only fallback). Clear the badge so we don't
+    // show a stale figure from the previously-chosen variant.
+    sizeStat.textContent = '';
+  }
+});
 
 // Single delegated click listener — no per-button wiring, no reliance on
 // "the latest render's array reference". Lookup via the Map for O(1).

@@ -90,7 +90,13 @@ body {
   color: var(--text-strong);
 }
 
-.gear {
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.header-btn {
   background: transparent;
   border: 0;
   color: var(--muted);
@@ -103,7 +109,7 @@ body {
     background-color 120ms ease;
 }
 
-.gear:hover {
+.header-btn:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.05);
 }

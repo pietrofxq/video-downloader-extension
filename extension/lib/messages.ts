@@ -35,6 +35,7 @@ export const MSG = Object.freeze({
   SHOW_IN_FOLDER: 'SHOW_IN_FOLDER',
   DISMISS_DOWNLOAD: 'DISMISS_DOWNLOAD',
   CANCEL_DOWNLOAD: 'CANCEL_DOWNLOAD',
+  RESET_TAB: 'RESET_TAB',
 } as const);
 
 export type MessageType = (typeof MSG)[keyof typeof MSG];
@@ -144,6 +145,14 @@ export interface CancelDownloadMessage extends MessageBase<typeof MSG.CANCEL_DOW
   payload: { requestId: string };
 }
 
+// Popup → SW: empty the detected-media list for this tab. Keeps the
+// per-adapter PageMeta so freshly-detected entries land with proper
+// titles. Used by the header "Reset" button when the user wants the
+// popup to forget stale captures and start observing fresh.
+export interface ResetTabMessage extends MessageBase<typeof MSG.RESET_TAB> {
+  payload: { tabId: number };
+}
+
 export type ExtensionMessage =
   | PingMessage
   | MediaUrlDetectedMessage
@@ -160,7 +169,8 @@ export type ExtensionMessage =
   | RevokeBlobMessage
   | ShowInFolderMessage
   | DismissDownloadMessage
-  | CancelDownloadMessage;
+  | CancelDownloadMessage
+  | ResetTabMessage;
 
 // ---------- popup ↔ SW port wire ----------
 //

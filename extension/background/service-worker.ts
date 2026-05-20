@@ -327,6 +327,29 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
     }
+    case MSG.RESET_TAB: {
+      const tabId = msg.payload?.tabId;
+      if (typeof tabId === 'number') {
+        // Mirror the on-navigation reset: drop per-tab download states +
+        // entries, refresh the badge, push an empty STATE to the popup.
+        // adapterMeta is intentionally preserved by clearTab so the next
+        // detection lands with the right title.
+        clearDownloadStatesForTab(tabId);
+        clearTab(tabId)
+          .then(async () => {
+            await updateBadge(tabId);
+            await broadcastTabState(tabId);
+            sendResponse({ ok: true });
+          })
+          .catch((err) => {
+            log.warn('RESET_TAB failed', err);
+            sendResponse({ ok: false });
+          });
+        return true; // async sendResponse
+      }
+      sendResponse({ ok: false });
+      return false;
+    }
     case MSG.GET_TAB_STATE: {
       const reqTab = msg.payload?.tabId ?? sender.tab?.id;
       if (reqTab == null) {
