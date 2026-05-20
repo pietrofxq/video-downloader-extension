@@ -1,6 +1,6 @@
 import { MSG } from '../lib/messages.js';
 import { pickAdapter } from '../adapters/index.js';
-import type { PageMeta } from '../lib/types.ts';
+import type { DiscoveredStream, PageMeta } from '../lib/types.ts';
 
 // The double-injection guard flag + the Navigation API need a typed
 // window surface. We declare them ambiently in this file rather than in
@@ -35,6 +35,29 @@ if (/^https?:$/.test(location.protocol) && !window.__VDL_PAGE_CONTENT_INSTALLED_
     }
   }
 
+  function sendStreamsDiscovered(adapterId: string, streams: DiscoveredStream[]): void {
+    // Skip the round-trip when there's nothing to publish.
+    if (!streams || streams.length === 0) return;
+    try {
+      chrome.runtime
+        .sendMessage({ type: MSG.STREAMS_DISCOVERED, payload: { adapterId, streams } })
+        .catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
+
+  function publishAdapterState(adapter: ReturnType<typeof pickAdapter>, meta: PageMeta): void {
+    sendPageMeta(adapter.id, meta);
+    if (typeof adapter.discoverStreams === 'function') {
+      try {
+        sendStreamsDiscovered(adapter.id, adapter.discoverStreams(document));
+      } catch {
+        // ignore — adapter discovery is best-effort
+      }
+    }
+  }
+
   // Picks the adapter for the *current* URL, tears down any prior observer,
   // emits an initial scrape, and installs a new observer. Called on first
   // load and on every SPA navigation we can detect.
@@ -49,13 +72,13 @@ if (/^https?:$/.test(location.protocol) && !window.__VDL_PAGE_CONTENT_INSTALLED_
     }
     const adapter = pickAdapter(location.href, '');
     try {
-      sendPageMeta(adapter.id, adapter.scrapePageMeta(document));
+      publishAdapterState(adapter, adapter.scrapePageMeta(document));
     } catch {
       // ignore broken adapter
     }
     if (typeof adapter.observe === 'function') {
       try {
-        cleanup = adapter.observe(document, (meta) => sendPageMeta(adapter.id, meta));
+        cleanup = adapter.observe(document, (meta) => publishAdapterState(adapter, meta));
       } catch {
         // ignore — adapter may not support observe
       }

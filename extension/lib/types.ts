@@ -17,6 +17,15 @@ export interface PageMeta {
   sectionTitle?: string;
   /** Site-supplied filename hint (e.g. Hotmart's iframe `cur` param). */
   filenameHint?: string;
+  /**
+   * Publisher / uploader name. YouTube populates this from the channel;
+   * other adapters with a clear "creator" concept can too. The downloader
+   * uses it to prefix filenames so a user grabbing a series ends up with
+   * files that group lexicographically.
+   */
+  channelTitle?: string;
+  /** Platform-stable identifier for the video. YouTube videoId. */
+  videoId?: string;
   ogTitle?: string | null;
   ogVideoTitle?: string | null;
   ogDescription?: string | null;
@@ -59,6 +68,24 @@ export interface HlsVariant {
   resolution: string | null;
   /** RFC 6381 codec list (`avc1.64...`, `mp4a.40.2`) or null. */
   codecs: string | null;
+  /**
+   * Exact byte length when the platform declares it (YouTube does via
+   * `streamingData.formats[].contentLength`). HLS variants leave this
+   * unset — the popup falls back to bandwidth × duration / 8.
+   */
+  contentLength?: number;
+  /**
+   * Companion audio stream URL for adaptive video-only variants
+   * (YouTube adaptiveFormats). The downloader fetches both and muxes
+   * into a single MP4. Unset for progressive variants (audio already
+   * embedded) and HLS variants (audio is in the same TS segments).
+   */
+  pairedAudioUrl?: string;
+  /**
+   * Byte length of the paired audio stream when declared. Used by the
+   * popup to add the audio size into the displayed estimate.
+   */
+  pairedAudioContentLength?: number;
 }
 
 export interface HlsAlternate {
@@ -88,6 +115,12 @@ export interface ParsedHlsManifest {
 
 export interface DownloadRequest {
   requestId: string;
+  /**
+   * Media format the downloader should use. The offscreen dispatches on
+   * this to pick between the HLS pipeline, progressive single-stream
+   * download, and the DASH/adaptive path. Comes from MediaEntry.kind.
+   */
+  kind: MediaKind;
   /** Chosen variant playlist URL (or media playlist for single-bitrate). */
   variantUrl: string;
   tabId: number;
@@ -96,6 +129,15 @@ export interface DownloadRequest {
   headers?: Record<string, string>;
   /** Sanitized base name (no extension); orchestrator appends `.mp4`. */
   filename: string;
+  /**
+   * Companion audio stream URL for adaptive video-only variants —
+   * forwarded from `HlsVariant.pairedAudioUrl` for the variant the
+   * user picked. The adaptive HD downloader (v0.11.1) fetches both
+   * URLs and muxes them; the progressive path ignores this.
+   */
+  pairedAudioUrl?: string;
+  /** Byte length of the paired audio stream when known. */
+  pairedAudioContentLength?: number;
 }
 
 export interface DownloadOutcome {
@@ -158,6 +200,53 @@ export interface AdapterFilenameInput {
   mediaEntry?: MediaEntry;
 }
 
+/**
+ * Catalog of media surfaced by an adapter that read it out of
+ * page-loaded JSON rather than waiting for a webRequest to fire. Used
+ * by sites whose media URLs aren't observable through the normal
+ * detection layer — e.g. YouTube's `ytInitialPlayerResponse.streamingData`,
+ * where the full catalog of available formats is in the page DOM and
+ * webRequest only sees one chunk at a time of whichever quality the
+ * player is currently fetching.
+ *
+ * One `DiscoveredStream` represents one *video* (not one quality). The
+ * available qualities go in `variants[]` so the popup ends up with one
+ * row + a quality picker, the same shape an HLS master playlist
+ * produces. The SW promotes each into a MediaEntry, filling in the
+ * fields the adapter can't know (id, capturedAt, pageUrl).
+ */
+export interface DiscoveredStream {
+  /**
+   * Identity URL — the value the SW writes into MediaEntry.url. Used
+   * for dedupe. For sites with variants, an anchor (highest-quality
+   * video URL, or a synthetic key) is fine.
+   */
+  url: string;
+  kind: MediaKind;
+  headers?: Record<string, string>;
+  /** Seconds. Pre-filled when the platform publishes it. */
+  totalDuration?: number;
+  /** Marks the stream as DRM-gated. Same semantics as MediaEntry.drm. */
+  drm?: boolean;
+  /**
+   * Per-quality formats. Shape matches HlsVariant so the popup quality
+   * picker works uniformly across adapter-supplied + manifest-parsed
+   * entries. Audio-only renditions are excluded here — the downloader
+   * pairs a chosen video variant with a default audio variant
+   * internally for the adaptive HD path.
+   */
+  variants?: HlsVariant[];
+}
+
+/**
+ * Context passed to Adapter.transformUrl so the adapter can decide
+ * whether the rewrite applies (some signing schemes only apply to
+ * segment URLs, not manifest URLs).
+ */
+export interface TransformUrlContext {
+  purpose: 'manifest' | 'segment' | 'key';
+}
+
 export interface Adapter {
   id: AdapterId;
   /** True iff this adapter handles a detection on `pageUrl`. */
@@ -170,8 +259,25 @@ export interface Adapter {
    * return a cleanup function. If unset, only the initial scrape is used.
    */
   observe?(document: Document, onUpdate: (meta: PageMeta) => void): () => void;
+  /**
+   * Optional. Read available media streams out of the page DOM/JSON.
+   * Called from the content script after the initial scrape, and again
+   * when `observe` fires (SPA navigation). Returning an empty list is
+   * fine — passive webRequest detection still runs alongside.
+   *
+   * MUST NOT make network calls; same constraint as scrapePageMeta.
+   */
+  discoverStreams?(document: Document): DiscoveredStream[];
   /** Returns a sanitized filename (no extension). Always produces a non-empty string. */
   deriveFilename(params: AdapterFilenameInput): string;
   /** Optional. Patch outbound headers before segment fetches. */
   transformHeaders?(headers?: Record<string, string>): Record<string, string> | undefined;
+  /**
+   * Optional. Rewrite a URL before the downloader fetches it — e.g.
+   * YouTube's `n` parameter has to be re-signed via an obfuscated JS
+   * function pulled from `base.js` or the CDN throttles the response.
+   * Returning the input unchanged is the no-op default. May be async
+   * so the adapter can lazy-load and cache its signing material.
+   */
+  transformUrl?(url: string, ctx: TransformUrlContext): string | Promise<string>;
 }

@@ -5,6 +5,14 @@
     <title>Video Downloader - Offscreen Worker</title>
   </head>
   <body>
+    <!--
+      Sandboxed iframe for evaluating YouTube's n/sig decipher
+      function. The offscreen document's CSP forbids unsafe-eval; the
+      sandbox page declared in manifest.json has its own CSP that
+      allows it. yt-sig.ts posts the extracted script in here, gets
+      back the result. The iframe is hidden because it has no UI.
+    -->
+    <iframe id="vdl-sandbox" src="sandbox.html" hidden></iframe>
     <script type="module" src="offscreen.js"></script>
   </body>
 </html>

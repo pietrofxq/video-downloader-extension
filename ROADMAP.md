@@ -306,32 +306,51 @@ Goal: make large downloads predictable instead of relying on one giant JS heap p
 
 ---
 
-## v0.11 - YouTube support
+## v0.11 - YouTube support (progressive, working through n-param)
 
 Goal: download YouTube videos end-to-end as the second real adapter. YouTube uses DASH-style adaptive streams (separate audio + video) on `videoplayback?...` URLs plus a small set of progressive single-stream itags, *not* HLS — so v0.11 brings parts of the v1.2 DASH and v1.3 progressive milestones forward for one site rather than depending on the HLS completeness work (parked in v0.12).
 
-Constraints to acknowledge up front:
-- **`n`-param throttling.** YouTube applies a per-request "n" parameter; unless the value is re-signed by an obfuscated JS function pulled from `base.js`, segment fetches are throttled to ~50–100 KB/s. The fix is real engineering (extracting + evaluating YouTube's JS function in a sandboxed context) and may slip to v0.11.1. Until it lands, low-bitrate itags are typically less throttled and the docs should call this out.
-- **Most YouTube content is non-DRM.** Rentals, Movies & TV purchases, and some music videos use Widevine; existing v0.6 DRM detection already flags those as `DRM-protected`.
-- **Live streams** are out of scope (same place HLS live is parked).
-- **Age-gated / region-locked** content is out of scope for v0.11; would need cookie / auth handling beyond the existing header capture.
+**Shipped scope:** itag=18 (360p, H.264 + AAC) downloads end-to-end against current YouTube — the n-param solver IS in (early scoping had it as v0.11.1; smoke testing surfaced that modern YouTube 403s itag=18 too without it, so it folded into v0.11). Adaptive HD (1080p+) is intentionally still **deferred to v0.11.1** because it depends on the fMP4 two-track-combine muxer which is its own subproject.
+
+Constraints retained from the original plan:
+
+- **H.264 + AAC only.** VP9 / AV1 video surface in the picker (so users can SEE the inventory) but downloading them currently fails — only the AAC audio pairing is wired. Lifting this is a follow-up beyond v0.11.1.
+- **Most YouTube content is non-DRM.** Rentals, Movies & TV, some music videos use Widevine; `playabilityStatus !== 'OK'` returns no streams so the picker stays out of a broken state.
+- **Live, age-gated, region-locked** content is out of scope.
 
 Tasks:
 
-- [ ] webRequest patterns + URL classification: detect `*://*.googlevideo.com/videoplayback*` URLs and classify them via the `mime=` query param (no clean file extension). Tag with `kind: 'progressive'` for muxed itags and `kind: 'dash'` for adaptive video/audio streams.
-- [ ] `adapters/youtube.ts`: `matches` on `youtube.com/watch*`, `youtu.be/*`, `youtube.com/embed/*`; `scrapePageMeta` reads `<title>` / `<meta property="og:title">` / channel name and parses `ytInitialPlayerResponse` for `videoDetails` (videoId, title, lengthSeconds, channelTitle).
-- [ ] Enumerate formats from `ytInitialPlayerResponse.streamingData` (`formats[]` for progressive itags, `adaptiveFormats[]` for DASH-style streams). Surface them in the popup quality picker with resolution + codec + filesize (YouTube declares contentLength when available — no estimation needed).
-- [ ] Progressive single-stream path (cheapest win — covers `itag=18` 360p MP4 + `itag=22` 720p MP4 where present). Stream the chosen URL straight to OPFS with the v0.10 download workspace; no remux needed since these are already MP4 with audio+video muxed. Implementation extracted into `lib/progressive-download.ts` so v1.3's broader progressive milestone just lights it up for arbitrary sites.
-- [ ] Adaptive HD path: fetch the chosen video adaptiveFormat + the default audio adaptiveFormat in parallel; combine into one MP4. Both are fMP4 (init segment + media segments), so the mux step layers two tracks rather than the HLS TS→fMP4 transmux v0.7 added. This work also unlocks the HLS alt-audio + fMP4/CMAF cases parked in v0.12 — keep the muxer module agnostic to format origin.
-- [ ] `n`-param throttling: spike a solver that extracts the `n` transform from `base.js` and re-signs URLs before they leave the SW. If feasible inside a single milestone, land it; otherwise document the limitation in the README and aim for v0.11.1. **Reference at implementation time:** `@distube/ytdl-core`'s `lib/sig.js` (MIT) has the current `n`-function extraction regex and JS-evaluation pattern — YouTube rotates these periodically so the right approach is to copy the current patterns rather than design from scratch. yt-dlp's `yt_dlp/extractor/youtube/_video.py` is the second-opinion reference if the JS approach hits CSP issues.
-- [ ] DRM handling: if `playabilityStatus.status !== 'OK'` or `streamingData` is empty, the player is gated (DRM, age-restricted, region-locked, members-only). Flag the entry's `drm: true` so the existing popup label fires; do not attempt any download.
-- [ ] Filename: adapter's `deriveFilename` returns sanitized `{channelTitle} - {videoTitle}.mp4` (so files group together in the user's downloads when they grab a series).
-- [ ] Verify: download a public non-DRM video at 360p (progressive) and 1080p (adaptive) — both play in VLC + QuickTime with audio/video sync and accurate duration.
-- [ ] Verify: SPA navigation between watch pages updates the popup metadata each time.
-- [ ] Verify: a DRM-gated YouTube rental shows as DRM-protected and the Download button is replaced.
-- [ ] Verify: `npm run check` passes; YouTube adapter unit tests cover format enumeration + DRM detection on saved fixture HTML.
+- [x] webRequest patterns + URL classification: detect `*://*.googlevideo.com/videoplayback*` URLs, classify via `mime=` + itag.
+- [x] `adapters/youtube.ts` — matches watch / shorts / embed / live / youtu.be. `scrapePageMeta` parses `ytInitialPlayerResponse.videoDetails` (videoId, title, channelTitle) with og:meta fallback. `deriveFilename` returns `{channelTitle} - {videoTitle}`.
+- [x] `discoverStreams` enumerates `streamingData.formats[]` + `adaptiveFormats[]`, surfaces them in the popup quality picker with resolution / codec / exact filesize. Audio is paired internally for adaptive variants (AAC/m4a only for v0.11).
+- [x] Progressive single-stream path (`extension/offscreen/progressive.ts`) — streams the chosen URL to OPFS via the v0.10 workspace; no remux. Reusable for v1.3's broader progressive milestone.
+- [x] **N-param + signature decipher.** AST-based extractor in `extension/offscreen/yt-sig.ts` using vendored `LuanRT/YouTube.js` utilities (`extension/vendor/youtubei-js/`, MIT) + `meriyah` parser. Auto-discovers `base.js` via `/iframe_api`, extracts the URL-prep function via the `.set("alr","yes")` AST anchor, transitively collects dependencies, wraps in an IIFE, evaluates inside a sandboxed iframe (MV3 CSP forbids `Function()` in the offscreen document — see `extension/offscreen/sandbox.html`). Caches per player_id. Applied to every URL hitting `*.googlevideo.com`.
+- [x] DRM handling: `playabilityStatus.status !== 'OK'` returns no streams. The existing v0.6 DRM detection on webRequest URLs continues to flag entries — both layers fail closed.
+- [ ] **Adaptive HD path (deferred to v0.11.1).** Picking 1080p currently surfaces a typed `UnsupportedFormatError` because the fMP4 two-track combine muxer doesn't exist yet. Data plumbing for pairing is already in (`HlsVariant.pairedAudioUrl` + `pairedAudioContentLength`); the decipher handles `signatureCipher` too (already exposed via `solver.decipher({signatureCipher})`). What's missing is the muxer + admitting `signatureCipher`-only formats in `discoverStreams`.
+- [x] Verify: `npm run check` passes; unit tests cover format enumeration + DRM detection + audio pairing + AST extractor against a synthetic base.js fixture + sandbox evaluation.
+- [ ] Verify (smoke): SPA navigation between watch pages updates popup metadata.
+- [ ] Verify (smoke): a DRM-gated YouTube rental shows no row (or "DRM-protected").
 
-**Ship criterion:** a public non-DRM YouTube video downloads to a playable MP4 at the user's chosen quality. If `n`-throttling isn't solved in this milestone the README documents the limitation honestly and points to v0.11.1.
+**Ship criterion:** ✅ a public non-DRM YouTube video downloads to a playable MP4 via the progressive single-stream path (verified 2026-05-20). Adaptive HD is explicitly deferred to v0.11.1 with the architectural plumbing already in place.
+
+---
+
+## v0.11.1 - YouTube HD via fMP4 two-track combine muxer
+
+Goal: lift the v0.11 progressive-only ceiling. The hard piece is the muxer — most of the rest of the work is already done by v0.11 (decipher handles both n + signature, AST extractor is in, sandboxed eval works, pairedAudioUrl is plumbed).
+
+- [ ] **Admit `signatureCipher`-only formats in `discoverStreams`.** Currently `variantFromFormat` skips them (returns null when `!f.url`). Switch to populating both `variant.url` (the decoded url= from the cipher) and a new `variant.signatureCipher` field carrying the full encoded triple. Add `signatureCipher?: string` to `HlsVariant`.
+- [ ] **Thread `signatureCipher` from popup pick → SW → offscreen.** Either as a sibling field of `variantUrl` in `START_DOWNLOAD` + `RunPayload` + `DownloadRequest`, or via an in-memory lookup on the SW side keyed by the picked variant url. The downloader calls `solver.decipher({ signatureCipher })` instead of `solver.decipher(plainUrl)` when present.
+- [ ] **fMP4 two-track combine muxer.** New module `extension/offscreen/mp4-combine.ts` that takes two fMP4 byte sources (video + audio) and produces one MP4 with both tracks. Re-uses v0.7's box-walking utilities (tfdt patching, mvhd/tkhd/mdhd durations) and adds:
+  - Parse each input's `moov`; extract its single `trak`.
+  - Build a combined `moov` with both `trak` boxes — track-ID renumber (audio → 2), `mvhd.duration` = max of both.
+  - Interleave moofs from both inputs in time order with monotonic `mfhd.sequence_number` and per-track-cumulative `tfdt`.
+  - Patch `tfhd.track_ID` on the renumbered side.
+- [ ] **New adaptive download path in the offscreen** that fetches video + audio in parallel, feeds both through `mp4-combine`, writes the result to OPFS via the v0.10 workspace. Dispatch sends here when `req.kind === 'dash'` AND `req.signatureCipher` (or some equivalent "adaptive YouTube" marker) is set.
+- [ ] Verify: 1080p YouTube download produces a single MP4 that plays in VLC + QuickTime with audio + video sync, correct duration, accurate seek.
+- [ ] README updates: drop the "progressive-only" caveat from the YouTube section.
+
+**Ship criterion:** picking the best AVC variant on a public non-DRM YouTube video produces a playable MP4. AV1 / VP9 stay deferred.
 
 ---
 

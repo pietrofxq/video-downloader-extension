@@ -27,6 +27,11 @@ const ENTRIES = {
   'popup/popup.js': { entry: 'popup/popup', format: 'esm' },
   // Offscreen is a stub for v0.1 but treated the same way.
   'offscreen/offscreen.js': { entry: 'offscreen/offscreen', format: 'esm' },
+  // Sandbox page for YouTube n/sig script eval — runs under a more
+  // permissive CSP that allows Function() / eval (offscreen's default
+  // CSP forbids 'unsafe-eval'). IIFE so it executes immediately on
+  // load and doesn't need module wiring.
+  'offscreen/sandbox.js': { entry: 'offscreen/sandbox', format: 'iife' },
 };
 
 async function resolveEntry(rel) {
@@ -42,6 +47,7 @@ const STATIC_FILES = [
   'popup/popup.html',
   'popup/popup.css',
   'offscreen/offscreen.html',
+  'offscreen/sandbox.html',
   'options/options.html',
 ];
 

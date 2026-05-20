@@ -143,7 +143,23 @@ async function handleProxyFetch({
     redirect: 'follow',
   });
   if (!res.ok) {
-    return { ok: false, status: res.status, error: `fetch ${res.status}` };
+    // Capture the first slice of the response body for diagnostics —
+    // signed-URL CDNs (googlevideo, Akamai) sometimes embed a reason
+    // code in the body even when the status is bare 403. Cap at 512
+    // bytes; we don't want to ship a megabyte error doc back across
+    // the message bus.
+    let bodyHint = '';
+    try {
+      const text = await res.text();
+      bodyHint = text.slice(0, 512);
+    } catch {
+      // ignore — body might be already consumed or unreadable
+    }
+    return {
+      ok: false,
+      status: res.status,
+      error: bodyHint ? `fetch ${res.status}: ${bodyHint}` : `fetch ${res.status}`,
+    };
   }
   if (responseType === 'arrayBuffer') {
     const buf = await res.arrayBuffer();

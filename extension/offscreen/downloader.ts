@@ -534,3 +534,5 @@ function throwFromReply(reply: ProxyFetchReply | undefined, url: string): never 
 // uint8ArrayToBase64 is re-exported for completeness; the downloader doesn't
 // use it directly but PROXY_FETCH replies encode bodies with it.
 export { uint8ArrayToBase64 };
+export { fetchArrayBuffer, fetchText, throwFromReply };
+export type { FetchArgs };

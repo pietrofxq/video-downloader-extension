@@ -1,6 +1,7 @@
 import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { log, redactUrl } from '../lib/log.js';
+import { classifyUrl } from '../lib/media-detection.js';
 import { MSG, parsePortMessageFromSW } from '../lib/messages.js';
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
@@ -135,16 +136,23 @@ function resolveDurationSeconds(entry: MediaEntry, variantUrl: string | undefine
   return 0;
 }
 
-// Estimate file size from BANDWIDTH × duration / 8. Requires the master
-// playlist to declare BANDWIDTH on the chosen variant AND that variant's
-// media playlist to have been parsed (so we know its totalDuration). For
-// single-bitrate streams we don't have a bandwidth value — return 0.
+// Resolve estimated (or exact) byte size for the chosen variant.
+// Priority:
+//   1. Variant's declared `contentLength` (YouTube publishes this).
+//      For adaptive variants with a paired audio stream, the audio's
+//      contentLength is added so the displayed estimate reflects the
+//      final muxed MP4.
+//   2. BANDWIDTH × duration / 8 (HLS — master declares bandwidth, media
+//      playlist has duration).
+// Returns 0 when neither path resolves; the popup hides the badge.
 function resolveSizeBytes(entry: MediaEntry, variantUrl: string | undefined): number {
-  const dur = resolveDurationSeconds(entry, variantUrl);
-  if (dur <= 0) return 0;
   if (variantUrl && Array.isArray(entry.variants)) {
     const v = entry.variants.find((x) => x.url === variantUrl);
-    if (v && v.bandwidth > 0) return Math.round((v.bandwidth * dur) / 8);
+    if (v?.contentLength && v.contentLength > 0) {
+      return v.contentLength + (v.pairedAudioContentLength ?? 0);
+    }
+    const dur = resolveDurationSeconds(entry, variantUrl);
+    if (dur > 0 && v && v.bandwidth > 0) return Math.round((v.bandwidth * dur) / 8);
   }
   return 0;
 }
@@ -158,13 +166,33 @@ function formatVariant(v: HlsVariant): string {
   return resPart || bwPart || 'variant';
 }
 
+// Variants whose URL classifies as `dash` are rejected by the offscreen
+// dispatch until v0.11.1 lands the fMP4 two-track combine muxer.
+// Surface them in the picker (so users see the full inventory) but
+// label them clearly + push them to the back so the browser's default
+// option is something that actually downloads.
+function isVariantDownloadable(v: HlsVariant): boolean {
+  return classifyUrl(v.url) !== 'dash';
+}
+
 function qualityOptionsHtml(entry: MediaEntry): string {
   if (entry.parseError) {
     return '<option value="auto">Manifest unavailable</option>';
   }
   if (Array.isArray(entry.variants) && entry.variants.length > 0) {
-    return entry.variants
-      .map((v) => `<option value="${escapeHtml(v.url)}">${escapeHtml(formatVariant(v))}</option>`)
+    const decorated = entry.variants.map((v) => ({
+      v,
+      ok: isVariantDownloadable(v),
+    }));
+    // Supported variants first so the default <option> is one the
+    // download dispatch accepts. Within each group the existing
+    // bandwidth-descending order is preserved (stable sort).
+    decorated.sort((a, b) => Number(b.ok) - Number(a.ok));
+    return decorated
+      .map(({ v, ok }) => {
+        const label = ok ? formatVariant(v) : `${formatVariant(v)} — HD (v0.11.1)`;
+        return `<option value="${escapeHtml(v.url)}">${escapeHtml(label)}</option>`;
+      })
       .join('');
   }
   if (entry.isMaster === false) {

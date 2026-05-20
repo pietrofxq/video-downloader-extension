@@ -27,6 +27,12 @@ export const WEBREQUEST_PATTERNS = Object.freeze([
   '*://*/*.ts*',
   '*://*/*.m4s*',
   '*://*/*.key*',
+  // YouTube streams. Path is /videoplayback?... with no file extension,
+  // so the EXT_KIND map can't classify these; classifyUrl special-cases
+  // googlevideo.com via the mime + itag query params. The YouTube
+  // adapter's `discoverStreams` is the canonical catalog source — these
+  // passive captures are a fallback signal.
+  '*://*.googlevideo.com/videoplayback*',
 ]);
 
 const EXT_KIND = new Map<string, DetectionKind>([
@@ -54,9 +60,38 @@ function getPathExtension(pathname: string): string {
   return last.slice(dot).toLowerCase();
 }
 
+// YouTube progressive (muxed audio+video, single-file MP4) itags.
+// Everything else under `/videoplayback?...` is adaptive — video-only or
+// audio-only fMP4 chunks that need pair-muxing into one MP4. The set is
+// intentionally small + stable: 18 is the universal 360p/H.264+AAC
+// fallback, 22 is 720p/H.264+AAC for older uploads, 36 is the legacy
+// 3GP variant. New itag families are all adaptive.
+const YOUTUBE_PROGRESSIVE_ITAGS: ReadonlySet<string> = new Set(['18', '22', '36']);
+
+function classifyGoogleVideoUrl(u: URL): DetectionKind | null {
+  // Apex `googlevideo.com` doesn't actually serve videoplayback — every
+  // real host is a subdomain like `rr3---sn-xyz.googlevideo.com` — but
+  // accept it defensively.
+  if (u.hostname !== 'googlevideo.com' && !u.hostname.endsWith('.googlevideo.com')) {
+    return null;
+  }
+  if (!u.pathname.startsWith('/videoplayback')) return null;
+  const mime = u.searchParams.get('mime') || '';
+  if (!mime.startsWith('video/') && !mime.startsWith('audio/')) return null;
+  const itag = u.searchParams.get('itag') || '';
+  if (YOUTUBE_PROGRESSIVE_ITAGS.has(itag)) return KINDS.PROGRESSIVE;
+  // Adaptive fMP4 — closest existing kind is `dash` since the catalog
+  // is conceptually the same (separate audio + video representations
+  // muxed into one MP4). The lack of a `.mpd` manifest means the
+  // YouTube adapter has to feed the catalog via `discoverStreams`.
+  return KINDS.DASH;
+}
+
 export function classifyUrl(url: string, contentType?: string): DetectionKind | null {
   try {
     const u = new URL(url);
+    const yt = classifyGoogleVideoUrl(u);
+    if (yt !== null) return yt;
     const ext = getPathExtension(u.pathname);
     const byExt = EXT_KIND.get(ext);
     if (byExt) return byExt;

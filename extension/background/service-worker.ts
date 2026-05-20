@@ -23,7 +23,13 @@ import {
   setAdapterMeta,
   setTabUrl,
 } from '../lib/media-store.js';
-import type { DownloadState, MediaEntry, PageMeta } from '../lib/types.ts';
+import type {
+  DiscoveredStream,
+  DownloadState,
+  MediaEntry,
+  MediaKind,
+  PageMeta,
+} from '../lib/types.ts';
 
 const BADGE_COLOR = '#ff5d2e';
 
@@ -116,6 +122,14 @@ const isHttpUrl = (u: string | undefined | null): u is string =>
   typeof u === 'string' && /^https?:/.test(u);
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  // Chrome clears per-tab badge state on every tab navigation —
+  // including same-URL refreshes that don't fire the URL branch
+  // below. Repaint from current tab state once the load settles so
+  // the count survives refresh. No-op when the tab has no entries.
+  if (changeInfo.status === 'complete') {
+    void updateBadge(tabId);
+  }
+
   if (!changeInfo.url) {
     // Initial load may give us a URL via `tab.url` before changeInfo.url ever
     // fires; cache it so detections aren't blind. Same http(s) guard as
@@ -126,6 +140,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!isHttpUrl(changeInfo.url)) return;
   const { prev } = await setTabUrl(tabId, changeInfo.url);
   if (prev && prev !== changeInfo.url) {
+    log.info('tab navigated — clearing entries', { tabId, prev, next: changeInfo.url });
     clearDownloadStatesForTab(tabId);
     const had = await clearTab(tabId);
     if (had) await updateBadge(tabId);
@@ -253,6 +268,23 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
         return false;
       }
       void handlePageMeta(tabId, adapterId, meta);
+      sendResponse({ ok: true });
+      return false;
+    }
+    case MSG.STREAMS_DISCOVERED: {
+      const tabId = sender.tab?.id;
+      const p = msg.payload ?? {};
+      if (tabId == null || tabId < 0 || !Array.isArray(p.streams)) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      void handleStreamsDiscovered({
+        tabId,
+        frameId: sender.frameId ?? 0,
+        pageUrl: sender.tab?.url || '',
+        adapterId: p.adapterId,
+        streams: p.streams,
+      });
       sendResponse({ ok: true });
       return false;
     }
@@ -433,6 +465,24 @@ async function handleDetection({
   if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
 
   const adapter = pickAdapter(resolvedPageUrl, url);
+
+  // Adapters with discoverStreams (YouTube) are the canonical catalog
+  // source for their pages. Passive webRequest captures of their CDN
+  // URLs typically duplicate the catalog AND pollute the list with
+  // range-fetched chunk URLs that aren't user-pickable (each chunk has
+  // a different `range=` query so the URL dedupe doesn't catch them).
+  // Skip the entry — the adapter will push the canonical streams via
+  // STREAMS_DISCOVERED instead.
+  if (typeof adapter.discoverStreams === 'function') {
+    log.debug('passive capture suppressed (adapter is canonical)', {
+      tabId,
+      adapter: adapter.id,
+      url,
+      source,
+    });
+    return;
+  }
+
   const entry: Omit<MediaEntry, 'id'> = {
     kind,
     url,
@@ -458,6 +508,82 @@ async function handleDetection({
   // by the time the user opens it. ensureParsed is idempotent.
   if (stored.kind === 'hls') {
     void ensureParsed(tabId, stored);
+  }
+}
+
+interface StreamsDiscoveredInput {
+  tabId: number;
+  frameId: number;
+  pageUrl: string;
+  adapterId: string;
+  streams: DiscoveredStream[];
+}
+
+/**
+ * Promote the adapter-supplied catalog of streams into MediaEntries.
+ * Mirrors handleDetection — resolve pageUrl, pick adapter, addEntry,
+ * dedupe by URL, badge + broadcast. The crucial differences are that
+ * variants come pre-populated (no HLS parse step needed) and the
+ * `kind` is whatever the adapter declared (typically 'dash' for
+ * YouTube's mixed progressive + adaptive catalog).
+ */
+async function handleStreamsDiscovered({
+  tabId,
+  frameId,
+  pageUrl,
+  adapterId,
+  streams,
+}: StreamsDiscoveredInput): Promise<void> {
+  if (streams.length === 0) return;
+  await seedTabs();
+
+  let resolvedPageUrl = pageUrl;
+  if (!resolvedPageUrl) {
+    resolvedPageUrl = await getTabUrl(tabId);
+  }
+  if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
+
+  let anyAdded = false;
+  let dedupedCount = 0;
+  for (const s of streams) {
+    if (typeof s.url !== 'string' || !s.url) continue;
+    const entry: Omit<MediaEntry, 'id'> = {
+      kind: s.kind,
+      url: s.url,
+      pageUrl: resolvedPageUrl,
+      adapterId,
+      capturedAt: Date.now(),
+      frameId,
+      ...(s.headers ? { headers: s.headers } : {}),
+      ...(s.totalDuration ? { totalDuration: s.totalDuration } : {}),
+      ...(s.drm ? { drm: true } : {}),
+      // Adapter-supplied variants are authoritative — no manifest parse
+      // step needed. isMaster=true so the popup picker treats them as
+      // multi-quality the same way it treats parsed HLS masters.
+      ...(s.variants ? { variants: s.variants, isMaster: true } : {}),
+    };
+    const stored = await addEntry(tabId, entry);
+    if (stored) anyAdded = true;
+    else dedupedCount += 1;
+  }
+
+  if (anyAdded) {
+    log.info('streams discovered', {
+      tabId,
+      adapterId,
+      streams: streams.length,
+    });
+    await updateBadge(tabId);
+    await broadcastTabState(tabId);
+  } else if (dedupedCount > 0) {
+    // Adapter re-discovered the same catalog on a SPA-navigation or
+    // re-emission. Useful to see in the log so we can tell the
+    // difference between "no streams" and "streams already known".
+    log.debug('streams re-discovered (dedupe)', {
+      tabId,
+      adapterId,
+      deduped: dedupedCount,
+    });
   }
 }
 
@@ -633,9 +759,10 @@ async function handleStartDownload(payload: {
   }
   if (!entry || entryTabId === null) throw new Error(`unknown mediaId: ${mediaId}`);
 
-  if (entry.kind !== 'hls') {
-    throw new Error(`v0.6 supports HLS only; this entry is ${entry.kind}`);
-  }
+  // v0.6–v0.10 supported HLS only. v0.11 adds progressive (YouTube
+  // itag=18/22) and routes DASH-tagged entries through the adaptive
+  // path (also v0.11). The offscreen dispatches on `kind` and throws a
+  // typed UnsupportedFormatError for anything still un-implemented.
 
   const adapter = getAdapter(entry.adapterId);
   const meta = entry.meta ?? {};
@@ -655,13 +782,36 @@ async function handleStartDownload(payload: {
   const requestId = crypto.randomUUID();
   const finalVariantUrl = variantUrl && /^https?:/.test(variantUrl) ? variantUrl : entry.url;
 
+  // Determine the dispatch kind from the picked variant, not the entry.
+  // YouTube's catalog entry is tagged 'dash' overall (adaptive is the
+  // modern norm) but variants[] mixes progressive itags (18/22/36) with
+  // adaptive ones — picking 360p must route to the progressive
+  // downloader, picking 1080p must route to the adaptive path.
+  // classifyUrl reads itag/mime/ext and returns the right kind for
+  // googlevideo URLs; HLS variants fall through to entry.kind because
+  // every HLS variant URL inherits the master's media type.
+  const variantKind = classifyUrl(finalVariantUrl);
+  const downloadKind: MediaKind = isPrimary(variantKind) ? variantKind : entry.kind;
+
+  // Look the picked variant up by url so we can carry pairedAudio*
+  // forward — the popup only sends variantUrl, but the adaptive
+  // downloader (v0.11.1) needs the audio sibling URL the YouTube
+  // adapter attached. No-op for HLS / progressive variants where
+  // pairedAudioUrl is unset.
+  const pickedVariant = entry.variants?.find((v) => v.url === finalVariantUrl);
+
   const runPayload: RunPayload = {
     requestId,
+    kind: downloadKind,
     variantUrl: finalVariantUrl,
     tabId: entryTabId,
     frameId: entry.frameId ?? 0,
     headers: entry.headers,
     filename,
+    ...(pickedVariant?.pairedAudioUrl ? { pairedAudioUrl: pickedVariant.pairedAudioUrl } : {}),
+    ...(pickedVariant?.pairedAudioContentLength
+      ? { pairedAudioContentLength: pickedVariant.pairedAudioContentLength }
+      : {}),
   };
 
   // Seed the per-request state BEFORE forwarding to the offscreen, so the
@@ -692,6 +842,7 @@ async function handleStartDownload(payload: {
     frameId: entry.frameId ?? 0,
     adapter: entry.adapterId,
     filename: `${filename}.mp4`,
+    kind: downloadKind,
     queued: activeRequestId !== requestId,
   });
   return { requestId, filename: `${filename}.mp4` };
@@ -710,11 +861,14 @@ async function handleStartDownload(payload: {
 
 interface RunPayload {
   requestId: string;
+  kind: MediaEntry['kind'];
   variantUrl: string;
   tabId: number;
   frameId: number;
   headers?: Record<string, string>;
   filename: string;
+  pairedAudioUrl?: string;
+  pairedAudioContentLength?: number;
 }
 
 let activeRequestId: string | null = null;
