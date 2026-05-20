@@ -461,9 +461,68 @@ async function ensureParsed(tabId: number, entry: MediaEntry): Promise<void> {
 // ---------- Download orchestration ----------
 
 const OFFSCREEN_URL = chrome.runtime.getURL('offscreen/offscreen.html');
+const OFFSCREEN_IDLE_TEARDOWN_MS = 30_000;
 let ensureOffscreenPromise: Promise<void> | null = null;
+// Blob URLs the SW handed to chrome.downloads but that haven't been
+// revoked yet (chrome.downloads.onChanged hasn't reported complete /
+// interrupted). The offscreen mustn't tear down while any of these are
+// still backing a download.
+const outstandingBlobUrls = new Set<string>();
+let idleTeardownTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelIdleTeardown(): void {
+  if (idleTeardownTimer !== null) {
+    clearTimeout(idleTeardownTimer);
+    idleTeardownTimer = null;
+  }
+}
+
+function isOffscreenWorkOutstanding(): boolean {
+  if (outstandingBlobUrls.size > 0) return true;
+  if (activeRequestId !== null) return true;
+  if (downloadQueue.length > 0) return true;
+  for (const s of downloadStates.values()) {
+    if (s.status === 'pending' || s.status === 'progress' || s.status === 'queued') return true;
+  }
+  return false;
+}
+
+function scheduleIdleTeardown(): void {
+  if (isOffscreenWorkOutstanding()) {
+    cancelIdleTeardown();
+    return;
+  }
+  if (idleTeardownTimer !== null) return; // already scheduled
+  idleTeardownTimer = setTimeout(() => {
+    idleTeardownTimer = null;
+    // Double-check the world hasn't changed under us between schedule
+    // and fire — back-to-back downloads should keep the doc alive.
+    if (isOffscreenWorkOutstanding()) return;
+    void closeOffscreen();
+  }, OFFSCREEN_IDLE_TEARDOWN_MS);
+}
+
+async function closeOffscreen(): Promise<void> {
+  try {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+    });
+    if (!contexts.some((c) => c.documentUrl === OFFSCREEN_URL)) {
+      ensureOffscreenPromise = null;
+      return;
+    }
+    await chrome.offscreen.closeDocument();
+    log.info('offscreen closed (idle teardown)');
+  } catch (err) {
+    log.warn('offscreen close failed', err);
+  } finally {
+    ensureOffscreenPromise = null;
+  }
+}
 
 async function ensureOffscreen(): Promise<void> {
+  // Any new download cancels a pending teardown immediately.
+  cancelIdleTeardown();
   // Memoize while creating; subsequent calls during creation share the
   // promise. After creation completes, future calls find the document
   // already open via getContexts and return cheaply.
@@ -779,6 +838,7 @@ function handleDownloadError(payload: unknown): void {
     errorMessage: typeof p.message === 'string' ? p.message : '',
   });
   advanceQueue(p.requestId);
+  scheduleIdleTeardown();
 }
 
 // Mark the SW state 'canceled' synchronously (so the popup's row flips
@@ -804,6 +864,7 @@ function cancelDownload(requestId: string): void {
       errorCode: 'Canceled',
       errorMessage: 'canceled by user',
     });
+    scheduleIdleTeardown();
     return;
   }
   // Active (pending / progress) request: transition + tell the offscreen.
@@ -816,6 +877,7 @@ function cancelDownload(requestId: string): void {
     // offscreen may be down; nothing to abort.
   });
   advanceQueue(requestId);
+  scheduleIdleTeardown();
 }
 
 async function handleDownloadDone(payload: unknown): Promise<void> {
@@ -851,6 +913,11 @@ async function handleDownloadDone(payload: unknown): Promise<void> {
     });
     advanceQueue(requestId);
   }
+  // Block the idle-teardown timer until chrome.downloads.onChanged
+  // tells us this blob has actually been read off the offscreen
+  // document. Closing offscreen earlier would invalidate the blob URL
+  // mid-save.
+  outstandingBlobUrls.add(blobUrl);
   // Revoke the offscreen Blob URL once the download lands or is interrupted.
   // The offscreen document stays alive across downloads, so without this
   // each Blob URL would pin its underlying buffer in memory forever.
@@ -861,6 +928,8 @@ async function handleDownloadDone(payload: unknown): Promise<void> {
       chrome.runtime.sendMessage({ type: MSG.REVOKE_BLOB, payload: { blobUrl } }).catch(() => {
         // Offscreen may have closed; nothing to revoke.
       });
+      outstandingBlobUrls.delete(blobUrl);
+      scheduleIdleTeardown();
     }
   };
   chrome.downloads.onChanged.addListener(listener);
