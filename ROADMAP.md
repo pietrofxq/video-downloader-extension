@@ -422,6 +422,53 @@ Manual verification (pending real-world smoke run):
 
 ---
 
+## v0.11.4 - YouTube 4K (AV1 + VP9) via streaming muxer
+
+Goal: lift the 1080p AVC ceiling. YouTube caps AVC at 1080p; 1440p / 2160p / 4320p exist only as **VP9** (fragmented WebM) and **AV1** (fragmented MP4). v0.11.4 admits both codecs into the picker and grows the muxer to handle them — plus refactors the adaptive path to stream through OPFS so multi-GB sources don't blow the offscreen heap.
+
+Constraints retained:
+- **No re-encoding.** Stream-copy only. VP9-in-WebM and AV1-in-MP4 are both first-class containers we can pass through without touching samples.
+- **Container per codec.** AV1 stays `.mp4` (the existing pipeline). VP9 ships as `.webm` to avoid a Matroska→ISOBMFF transmux. Chrome's downloader accepts both; VLC + modern players play both.
+- **Audio pairing follows the video codec.** AAC (m4a) with AV1 (matches today's AVC path); Opus (WebM) with VP9. Picking AAC alongside VP9 would force a container mismatch we don't want to solve right now.
+- **Memory is the load-bearing problem at 4K.** A 10-minute 2160p stream is 1-3 GB per side; the current adaptive path buffers both fully before combining. Offscreen heap can't hold that. Streaming through OPFS is a prerequisite for either codec, so it goes in first.
+
+Tasks (phased — each phase is independently demoable):
+
+**Phase A — OPFS-streaming muxer (prereq for 4K at any codec).**
+- [ ] Refactor `extension/offscreen/adaptive.ts` to write fetched chunks straight to OPFS via the v0.10 workspace instead of accumulating in memory. The chunked Range path from v0.11.3 already produces chunk-sized buffers — append each one to its OPFS file as it lands.
+- [ ] Refactor `extension/offscreen/mp4-combine.ts` to consume video and audio from OPFS file handles via positioned reads (`FileSystemSyncAccessHandle.read(buf, { at })`) and write the combined output to OPFS via positioned writes. The box-walker stays sequential but reads in MB-scale windows instead of holding the whole input. Init segment + per-box patches stay on a small in-JS-heap buffer.
+- [ ] Keep the existing phase-weighted progress (fetch 0..80 / remux 80..100) coherent across streaming inputs.
+- [ ] Verify on existing 1080p AVC: download still produces a clean MP4 with correct duration / seek; peak JS heap stays bounded regardless of source size.
+
+**Phase B — AV1 in fMP4 (`.mp4` output).**
+- [ ] Drop the `avc1.*` whitelist in `extension/popup/popup-helpers.ts:35` for `av01.*`. Admit AV1 variants in the picker.
+- [ ] Verify the moov patcher writes a valid `av01` sample entry in the combined moov. The fMP4 box layout is identical to AVC; only the codec-specific sample entry differs. mux.js may pass it through unchanged (we're not transmuxing here, just combining two single-track fMP4 inputs) — if not, patch the sample entry directly.
+- [ ] Add AV1 fixtures to `extension/offscreen/mp4-combine.test.ts` (synthetic fMP4 with `av01` sample entry).
+- [ ] Manual verify: a real YouTube 1440p AV1 + 2160p AV1 download produces a playable MP4 in VLC + QuickTime + Chrome with correct duration + accurate seek.
+
+**Phase C — VP9 in WebM (`.webm` output).**
+- [ ] Add `extension/offscreen/webm-combine.ts`: an EBML/Matroska segment stitcher. YouTube serves VP9 as fragmented WebM (one Cluster per network segment). The combiner writes a fresh EBML header + Segment / Info / Tracks (one video, one audio) + the cluster sequence concatenated, with cluster timestamps rebased to the global timeline. Pure byte-level stream-copy — no codec touch.
+- [ ] Extend the variant picker to surface VP9 (`vp09.*`) with **Opus audio** as the paired audio. `pickDefaultAudioFormat` in `extension/adapters/youtube.ts` currently hard-prefers AAC; add a codec-aware overload so VP9 gets Opus and AVC/AV1 keep AAC.
+- [ ] Plumb output container through the pipeline: `DownloadRequest.outputContainer: 'mp4' | 'webm'` defaulting to `'mp4'`. SW sets it from the chosen variant codec; offscreen dispatches `req.kind === 'dash'` to `combineFmp4` vs `combineWebm` accordingly. Filename extension follows.
+- [ ] Add WebM fixtures to a new `extension/offscreen/webm-combine.test.ts`.
+- [ ] Manual verify: a real YouTube 1440p / 2160p VP9 download produces a playable `.webm` in VLC + Chrome with correct duration + accurate seek.
+
+**Phase D — Polish + verification matrix.**
+- [ ] Popup size badge: AV1 and VP9 `contentLength` values already arrive from the InnerTube response — verify `pickDisplayVariantUrl` covers them and the badge shows the right number when a 4K row is picked.
+- [ ] Profile peak offscreen heap during a full 4K run (snapshot via DevTools). Target: <500 MB JS heap regardless of input size; OPFS bytes carry the rest.
+- [ ] README + AGENTS.md: add AV1 / VP9 / 4K lines to the support matrix.
+
+**Ship criterion:** a public 4K YouTube video downloads to a playable file (`.mp4` for AV1, `.webm` for VP9) with correct duration, audio/video sync, and accurate seek. Peak JS heap stays bounded regardless of source size. 1080p AVC continues to work unchanged.
+
+Explicitly out of scope:
+- VP9 transmuxed into MP4 with `vp09` sample entries. WebM is the simpler exit and avoids container/sample-entry plumbing we don't need.
+- Re-encoding (any codec → any codec). Project rule, unchanged.
+- HDR / HFR metadata fidelity audit. CICP / mastering display / max CLL tags should pass through untouched in stream-copy, but it's not separately verified — file as a follow-up if a user reports washed-out HDR output.
+- 8K (4320p). Same pipeline, but message-bus / OPFS-quota envelopes need their own real-world test.
+- AV1 audio (`opus` in MP4 via the experimental codec entry). Stays AAC for the AV1 path.
+
+---
+
 ## v0.12 - HLS completeness
 
 Goal: make the HLS claim accurate before calling the extension broadly usable. Parked behind v0.11 so YouTube support ships first; the muxer module v0.11 introduces also lights up the alt-audio + fMP4 work below.
