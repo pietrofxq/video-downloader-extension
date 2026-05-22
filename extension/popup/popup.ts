@@ -166,13 +166,34 @@ function formatVariant(v: HlsVariant): string {
   return resPart || bwPart || 'variant';
 }
 
-// Variants whose URL classifies as `dash` are rejected by the offscreen
-// dispatch until v0.11.1 lands the fMP4 two-track combine muxer.
-// Surface them in the picker (so users see the full inventory) but
-// label them clearly + push them to the back so the browser's default
-// option is something that actually downloads.
+// Adaptive (DASH/YouTube fMP4) variants need a paired audio URL AND
+// an AVC video codec to ride the v0.11.1 two-track combine muxer —
+// the muxer is stream-copy in mp4 only, so VP9-in-webm and AV1-in-cmaf
+// can't go through it. Progressive (single-stream) and HLS variants
+// are always downloadable.
+//
+// We still surface the unsupported ones so users see the full
+// inventory; they get an inline label and are sorted behind the
+// downloadable ones so the browser's default <option> picks something
+// that will actually save.
 function isVariantDownloadable(v: HlsVariant): boolean {
-  return classifyUrl(v.url) !== 'dash';
+  const kind = classifyUrl(v.url);
+  if (kind !== 'dash') return true;
+  if (!v.pairedAudioUrl) return false;
+  // codecs is RFC 6381 (e.g. `avc1.640028`, `vp09.00.50.08`,
+  // `av01.0.05M.08`). Empty / null is treated as unknown — assume
+  // muxable rather than hide the variant entirely.
+  const codecs = v.codecs ?? '';
+  if (!codecs) return true;
+  return /^avc1\./i.test(codecs);
+}
+
+function unsupportedLabel(v: HlsVariant): string {
+  const codecs = (v.codecs ?? '').toLowerCase();
+  if (codecs.startsWith('vp09') || codecs.startsWith('vp9')) return 'VP9 — not supported';
+  if (codecs.startsWith('av01') || codecs.startsWith('av1')) return 'AV1 — not supported';
+  if (!v.pairedAudioUrl) return 'video-only — not supported';
+  return 'not supported';
 }
 
 function qualityOptionsHtml(entry: MediaEntry): string {
@@ -190,7 +211,7 @@ function qualityOptionsHtml(entry: MediaEntry): string {
     decorated.sort((a, b) => Number(b.ok) - Number(a.ok));
     return decorated
       .map(({ v, ok }) => {
-        const label = ok ? formatVariant(v) : `${formatVariant(v)} — HD (v0.11.1)`;
+        const label = ok ? formatVariant(v) : `${formatVariant(v)} — ${unsupportedLabel(v)}`;
         return `<option value="${escapeHtml(v.url)}">${escapeHtml(label)}</option>`;
       })
       .join('');
@@ -474,13 +495,52 @@ function render(state: TabStateMsg | null | undefined): void {
   const rawEntries = lastTabState.entries ?? [];
   entriesById = new Map(rawEntries.map((e) => [e.id, e] as const));
   const visible = filterTopLevel(rawEntries);
-  if (visible.length === 0) {
+
+  // Cross-tab "Active downloads" section (v0.11.3). Any download state
+  // whose mediaId isn't backed by a visible entry on THIS tab gets
+  // surfaced here. Catches both downloads started from other tabs and
+  // downloads whose tab navigated away / cleared its entry list.
+  // The inline per-row progress UI (renderActionForDownload) still
+  // handles downloads whose mediaId IS visible — they're not duplicated.
+  const orphans: DownloadState[] = [];
+  for (const ds of downloadsByMediaId.values()) {
+    if (!entriesById.has(ds.mediaId)) orphans.push(ds);
+  }
+  orphans.sort((a, b) => b.startedAt - a.startedAt);
+
+  const snap = captureFormState();
+  const orphanHtml = orphans.length > 0 ? renderOrphanSection(orphans) : '';
+  if (visible.length === 0 && orphans.length === 0) {
     $content.innerHTML = renderEmpty();
     return;
   }
-  const snap = captureFormState();
-  $content.innerHTML = visible.map(renderRow).join('');
+  $content.innerHTML = orphanHtml + visible.map(renderRow).join('');
   restoreFormState(snap);
+}
+
+function renderOrphanSection(orphans: DownloadState[]): string {
+  const rows = orphans.map(renderOrphanRow).join('');
+  return `
+    <div class="orphan-section">
+      <div class="orphan-section-title">Active downloads</div>
+      ${rows}
+    </div>
+  `;
+}
+
+function renderOrphanRow(state: DownloadState): string {
+  const displayName = (state.filename || '').replace(/\.[^.]+$/, '') || 'download';
+  const tabLabel = `tab #${state.tabId}`;
+  const action = renderActionForDownload(state);
+  return `
+    <div class="row row-orphan" data-media-id="${escapeHtml(state.mediaId)}">
+      <div class="row-title" title="${escapeHtml(state.filename || '')}">${escapeHtml(displayName)}</div>
+      <div class="row-meta">
+        <span class="stat">${escapeHtml(tabLabel)}</span>
+      </div>
+      <div class="row-actions">${action}</div>
+    </div>
+  `;
 }
 
 function applyDownloadState(state: DownloadState): void {

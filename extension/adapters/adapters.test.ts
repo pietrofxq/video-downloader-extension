@@ -1,10 +1,15 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { pickAdapter, getAdapter, ADAPTERS } from './index.js';
 import hotmart from './hotmart.js';
 import youtube, {
+  _clearInnerTubeCacheForTests,
   buildStreamsFromPlayerResponse,
+  discoverYouTubeStreams,
+  fetchInnerTubePlayer,
   parseYtPlayerResponseFromScript,
 } from './youtube.js';
+import { INNERTUBE_CLIENTS, buildInnerTubePlayerBody } from './youtube-clients.js';
+import { computeSapisidhash, extractVisitorData } from './youtube-auth.js';
 import defaultAdapter from './default.js';
 
 describe('pickAdapter', () => {
@@ -208,7 +213,7 @@ describe('buildStreamsFromPlayerResponse', () => {
     expect(out[0].variants?.[1].url).toBe('https://x/18');
   });
 
-  it('skips formats without a direct url (signatureCipher path is deferred)', () => {
+  it('admits signatureCipher-only formats (v0.11.1 adaptive HD)', () => {
     const out = buildStreamsFromPlayerResponse({
       videoDetails: { videoId: 'xyz' },
       streamingData: {
@@ -224,7 +229,32 @@ describe('buildStreamsFromPlayerResponse', () => {
         ],
       },
     });
-    // All formats gated by signatureCipher → no playable variants → empty.
+    // signatureCipher path is now wired: variant.url = decoded url= and
+    // variant.signatureCipher carries the full encoded triple for the
+    // downloader to re-decipher on fetch.
+    expect(out).toHaveLength(1);
+    expect(out[0].variants).toHaveLength(1);
+    expect(out[0].variants?.[0].url).toBe('https://example');
+    expect(out[0].variants?.[0].signatureCipher).toBe('s=AAA&sp=sig&url=https%3A%2F%2Fexample');
+  });
+
+  it('drops signatureCipher formats whose url= is missing', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'xyz' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            // No url= component — unrecoverable.
+            signatureCipher: 's=AAA&sp=sig',
+            mimeType: 'video/mp4',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+        ],
+      },
+    });
     expect(out).toEqual([]);
   });
 
@@ -414,5 +444,377 @@ describe('hotmart.deriveFilename', () => {
       pageMeta: { sectionTitle: 'a/b', lessonTitle: 'c:d' },
     });
     expect(name).not.toMatch(/[/:]/);
+  });
+});
+
+// ---------- v0.11.2 InnerTube client fallback ----------
+
+describe('buildInnerTubePlayerBody', () => {
+  it('emits the canonical WEB_CREATOR client shape', () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    const body = buildInnerTubePlayerBody('dQw4w9WgXcQ', wc) as {
+      context: { client: Record<string, string>; thirdParty?: object };
+      videoId: string;
+      contentCheckOk: boolean;
+      racyCheckOk: boolean;
+    };
+    expect(body.context.client.clientName).toBe('WEB_CREATOR');
+    expect(body.context.client.clientVersion).toMatch(/^\d+\.\d+/);
+    expect(body.videoId).toBe('dQw4w9WgXcQ');
+    expect(body.contentCheckOk).toBe(true);
+    expect(body.racyCheckOk).toBe(true);
+    // Non-embed clients have no thirdParty.embedUrl.
+    expect(body.context.thirdParty).toBeUndefined();
+  });
+
+  it('includes thirdParty.embedUrl for TVHTML5_SIMPLY_EMBEDDED_PLAYER', () => {
+    const tv = INNERTUBE_CLIENTS.find((c) => c.name === 'TVHTML5_SIMPLY_EMBEDDED_PLAYER')!;
+    const body = buildInnerTubePlayerBody('abc', tv) as {
+      context: { thirdParty: { embedUrl: string } };
+    };
+    expect(body.context.thirdParty?.embedUrl).toBe('https://www.youtube.com/');
+  });
+});
+
+describe('fetchInnerTubePlayer', () => {
+  // The vi.spyOn return is typed as a fetch-specific mock; we widen to
+  // `any` because the test only cares about `.mockResolvedValue` etc.
+  // not the precise generic shape.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fetchSpy: any;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it('POSTs to the right URL with the API key from the client config', async () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ videoDetails: { videoId: 'abc' } }), { status: 200 }),
+    );
+    await fetchInnerTubePlayer('abc', wc);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [calledUrl, init] = fetchSpy.mock.calls[0];
+    expect(String(calledUrl)).toBe(`https://www.youtube.com/youtubei/v1/player?key=${wc.apiKey}`);
+    expect((init as RequestInit).method).toBe('POST');
+    expect((init as RequestInit).credentials).toBe('include');
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.videoId).toBe('abc');
+    expect(body.context.client.clientName).toBe('WEB_CREATOR');
+    // X-YouTube-Client-* headers carry the client name + version for
+    // YouTube's server-side routing.
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['X-YouTube-Client-Name']).toBe('WEB_CREATOR');
+    expect(headers['X-YouTube-Client-Version']).toBe(wc.context.clientVersion);
+  });
+
+  it('returns null on non-200', async () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    fetchSpy.mockResolvedValue(new Response('forbidden', { status: 403 }));
+    expect(await fetchInnerTubePlayer('abc', wc)).toBeNull();
+  });
+
+  it('returns null on fetch error', async () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    fetchSpy.mockRejectedValue(new Error('network down'));
+    expect(await fetchInnerTubePlayer('abc', wc)).toBeNull();
+  });
+
+  it('returns null on malformed JSON body', async () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    fetchSpy.mockResolvedValue(new Response('<html>error</html>', { status: 200 }));
+    expect(await fetchInnerTubePlayer('abc', wc)).toBeNull();
+  });
+
+  it('adds Authorization + X-Origin + X-Goog-Visitor-Id when auth is provided', async () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    await fetchInnerTubePlayer('abc', wc, {
+      sapisidhash: 'SAPISIDHASH 1700000000_deadbeef',
+      visitorData: 'CgtfYWJjMTIzNDU2Nyje3OK',
+    });
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('SAPISIDHASH 1700000000_deadbeef');
+    expect(headers['X-Origin']).toBe('https://www.youtube.com');
+    expect(headers['X-Goog-Visitor-Id']).toBe('CgtfYWJjMTIzNDU2Nyje3OK');
+    // visitorData also lands in the body's context.client so server-side
+    // checks reading from there pass too.
+    const body = JSON.parse(init.body as string);
+    expect(body.context.client.visitorData).toBe('CgtfYWJjMTIzNDU2Nyje3OK');
+  });
+
+  it('skips the auth headers when auth is empty', async () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    await fetchInnerTubePlayer('abc', wc);
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBeUndefined();
+    expect(headers['X-Origin']).toBeUndefined();
+    expect(headers['X-Goog-Visitor-Id']).toBeUndefined();
+    const body = JSON.parse(init.body as string);
+    expect(body.context.client.visitorData).toBeUndefined();
+  });
+});
+
+describe('computeSapisidhash', () => {
+  it('hashes `${ts} ${SAPISID} ${origin}` with SHA-1 and formats the header', async () => {
+    // SAPISID is the canonical cookie name; the helper also accepts
+    // the __Secure-3PAPISID and __Secure-1PAPISID variants.
+    const out = await computeSapisidhash(
+      'foo=bar; SAPISID=ABC123XYZ; baz=qux',
+      'https://www.youtube.com',
+      1700000000,
+    );
+    // Expected SHA-1 of `1700000000 ABC123XYZ https://www.youtube.com`
+    // computed independently — locks the algorithm down.
+    const expected = await sha1Hex(`1700000000 ABC123XYZ https://www.youtube.com`);
+    expect(out).toBe(`SAPISIDHASH 1700000000_${expected}`);
+  });
+
+  it('falls back to __Secure-3PAPISID when SAPISID is absent', async () => {
+    const out = await computeSapisidhash(
+      'foo=bar; __Secure-3PAPISID=secureXyz; baz=qux',
+      'https://www.youtube.com',
+      1700000000,
+    );
+    const expected = await sha1Hex(`1700000000 secureXyz https://www.youtube.com`);
+    expect(out).toBe(`SAPISIDHASH 1700000000_${expected}`);
+  });
+
+  it('prefers SAPISID over the __Secure-* aliases when multiple are present', async () => {
+    const out = await computeSapisidhash(
+      'SAPISID=primary; __Secure-3PAPISID=secondary',
+      'https://www.youtube.com',
+      1700000000,
+    );
+    const expected = await sha1Hex(`1700000000 primary https://www.youtube.com`);
+    expect(out).toBe(`SAPISIDHASH 1700000000_${expected}`);
+  });
+
+  it('returns null when no SAPISID cookie is present', async () => {
+    expect(
+      await computeSapisidhash('foo=bar; baz=qux', 'https://www.youtube.com', 1700000000),
+    ).toBe(null);
+    expect(await computeSapisidhash('', 'https://www.youtube.com', 1700000000)).toBe(null);
+  });
+});
+
+async function sha1Hex(message: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(message));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+describe('extractVisitorData', () => {
+  it('reads responseContext.visitorData when present', () => {
+    expect(extractVisitorData({ responseContext: { visitorData: 'CgtABC' } })).toBe('CgtABC');
+  });
+  it('returns null when responseContext is missing', () => {
+    expect(extractVisitorData({})).toBeNull();
+    expect(extractVisitorData(null)).toBeNull();
+    expect(extractVisitorData({ responseContext: {} })).toBeNull();
+  });
+});
+
+// ---------- discoverYouTubeStreams fallback ladder ----------
+//
+// We mock fetch + construct a minimal fake Document so the inline
+// scrape can run without jsdom. The ladder branches we want to lock in:
+//   1. Inline has adaptive → InnerTube never called.
+//   2. Inline lacks adaptive but has videoId → InnerTube is called.
+//   3. InnerTube clients all fail → result falls back to inline.
+//   4. InnerTube success on the first client → second client not tried.
+
+function makeFakeDoc(scriptBodies: string[], title = ''): Document {
+  const scripts = scriptBodies.map((text) => ({ textContent: text }));
+  return {
+    title,
+    querySelectorAll: (sel: string): { length: number } & Iterable<unknown> => {
+      if (sel === 'script') {
+        return {
+          length: scripts.length,
+          [Symbol.iterator]: () => scripts[Symbol.iterator](),
+        };
+      }
+      return {
+        length: 0,
+        [Symbol.iterator]: () => [][Symbol.iterator](),
+      };
+    },
+    querySelector: () => null,
+  } as unknown as Document;
+}
+
+describe('discoverYouTubeStreams', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fetchSpy: any;
+
+  beforeEach(() => {
+    _clearInnerTubeCacheForTests();
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it('uses inline when inline has an adaptive variant (no InnerTube call)', async () => {
+    // Inline player response with one adaptive video + one AAC audio.
+    // buildStreamsFromPlayerResponse will pair them, producing an
+    // adaptive variant — that's enough to skip the InnerTube ladder.
+    const inline = {
+      videoDetails: { videoId: 'inline-vid' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://video.example/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://audio.example/140',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+          },
+        ],
+      },
+    };
+    const doc = makeFakeDoc([`var ytInitialPlayerResponse = ${JSON.stringify(inline)};`]);
+    const streams = await discoverYouTubeStreams(doc);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(streams).toHaveLength(1);
+    expect(streams[0].variants?.some((v) => !!v.pairedAudioUrl)).toBe(true);
+  });
+
+  it('falls through to InnerTube when inline has no adaptive variants', async () => {
+    // SABR-shaped inline: metadata only, no URLs on adaptive.
+    const inline = {
+      videoDetails: { videoId: 'sabr-vid' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        formats: [
+          {
+            itag: 18,
+            url: 'https://video.example/18',
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            bitrate: 500_000,
+            width: 640,
+            height: 360,
+          },
+        ],
+        adaptiveFormats: [
+          {
+            itag: 137,
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+            // no url / no signatureCipher / no cipher — SABR
+          },
+        ],
+      },
+    };
+    // InnerTube response: full URLs flow.
+    const innerTube = {
+      videoDetails: { videoId: 'sabr-vid' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://innertube.example/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://innertube.example/140',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+          },
+        ],
+      },
+    };
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(innerTube), { status: 200 }));
+    const doc = makeFakeDoc([`var ytInitialPlayerResponse = ${JSON.stringify(inline)};`]);
+    const streams = await discoverYouTubeStreams(doc);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(streams[0].variants?.[0].url).toBe('https://innertube.example/137');
+    expect(streams[0].variants?.some((v) => !!v.pairedAudioUrl)).toBe(true);
+  });
+
+  it('falls back to inline when every InnerTube client returns no adaptive', async () => {
+    // Inline: SABR-shaped (no adaptive URLs).
+    const inline = {
+      videoDetails: { videoId: 'all-fail' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        formats: [
+          {
+            itag: 18,
+            url: 'https://video.example/18',
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            bitrate: 500_000,
+            width: 640,
+            height: 360,
+          },
+        ],
+        adaptiveFormats: [],
+      },
+    };
+    // Every InnerTube client also returns empty adaptive — non-200
+    // responses count as "no adaptive" for the ladder.
+    fetchSpy.mockResolvedValue(new Response('nope', { status: 403 }));
+    const doc = makeFakeDoc([`var ytInitialPlayerResponse = ${JSON.stringify(inline)};`]);
+    const streams = await discoverYouTubeStreams(doc);
+    // Both clients were attempted, then we fell back to inline.
+    expect(fetchSpy).toHaveBeenCalledTimes(INNERTUBE_CLIENTS.length);
+    // Inline progressive itag=18 still surfaces.
+    expect(streams[0].variants?.some((v) => v.url.includes('/18'))).toBe(true);
+  });
+
+  it('stops at the first InnerTube client that returns adaptive', async () => {
+    const inline = {
+      videoDetails: { videoId: 'first-wins' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: { adaptiveFormats: [] },
+    };
+    const success = {
+      videoDetails: { videoId: 'first-wins' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://innertube.example/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://innertube.example/140',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+          },
+        ],
+      },
+    };
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(success), { status: 200 }));
+    const doc = makeFakeDoc([`var ytInitialPlayerResponse = ${JSON.stringify(inline)};`]);
+    await discoverYouTubeStreams(doc);
+    // First client succeeded → no second call.
+    expect(fetchSpy).toHaveBeenCalledOnce();
   });
 });

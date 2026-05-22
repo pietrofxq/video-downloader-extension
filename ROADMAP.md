@@ -339,18 +339,86 @@ Tasks:
 
 Goal: lift the v0.11 progressive-only ceiling. The hard piece is the muxer — most of the rest of the work is already done by v0.11 (decipher handles both n + signature, AST extractor is in, sandboxed eval works, pairedAudioUrl is plumbed).
 
-- [ ] **Admit `signatureCipher`-only formats in `discoverStreams`.** Currently `variantFromFormat` skips them (returns null when `!f.url`). Switch to populating both `variant.url` (the decoded url= from the cipher) and a new `variant.signatureCipher` field carrying the full encoded triple. Add `signatureCipher?: string` to `HlsVariant`.
-- [ ] **Thread `signatureCipher` from popup pick → SW → offscreen.** Either as a sibling field of `variantUrl` in `START_DOWNLOAD` + `RunPayload` + `DownloadRequest`, or via an in-memory lookup on the SW side keyed by the picked variant url. The downloader calls `solver.decipher({ signatureCipher })` instead of `solver.decipher(plainUrl)` when present.
-- [ ] **fMP4 two-track combine muxer.** New module `extension/offscreen/mp4-combine.ts` that takes two fMP4 byte sources (video + audio) and produces one MP4 with both tracks. Re-uses v0.7's box-walking utilities (tfdt patching, mvhd/tkhd/mdhd durations) and adds:
-  - Parse each input's `moov`; extract its single `trak`.
-  - Build a combined `moov` with both `trak` boxes — track-ID renumber (audio → 2), `mvhd.duration` = max of both.
-  - Interleave moofs from both inputs in time order with monotonic `mfhd.sequence_number` and per-track-cumulative `tfdt`.
-  - Patch `tfhd.track_ID` on the renumbered side.
-- [ ] **New adaptive download path in the offscreen** that fetches video + audio in parallel, feeds both through `mp4-combine`, writes the result to OPFS via the v0.10 workspace. Dispatch sends here when `req.kind === 'dash'` AND `req.signatureCipher` (or some equivalent "adaptive YouTube" marker) is set.
-- [ ] Verify: 1080p YouTube download produces a single MP4 that plays in VLC + QuickTime with audio + video sync, correct duration, accurate seek.
-- [ ] README updates: drop the "progressive-only" caveat from the YouTube section.
+- [x] **Admit `signatureCipher`-only formats in `discoverStreams`.** `variantFromFormat` now goes through `urlAndCipherFromFormat`: when a YouTube format ships `signatureCipher` instead of `url`, we decode the `url=` component for `variant.url` and keep the full encoded triple on `variant.signatureCipher`. `pickDefaultAudioFormat` admits cipher-gated audio the same way (1080p+ era YouTube serves audio under signatureCipher too).
+- [x] **Thread `signatureCipher` from popup pick → SW → offscreen.** New `HlsVariant.signatureCipher` + `HlsVariant.pairedSignatureCipher` mirror the existing `pairedAudioUrl` plumbing. `RunPayload` and `DownloadRequest` carry them through; the adaptive downloader hands them to `solver.decipher({ signatureCipher })` per side.
+- [x] **fMP4 two-track combine muxer.** New module `extension/offscreen/mp4-combine.ts`:
+  - Parses each input's `moov`; extracts its single `trak`.
+  - Builds a combined `moov` with both `trak` boxes — audio track_ID renumbered (default 2), `mvhd.duration` = max of both, `mvhd.next_track_ID` bumped past, combined `mvex` with both `trex` entries.
+  - Interleaves moofs from both inputs in tfdt time order with monotonic global `mfhd.sequence_number`. Video wins time ties so the keyframe lands first.
+  - Patches `tfhd.track_ID` on every audio moof.
+  - No tfdt / signed-cto / duration-sentinel patching needed — googlevideo serves correctly-formed fragments (unlike mux.js output).
+- [x] **New adaptive download path in the offscreen** (`extension/offscreen/adaptive.ts`). Deciphers both video + audio URLs through `getYouTubeSolver`, fetches both in parallel via the content-script proxy, hands the buffers to `combineFmp4`, writes the result straight to OPFS via the v0.10 workspace. `offscreen.ts` dispatch routes `req.kind === 'dash'` here.
+- [x] README updates: replace the v0.7-pinned coverage line with an accurate v0.11.1 line.
 
-**Ship criterion:** picking the best AVC variant on a public non-DRM YouTube video produces a playable MP4. AV1 / VP9 stay deferred.
+**Ship criterion:** the adaptive HD pipeline is wired end-to-end — signatureCipher + n-param decipher, fMP4 two-track combine muxer, parallel video+audio fetch, OPFS-backed output — and ready to light up the moment YouTube responses carry per-format URLs again. Reaching that surface requires v0.11.2's InnerTube client switch (see below); on current WEB-client responses, real-world adaptive HD is **not downloadable** because YouTube no longer serves per-format URLs to the WEB client.
+
+What lands in v0.11.1:
+- `HlsVariant` gained `signatureCipher` + `pairedSignatureCipher`; the YouTube adapter's `urlAndCipherFromFormat` extracts the decoded `url=` for the picker and keeps the encoded triple alongside. Reads both modern (`signatureCipher`) and legacy (`cipher`) field names so future field-rename drift doesn't silently drop variants.
+- `RunPayload` + `DownloadRequest` carry the cipher blobs through to the offscreen, mirroring the v0.11 `pairedAudioUrl` plumbing.
+- `extension/offscreen/mp4-combine.ts` parses both single-track fMP4 inputs, builds a combined moov (two traks with distinct track_IDs, combined mvex, bumped `next_track_ID`, max-duration mvhd with fragment-derived fallback for sources that ship zero/0xFFFFFFFF), and emits time-interleaved moofs with globally monotonic `mfhd.sequence_number` and patched audio-side `tfhd.track_ID`.
+- `extension/offscreen/adaptive.ts` deciphers both URLs via `getYouTubeSolver`, fetches in parallel via the content-script proxy, hands buffers to `combineFmp4`, and writes straight to OPFS via the v0.10 workspace. `offscreen.ts` dispatch now routes `req.kind === 'dash'` here.
+- Popup gate (`isVariantDownloadable`) now admits adaptive AVC variants with `pairedAudioUrl`; VP9/AV1/video-only get an inline "not supported" label and sort behind the downloadable ones.
+
+What stays unlit until v0.11.2:
+- **YouTube WEB-client responses have migrated to SABR (Server-Adaptive Bit Rate).** `streamingData.adaptiveFormats[]` ships full metadata (itag, codec, bitrate, contentLength, …) but no `url`, no `signatureCipher`, no `cipher`. The only field pointing at playback is `streamingData.serverAbrStreamingUrl`, which requires UMP-encoded POSTs plus a poToken from BotGuard. Only the progressive itag=18 fallback still carries a direct URL — which is why 360p downloads work today and the rest of the inventory doesn't even surface as selectable.
+- The path forward is **not** to implement SABR client-side (poToken solving is a separate multi-week project). Instead, v0.11.2 swaps the catalog scrape from inline `ytInitialPlayerResponse` to a content-script POST to `/youtubei/v1/player` with a non-WEB InnerTube client context (IOS / TVHTML5_SIMPLY_EMBEDDED_PLAYER). Those clients have historically returned `adaptiveFormats[].url` or `signatureCipher` — exactly what v0.11.1's pipeline already consumes.
+- **Known limit also carrying forward**: each adaptive stream is fetched in one shot through the content-script proxy and crosses `chrome.runtime.sendMessage` as a base64 body. For large files (high-bitrate 1080p AVC ≈ tens to low hundreds of MB) this can hit Chrome's practical message-size limit. The proper fix is the chunked / Range-based proxy scoped under v1.3 (progressive downloads); same fix lights up both paths.
+
+---
+
+## v0.11.2 - Switch YouTube catalog scrape to non-WEB InnerTube client
+
+Goal: get adaptive (HD) URLs flowing again so v0.11.1's pipeline has something to actually run on. YouTube's WEB-client `ytInitialPlayerResponse.streamingData.adaptiveFormats[]` has been stripped of per-format URLs (SABR migration); non-WEB clients (IOS, TVHTML5_SIMPLY_EMBEDDED_PLAYER, …) still ship them. v0.11.2 swaps the scrape source.
+
+Constraints:
+- **No backend.** Per AGENTS.md §10 we can't introduce a server. The InnerTube POST has to originate from a context allowed to talk to `www.youtube.com` — i.e. the content script in the watch tab. (Same-origin avoids the CORS / referer issues that 403'd offscreen-originated googlevideo fetches in v0.6.)
+- **No poToken / SABR client.** That's a separate project — see "out of scope" below.
+- **Client choice is volatile.** Which client returns URLs has been an arms race throughout 2024–25. The implementation needs to be parameterizable so we can rotate without re-engineering: a small `INNERTUBE_CLIENTS` table mirroring LuanRT/YouTube.js's current working set.
+
+Tasks:
+
+- [x] Define a typed `InnerTubeClient` record in `extension/adapters/youtube-clients.ts` carrying `{ name, apiKey, context, thirdPartyEmbedUrl?, userAgent? }`. Seeded with `IOS` and `TVHTML5_SIMPLY_EMBEDDED_PLAYER`. Per-client API keys (different clients ship different ones).
+- [x] In `extension/adapters/youtube.ts`, add `fetchInnerTubePlayer(videoId, client)` that runs **in the content-script context** (`credentials: 'include'`, `Content-Type: application/json`, `X-YouTube-Client-Name` / `-Version` headers; client-specific User-Agent when declared). Returns the parsed body or `null` on any failure.
+- [x] Adapter `discoverStreams` becomes a two-step ladder (now async):
+  1. Parse inline `ytInitialPlayerResponse` first (cheap; still useful for some videos and for `videoDetails`).
+  2. If inline yields no adaptive variants, iterate `INNERTUBE_CLIENTS` in order; first response with adaptive URLs wins. Cached per `videoId` so SPA nav + initial-scrape pairs don't double-fetch.
+- [x] Adapter contract change: `discoverStreams` typed as `DiscoveredStream[] | Promise<DiscoveredStream[]>`. `page-content.ts` wraps the call in `Promise.resolve()` so synchronous adapters stay zero-cost.
+- [x] Surface the chosen client in the SW log (`youtube discoverStreams: client=IOS succeeded`) so when a future YouTube change breaks the current client, the diagnostic is one log line away. `buildStreamsFromPlayerResponse` also tags the `source` field on its log (`inline` / `innertube` / `probe:<name>`).
+- [x] DRM / unplayable handling unchanged — `playabilityStatus !== 'OK'` from the InnerTube response yields no streams, same gate the inline path uses.
+- [x] Unit tests: `buildInnerTubePlayerBody` per-client shape (IOS + embedded-TV); `fetchInnerTubePlayer` request URL + headers + body, non-200 + threw-fetch + malformed-JSON failure modes; `discoverYouTubeStreams` ladder (inline-wins, fallthrough-to-InnerTube, all-fail-to-inline, stop-at-first-success).
+- [x] AGENTS.md addition: §8 gotchas #18 (SABR / InnerTube fallback) + #19 (discoverStreams now async-capable).
+
+Verification (manual, on real YouTube — pending real-world smoke run):
+- [ ] Inventory log shows `source: 'innertube'` (or `'inline'` if the inline blob still ships URLs) with adaptive formats reporting `url` / `sig` / `cipher`. The previous `no-url(keys=...)` diagnostic should no longer fire for adaptive entries.
+- [ ] Picker shows 1080p (or whatever the highest AVC variant is) as selectable.
+- [ ] 1080p AVC download produces a single MP4 that plays in VLC + QuickTime with audio + video sync, correct duration, accurate seek. (This is the verify box v0.11.1 deferred — it belongs here, after the URLs come back.)
+
+Explicitly out of scope (parked for a later milestone, possibly never):
+- SABR / UMP streaming client-side. Requires UMP framing + BotGuard-derived poToken. Track separately if every InnerTube client gets gated at once.
+- AV1 / VP9 muxing. Picker continues to label these "not supported" — lifting needs a re-encode the project rules out.
+
+**Ship criterion:** on a public non-DRM YouTube watch page, the popup lists the full adaptive inventory with selectable HD AVC variants, and downloading 1080p produces a playable MP4 via the v0.11.1 pipeline.
+
+---
+
+## v0.11.3 - Popup UX overhaul + chunked Range proxy
+
+Goal: unblock real-world 1080p YouTube downloads (the v0.11.1 + v0.11.2 pipeline ran into chrome.runtime.sendMessage's body-size cap on the first real test) and fix two structural popup-UX gaps that surfaced during the smoke testing.
+
+Tasks:
+
+- [x] **SPA-nav stale entries.** `chrome.tabs.onUpdated` doesn't always surface `changeInfo.url` for YouTube's `history.pushState`. The fix compares `tab.url` against the cached URL on every fire (not just when changeInfo carries the URL), so a pushState that only triggers a status/title update still detects the navigation and clears the old entry list. Download states are no longer cleared on nav — they persist so the cross-tab section below can surface them.
+- [x] **Cross-tab download visibility.** `broadcastDownloadState` no longer filters by tabId — every subscribed popup receives every download state update. The SUBSCRIBE replay drops the per-tab filter for the same reason. The popup grows an "Active downloads" section at the top that renders any download whose mediaId isn't backed by a visible entry in the current tab (covers cross-tab downloads + same-tab downloads whose entry was cleared on navigation). Cancel + Show-in-folder + Dismiss handlers were already delegated by data attribute, so they work on orphan rows without changes.
+- [x] **Chunked Range-based proxy fetch.** New `extension/offscreen/range-fetch.ts`: `fetchArrayBufferRanged` issues 8 MB-per-chunk `Range: bytes=A-B` requests through the existing content-script proxy, parses Content-Range on the first reply to learn total size, and reassembles into a single Uint8Array. Each chunk's base64 transit stays under chrome.runtime.sendMessage's practical cap. Sequential (not parallel) chunks to keep message bus pressure low. Graceful fallback when the server ignores Range and returns the full body. `downloadAdaptive` switches both video and audio fetches to this helper; HLS / progressive paths are unchanged (their per-segment payloads already fit comfortably).
+- [x] Tests: 11 new tests for `parseTotalSize` (Content-Range / Content-Length / fallback) and `fetchArrayBufferRanged` (single chunk, multi-chunk reassembly, progress callbacks, default chunk size, failed-chunk propagation, server-ignores-Range fallback, AbortSignal mid-stream). Plus the existing 211 tests stay green.
+- [x] Content script `handleProxyFetch` now forwards `Content-Length` and `Content-Range` on the reply. Both are documented as the only response headers it surfaces (everything else would bloat the runtime message we're trying to fit under the cap).
+
+**Ship criterion:** real-world 1080p AVC YouTube download produces a playable MP4 end-to-end (this is the verify box v0.11.1 + v0.11.2 deferred). Cross-tab downloads visible in any popup. SPA navigation between YouTube watch pages clears stale entries.
+
+Manual verification (pending real-world smoke run):
+- [ ] Click Download on a 1080p variant. Offscreen log shows multiple `fetch video done` lines as chunks complete (not a single hang). Popup row's progress bar advances through the fetch phase. Final MP4 plays in VLC + QuickTime with correct duration + audio/video sync.
+- [ ] Open YouTube watch page A, navigate to B without refreshing. Popup re-discovers B's variants. A's entries are gone.
+- [ ] Start a download in tab A, switch to tab B, open popup. The download appears in the "Active downloads" section at the top. Cancel button works.
 
 ---
 

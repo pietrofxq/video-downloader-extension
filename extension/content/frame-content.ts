@@ -121,6 +121,15 @@ interface ProxyFetchReply {
   status?: number;
   error?: string;
   body?: string;
+  /**
+   * Selected response headers passed back to the caller. We only forward
+   * fields the downloader actually consumes — `Content-Length` and
+   * `Content-Range` for v0.11.3's chunked Range path. Anything else
+   * would bloat the runtime message and risk hitting the size cap we're
+   * trying to dodge.
+   */
+  contentLength?: number;
+  contentRange?: string;
 }
 
 async function handleProxyFetch({
@@ -161,10 +170,25 @@ async function handleProxyFetch({
       error: bodyHint ? `fetch ${res.status}: ${bodyHint}` : `fetch ${res.status}`,
     };
   }
+  const contentLengthRaw = res.headers.get('content-length');
+  const contentLength = contentLengthRaw ? Number(contentLengthRaw) : undefined;
+  const contentRange = res.headers.get('content-range') ?? undefined;
   if (responseType === 'arrayBuffer') {
     const buf = await res.arrayBuffer();
-    return { ok: true, status: res.status, body: uint8ArrayToBase64(new Uint8Array(buf)) };
+    return {
+      ok: true,
+      status: res.status,
+      body: uint8ArrayToBase64(new Uint8Array(buf)),
+      ...(Number.isFinite(contentLength) ? { contentLength: contentLength as number } : {}),
+      ...(contentRange ? { contentRange } : {}),
+    };
   }
   const text = await res.text();
-  return { ok: true, status: res.status, body: text };
+  return {
+    ok: true,
+    status: res.status,
+    body: text,
+    ...(Number.isFinite(contentLength) ? { contentLength: contentLength as number } : {}),
+    ...(contentRange ? { contentRange } : {}),
+  };
 }

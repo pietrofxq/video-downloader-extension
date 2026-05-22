@@ -50,11 +50,16 @@ if (/^https?:$/.test(location.protocol) && !window.__VDL_PAGE_CONTENT_INSTALLED_
   function publishAdapterState(adapter: ReturnType<typeof pickAdapter>, meta: PageMeta): void {
     sendPageMeta(adapter.id, meta);
     if (typeof adapter.discoverStreams === 'function') {
-      try {
-        sendStreamsDiscovered(adapter.id, adapter.discoverStreams(document));
-      } catch {
-        // ignore — adapter discovery is best-effort
-      }
+      // Adapters can return synchronously (default / hotmart) or
+      // asynchronously (youtube — InnerTube fetch). Promise.resolve
+      // normalizes both shapes; failures (sync throw or rejection)
+      // are swallowed because discovery is best-effort.
+      Promise.resolve()
+        .then(() => adapter.discoverStreams!(document))
+        .then((streams) => sendStreamsDiscovered(adapter.id, streams))
+        .catch(() => {
+          // ignore — adapter discovery is best-effort
+        });
     }
   }
 

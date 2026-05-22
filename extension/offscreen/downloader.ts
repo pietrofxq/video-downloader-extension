@@ -31,6 +31,10 @@ export interface ProxyFetchReply {
   status?: number;
   body?: string;
   error?: string;
+  /** Response Content-Length when the server provided one. */
+  contentLength?: number;
+  /** Response Content-Range when the request was a Range query. */
+  contentRange?: string;
 }
 
 export type ProxyFetch = (payload: ProxyFetchPayload) => Promise<ProxyFetchReply>;

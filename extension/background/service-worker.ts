@@ -130,18 +130,22 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     void updateBadge(tabId);
   }
 
-  if (!changeInfo.url) {
-    // Initial load may give us a URL via `tab.url` before changeInfo.url ever
-    // fires; cache it so detections aren't blind. Same http(s) guard as
-    // seedTabs — we don't want chrome:// or devtools:// URLs in the store.
-    if (isHttpUrl(tab?.url) && !(await getTabUrl(tabId))) await setTabUrl(tabId, tab.url);
-    return;
-  }
-  if (!isHttpUrl(changeInfo.url)) return;
-  const { prev } = await setTabUrl(tabId, changeInfo.url);
-  if (prev && prev !== changeInfo.url) {
-    log.info('tab navigated — clearing entries', { tabId, prev, next: changeInfo.url });
-    clearDownloadStatesForTab(tabId);
+  // YouTube's SPA navigation between watch pages uses `history.pushState`,
+  // and Chrome doesn't always surface that as `changeInfo.url`. The
+  // resulting `tabs.onUpdated` event arrives with only e.g. `status` or
+  // `title` set — but `tab.url` already reflects the new location. We
+  // catch that case by comparing `tab.url` against the cached URL on
+  // every fire, regardless of which `changeInfo` field triggered it.
+  const nextUrl = changeInfo.url || tab?.url;
+  if (!isHttpUrl(nextUrl)) return;
+  const { prev } = await setTabUrl(tabId, nextUrl);
+  if (prev && prev !== nextUrl) {
+    log.info('tab navigated — clearing entries', { tabId, prev, next: nextUrl });
+    // NOTE: we intentionally don't clear download states on nav anymore.
+    // v0.11.3 makes the popup's "Active downloads" section cross-tab, so
+    // a download started on one page must remain visible (and
+    // cancellable) after the user navigates away. Stale completed
+    // states get GC'd on tab close (onRemoved) + by explicit dismiss.
     const had = await clearTab(tabId);
     if (had) await updateBadge(tabId);
   }
@@ -812,6 +816,15 @@ async function handleStartDownload(payload: {
     ...(pickedVariant?.pairedAudioContentLength
       ? { pairedAudioContentLength: pickedVariant.pairedAudioContentLength }
       : {}),
+    // signatureCipher blobs (v0.11.1): when the variant came from
+    // YouTube's adaptiveFormats and the URL was gated behind
+    // signatureCipher, forward the encoded triple so the offscreen
+    // can re-decipher the signature before fetching. Skipped for
+    // variants whose `url` is already directly fetchable.
+    ...(pickedVariant?.signatureCipher ? { signatureCipher: pickedVariant.signatureCipher } : {}),
+    ...(pickedVariant?.pairedSignatureCipher
+      ? { pairedSignatureCipher: pickedVariant.pairedSignatureCipher }
+      : {}),
   };
 
   // Seed the per-request state BEFORE forwarding to the offscreen, so the
@@ -869,6 +882,8 @@ interface RunPayload {
   filename: string;
   pairedAudioUrl?: string;
   pairedAudioContentLength?: number;
+  signatureCipher?: string;
+  pairedSignatureCipher?: string;
 }
 
 let activeRequestId: string | null = null;
@@ -1013,8 +1028,11 @@ function setDownloadState(requestId: string, patch: Partial<DownloadState>): Dow
 
 function broadcastDownloadState(state: DownloadState | null | undefined): void {
   if (!state || popupPorts.size === 0) return;
-  for (const [port, info] of popupPorts) {
-    if (info.tabId !== state.tabId) continue;
+  // v0.11.3: downloads are cross-tab now. Every subscribed popup
+  // gets every state update, regardless of which tab it lives on.
+  // The popup renders an always-visible "Active downloads" section
+  // populated from the union; tab-scoped media entries stay separate.
+  for (const [port] of popupPorts) {
     try {
       port.postMessage({ type: 'DOWNLOAD_STATE', state });
     } catch {
@@ -1400,16 +1418,16 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       const state = await getTabState(tabId);
       port.postMessage({ type: 'STATE', state });
-      // Replay any in-flight (or recently-completed) download states for
-      // this tab so a popup reopened mid-download immediately sees the
-      // progress bar / saved pill instead of an empty action area.
+      // Replay every in-flight + recently-completed download state to
+      // the popup so the "Active downloads" section is populated
+      // immediately on open, regardless of which tab the download
+      // originated from. v0.11.3 dropped the per-tab filter here for
+      // the same reason as in broadcastDownloadState.
       for (const [, ds] of downloadStates) {
-        if (ds.tabId === tabId) {
-          try {
-            port.postMessage({ type: 'DOWNLOAD_STATE', state: ds });
-          } catch {
-            // disconnected; onDisconnect will clean up
-          }
+        try {
+          port.postMessage({ type: 'DOWNLOAD_STATE', state: ds });
+        } catch {
+          // disconnected; onDisconnect will clean up
         }
       }
       // Schedule parsing for any HLS entries whose manifest hasn't been

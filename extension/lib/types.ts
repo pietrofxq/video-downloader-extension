@@ -86,6 +86,16 @@ export interface HlsVariant {
    * popup to add the audio size into the displayed estimate.
    */
   pairedAudioContentLength?: number;
+  /**
+   * YouTube `signatureCipher` blob (URL-encoded `url=...&s=...&sp=...`)
+   * for the video stream when present. Higher-quality YouTube formats
+   * (1080p+) come exclusively as signatureCipher; the downloader
+   * re-deciphers the signature on the fly via yt-sig's solver. When
+   * unset, `url` is already fetchable (post n-transform).
+   */
+  signatureCipher?: string;
+  /** Same as `signatureCipher` but for the paired audio stream. */
+  pairedSignatureCipher?: string;
 }
 
 export interface HlsAlternate {
@@ -138,6 +148,14 @@ export interface DownloadRequest {
   pairedAudioUrl?: string;
   /** Byte length of the paired audio stream when known. */
   pairedAudioContentLength?: number;
+  /**
+   * YouTube signatureCipher blobs forwarded from the picked variant.
+   * The adaptive downloader (v0.11.1) hands these to yt-sig's solver
+   * so the deciphered signature lands on the URL before fetch. Unset
+   * for any non-YouTube / non-cipher-gated variant.
+   */
+  signatureCipher?: string;
+  pairedSignatureCipher?: string;
 }
 
 export interface DownloadOutcome {
@@ -267,7 +285,7 @@ export interface Adapter {
    *
    * MUST NOT make network calls; same constraint as scrapePageMeta.
    */
-  discoverStreams?(document: Document): DiscoveredStream[];
+  discoverStreams?(document: Document): DiscoveredStream[] | Promise<DiscoveredStream[]>;
   /** Returns a sanitized filename (no extension). Always produces a non-empty string. */
   deriveFilename(params: AdapterFilenameInput): string;
   /** Optional. Patch outbound headers before segment fetches. */

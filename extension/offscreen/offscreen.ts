@@ -1,6 +1,7 @@
 import { MSG, parseExtensionMessage } from '../lib/messages.js';
 import { log, redactUrl } from '../lib/log.js';
 import { UnsupportedFormatError } from '../lib/errors.js';
+import { downloadAdaptive } from './adaptive.js';
 import { downloadHlsAsTs, type DownloadResult } from './downloader.js';
 import { downloadProgressive } from './progressive.js';
 import { OpfsWorkspace } from './storage.js';
@@ -174,13 +175,13 @@ function dispatchDownload(
         req,
       );
     case 'dash':
-      // Adaptive HD path (separate video + audio fMP4 muxed into one
-      // MP4) ships in a follow-up commit; until then, fail loud rather
-      // than silently route to the HLS pipeline.
-      return Promise.reject(
-        new UnsupportedFormatError(
-          'DASH / YouTube-adaptive downloads land in a follow-up v0.11 commit.',
-        ),
+      // YouTube adaptive HD path (separate video + audio fMP4 muxed
+      // into one MP4 via mp4-combine). Generic DASH manifests still
+      // land here and will fail in downloadAdaptive when no paired
+      // audio URL is set — that path is the v1.2 milestone.
+      return downloadAdaptive(
+        { proxyFetch: io.proxyFetch, onProgress: io.onProgress, signal: io.signal },
+        req,
       );
     default: {
       // Compile-time exhaustiveness: extending MediaKind without
