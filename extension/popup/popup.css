@@ -563,11 +563,44 @@ body {
 .row-orphan {
   /* Tighter than a normal row — no filename input, no quality picker. */
   padding: 8px 16px;
+  /* Needed to position the absolute-positioned `.orphan-remove`
+     close button relative to the row. */
+  position: relative;
 }
 .row-orphan .row-title {
   font-size: 13px;
   margin-bottom: 4px;
+  /* Leave space on the right so the title can't overflow into the
+     close button's hit area. */
+  padding-right: 22px;
 }
 .row-orphan .row-meta {
   margin-bottom: 6px;
+}
+
+/* Small × close button at the top-right of terminal-state orphan
+   rows. Reuses the dismiss-download click handler (same class) but
+   styled as a corner-close affordance rather than an action button. */
+.orphan-remove {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6e7681);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
+  cursor: pointer;
+  border-radius: 4px;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.orphan-remove:hover {
+  background: var(--row-hover, rgba(255, 255, 255, 0.05));
+  color: var(--text, #c9d1d9);
 }

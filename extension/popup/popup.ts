@@ -532,8 +532,22 @@ function renderOrphanRow(state: DownloadState): string {
   const displayName = (state.filename || '').replace(/\.[^.]+$/, '') || 'download';
   const tabLabel = `tab #${state.tabId}`;
   const action = renderActionForDownload(state);
+  // For terminal states (saved/error/canceled) the user's mental
+  // model is "I'm done with this — get it off my screen", not the
+  // existing "↻ Again" affordance that the inline-row uses. Offer a
+  // dedicated close button at top-right that maps to the same
+  // dismiss-download handler (we just reuse the class so the
+  // delegated click handler picks it up). In-flight states keep the
+  // existing Cancel × from renderActionForDownload — adding a
+  // second × here would be confusing.
+  const isTerminal =
+    state.status === 'saved' || state.status === 'error' || state.status === 'canceled';
+  const removeBtn = isTerminal
+    ? `<button type="button" class="orphan-remove dismiss-download" data-media-id="${escapeHtml(state.mediaId)}" title="Remove from list" aria-label="Remove from list">&#x2715;</button>`
+    : '';
   return `
     <div class="row row-orphan" data-media-id="${escapeHtml(state.mediaId)}">
+      ${removeBtn}
       <div class="row-title" title="${escapeHtml(state.filename || '')}">${escapeHtml(displayName)}</div>
       <div class="row-meta">
         <span class="stat">${escapeHtml(tabLabel)}</span>
