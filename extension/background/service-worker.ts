@@ -565,6 +565,7 @@ async function handleStreamsDiscovered({
       // step needed. isMaster=true so the popup picker treats them as
       // multi-quality the same way it treats parsed HLS masters.
       ...(s.variants ? { variants: s.variants, isMaster: true } : {}),
+      ...(s.audioTracks ? { audioTracks: s.audioTracks } : {}),
     };
     const stored = await addEntry(tabId, entry);
     if (stored) anyAdded = true;
@@ -732,8 +733,9 @@ async function handleStartDownload(payload: {
   mediaId: string;
   variantUrl?: string;
   filename?: string;
+  audioTrackId?: string;
 }): Promise<{ requestId: string; filename: string }> {
-  const { mediaId, variantUrl, filename: filenameOverride } = payload;
+  const { mediaId, variantUrl, filename: filenameOverride, audioTrackId } = payload;
   // Find the MediaEntry across all tabs.
   let entry: MediaEntry | null = null;
   let entryTabId: number | null = null;
@@ -804,6 +806,26 @@ async function handleStartDownload(payload: {
   // pairedAudioUrl is unset.
   const pickedVariant = entry.variants?.find((v) => v.url === finalVariantUrl);
 
+  // Audio-track override (YouTube multi-dub videos). When the popup
+  // sends `audioTrackId`, resolve it against the entry's audioTracks
+  // catalog and substitute that track's URL / contentLength / cipher
+  // for the variant's default paired audio. Falls back silently to
+  // the variant default when the id doesn't resolve (stale popup
+  // state after a re-discovery, etc.) — keeps the download moving.
+  let resolvedPairedAudioUrl = pickedVariant?.pairedAudioUrl;
+  let resolvedPairedAudioContentLength = pickedVariant?.pairedAudioContentLength;
+  let resolvedPairedSignatureCipher = pickedVariant?.pairedSignatureCipher;
+  let resolvedAudioTrackId: string | undefined;
+  if (audioTrackId && entry.audioTracks) {
+    const at = entry.audioTracks.find((t) => t.id === audioTrackId);
+    if (at) {
+      resolvedPairedAudioUrl = at.url;
+      resolvedPairedAudioContentLength = at.contentLength;
+      resolvedPairedSignatureCipher = at.signatureCipher;
+      resolvedAudioTrackId = at.id;
+    }
+  }
+
   const runPayload: RunPayload = {
     requestId,
     kind: downloadKind,
@@ -812,9 +834,9 @@ async function handleStartDownload(payload: {
     frameId: entry.frameId ?? 0,
     headers: entry.headers,
     filename,
-    ...(pickedVariant?.pairedAudioUrl ? { pairedAudioUrl: pickedVariant.pairedAudioUrl } : {}),
-    ...(pickedVariant?.pairedAudioContentLength
-      ? { pairedAudioContentLength: pickedVariant.pairedAudioContentLength }
+    ...(resolvedPairedAudioUrl ? { pairedAudioUrl: resolvedPairedAudioUrl } : {}),
+    ...(resolvedPairedAudioContentLength
+      ? { pairedAudioContentLength: resolvedPairedAudioContentLength }
       : {}),
     // signatureCipher blobs (v0.11.1): when the variant came from
     // YouTube's adaptiveFormats and the URL was gated behind
@@ -822,9 +844,10 @@ async function handleStartDownload(payload: {
     // can re-decipher the signature before fetching. Skipped for
     // variants whose `url` is already directly fetchable.
     ...(pickedVariant?.signatureCipher ? { signatureCipher: pickedVariant.signatureCipher } : {}),
-    ...(pickedVariant?.pairedSignatureCipher
-      ? { pairedSignatureCipher: pickedVariant.pairedSignatureCipher }
+    ...(resolvedPairedSignatureCipher
+      ? { pairedSignatureCipher: resolvedPairedSignatureCipher }
       : {}),
+    ...(resolvedAudioTrackId ? { audioTrackId: resolvedAudioTrackId } : {}),
   };
 
   // Seed the per-request state BEFORE forwarding to the offscreen, so the
@@ -839,6 +862,7 @@ async function handleStartDownload(payload: {
     // pinned to the right variant after the dropdown is replaced by the
     // in-progress UI.
     variantUrl: finalVariantUrl,
+    ...(resolvedAudioTrackId ? { audioTrackId: resolvedAudioTrackId } : {}),
     status: 'pending',
     stage: null,
     current: 0,
@@ -888,6 +912,8 @@ interface RunPayload {
   pairedAudioContentLength?: number;
   signatureCipher?: string;
   pairedSignatureCipher?: string;
+  /** Resolved audio track id (logging / state visibility only). */
+  audioTrackId?: string;
 }
 
 let activeRequestId: string | null = null;

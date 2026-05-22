@@ -2,12 +2,15 @@ import { describe, it, expect } from 'vitest';
 
 import {
   filterDownloadableVariants,
+  formatAudioTrack,
   formatVariant,
+  hasAudioTrackPicker,
   isVariantDownloadable,
+  pickDefaultAudioTrackId,
   pickDisplayVariantUrl,
   pickDownloadVariantUrl,
 } from './popup-helpers.js';
-import type { DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
+import type { AudioTrack, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
 
 // ---------- fixtures ----------
 
@@ -89,6 +92,18 @@ function entry(over: Partial<MediaEntry> & { id: string }): MediaEntry {
     ...(over.isMaster != null ? { isMaster: over.isMaster } : {}),
     ...(over.totalDuration != null ? { totalDuration: over.totalDuration } : {}),
     ...(over.parseError != null ? { parseError: over.parseError } : {}),
+    ...(over.audioTracks ? { audioTracks: over.audioTracks } : {}),
+  };
+}
+
+function audioTrack(over: Partial<AudioTrack> & { id: string }): AudioTrack {
+  return {
+    id: over.id,
+    displayName: over.displayName ?? over.id,
+    isDefault: over.isDefault ?? false,
+    url: over.url ?? `https://r1.googlevideo.com/audio?track=${over.id}`,
+    ...(over.contentLength != null ? { contentLength: over.contentLength } : {}),
+    ...(over.signatureCipher ? { signatureCipher: over.signatureCipher } : {}),
   };
 }
 
@@ -104,6 +119,7 @@ function downloadState(over: Partial<DownloadState> & { mediaId: string }): Down
     total: over.total ?? 100,
     startedAt: over.startedAt ?? 0,
     ...(over.variantUrl ? { variantUrl: over.variantUrl } : {}),
+    ...(over.audioTrackId ? { audioTrackId: over.audioTrackId } : {}),
   };
 }
 
@@ -355,5 +371,94 @@ describe('formatVariant', () => {
       bandwidth: 0,
     });
     expect(formatVariant(v)).toBe('auto');
+  });
+});
+
+// ---------- hasAudioTrackPicker ----------
+
+describe('hasAudioTrackPicker', () => {
+  it('false when audioTracks is missing', () => {
+    expect(hasAudioTrackPicker(entry({ id: 'e' }))).toBe(false);
+  });
+
+  it('false with one track (picker would be a 1-option no-op)', () => {
+    const e = entry({
+      id: 'e',
+      audioTracks: [audioTrack({ id: 'en.4', isDefault: true })],
+    });
+    expect(hasAudioTrackPicker(e)).toBe(false);
+  });
+
+  it('true with two or more tracks', () => {
+    const e = entry({
+      id: 'e',
+      audioTracks: [
+        audioTrack({ id: 'en.4', isDefault: true }),
+        audioTrack({ id: 'fr.4', isDefault: false }),
+      ],
+    });
+    expect(hasAudioTrackPicker(e)).toBe(true);
+  });
+});
+
+// ---------- pickDefaultAudioTrackId ----------
+
+describe('pickDefaultAudioTrackId', () => {
+  it('returns null when entry has no tracks', () => {
+    expect(pickDefaultAudioTrackId(entry({ id: 'e' }), null)).toBeNull();
+  });
+
+  it('picks the track marked isDefault', () => {
+    const e = entry({
+      id: 'e',
+      audioTracks: [
+        audioTrack({ id: 'fr.4', isDefault: false }),
+        audioTrack({ id: 'en.4', isDefault: true }),
+      ],
+    });
+    expect(pickDefaultAudioTrackId(e, null)).toBe('en.4');
+  });
+
+  it('falls back to the first track when none is default', () => {
+    const e = entry({
+      id: 'e',
+      audioTracks: [
+        audioTrack({ id: 'fr.4', isDefault: false }),
+        audioTrack({ id: 'de.4', isDefault: false }),
+      ],
+    });
+    expect(pickDefaultAudioTrackId(e, null)).toBe('fr.4');
+  });
+
+  it('pins to the download state track when one is in flight', () => {
+    // After a download starts the dropdown is replaced by the
+    // in-progress UI; if we re-derive the default later (e.g. on
+    // re-render) we want the picker to stay on the user's chosen
+    // track, not silently revert to the isDefault track.
+    const e = entry({
+      id: 'e',
+      audioTracks: [
+        audioTrack({ id: 'en.4', isDefault: true }),
+        audioTrack({ id: 'fr.4', isDefault: false }),
+      ],
+    });
+    const ds = downloadState({ mediaId: 'e', audioTrackId: 'fr.4' });
+    expect(pickDefaultAudioTrackId(e, ds)).toBe('fr.4');
+  });
+});
+
+// ---------- formatAudioTrack ----------
+
+describe('formatAudioTrack', () => {
+  it('appends "(original)" for the default track', () => {
+    expect(
+      formatAudioTrack(audioTrack({ id: 'en.4', displayName: 'English', isDefault: true })),
+    ).toBe('English (original)');
+  });
+
+  it('returns the displayName verbatim for non-default tracks', () => {
+    expect(
+      formatAudioTrack(audioTrack({ id: 'fr.4', displayName: 'French', isDefault: false })),
+    ).toBe('French');
   });
 });

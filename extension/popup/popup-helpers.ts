@@ -9,7 +9,7 @@
 // and side-effecting wiring stay in popup.ts.
 
 import { classifyUrl } from '../lib/media-detection.js';
-import type { DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
+import type { AudioTrack, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
 
 /**
  * True iff this variant can ride the project's stream-copy muxer.
@@ -102,4 +102,46 @@ export function formatVariant(v: HlsVariant): string {
  */
 export function filterDownloadableVariants(variants: readonly HlsVariant[]): HlsVariant[] {
   return variants.filter(isVariantDownloadable);
+}
+
+/**
+ * Should the popup render the audio-track picker for this entry?
+ * Two or more tracks → yes (the user has a meaningful choice).
+ * One track or none → no (the default paired audio covers it).
+ */
+export function hasAudioTrackPicker(entry: MediaEntry): boolean {
+  return Array.isArray(entry.audioTracks) && entry.audioTracks.length > 1;
+}
+
+/**
+ * Pick the audio track to pre-select in the dropdown. Three rules:
+ *
+ *  1. A download is already running for this entry — pin to whichever
+ *     track the SW resolved (carried on `DownloadState.audioTrackId`).
+ *     Keeps the picker stable after the dropdown is hidden by the
+ *     in-progress UI.
+ *  2. One track is marked `isDefault` — use it. This is the
+ *     load-bearing case for multi-dub videos: it's what fixes the
+ *     "English video downloaded with French audio" regression.
+ *  3. Fall back to the first track in the list (insertion order).
+ */
+export function pickDefaultAudioTrackId(
+  entry: MediaEntry,
+  downloadState: DownloadState | null | undefined,
+): string | null {
+  if (downloadState?.audioTrackId) return downloadState.audioTrackId;
+  const tracks = entry.audioTracks;
+  if (!tracks || tracks.length === 0) return null;
+  const def = tracks.find((t) => t.isDefault);
+  return (def ?? tracks[0]).id;
+}
+
+/**
+ * Format an AudioTrack for the dropdown. Prefer `displayName`; mark
+ * the default track so the user can recognize "original" at a glance
+ * even when YouTube's localized displayName is opaque (e.g. just a
+ * language code).
+ */
+export function formatAudioTrack(track: AudioTrack): string {
+  return track.isDefault ? `${track.displayName} (original)` : track.displayName;
 }

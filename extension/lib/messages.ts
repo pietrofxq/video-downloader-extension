@@ -86,6 +86,12 @@ export interface StartDownloadMessage extends MessageBase<typeof MSG.START_DOWNL
     variantUrl?: string;
     /** User-supplied filename (no extension); the SW sanitizes it. */
     filename?: string;
+    /**
+     * Selected audio track id when the entry has multi-track audio
+     * (YouTube dubs). Optional — when omitted, the SW uses the
+     * variant's default paired audio. See `MediaEntry.audioTracks`.
+     */
+    audioTrackId?: string;
   };
 }
 

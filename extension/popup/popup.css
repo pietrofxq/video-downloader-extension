@@ -297,8 +297,9 @@ body {
   margin-top: 10px;
 }
 
-/* Quality picker */
-.quality {
+/* Quality + audio-track pickers — same shape, sit side by side */
+.quality,
+.audio-track {
   flex: 1;
   min-width: 0;
   background: var(--panel);
@@ -314,12 +315,14 @@ body {
     background-color 120ms ease;
 }
 
-.quality:hover {
+.quality:hover,
+.audio-track:hover {
   border-color: var(--border-strong);
   background: var(--panel-elevated);
 }
 
-.quality:focus {
+.quality:focus,
+.audio-track:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--shadow-glow);

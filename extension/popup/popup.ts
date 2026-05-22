@@ -6,7 +6,10 @@ import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import type { DownloadStage, DownloadState, MediaEntry } from '../lib/types.ts';
 import {
   filterDownloadableVariants,
+  formatAudioTrack,
   formatVariant,
+  hasAudioTrackPicker,
+  pickDefaultAudioTrackId,
   pickDisplayVariantUrl,
   pickDownloadVariantUrl,
 } from './popup-helpers.js';
@@ -160,6 +163,16 @@ function resolveSizeBytes(entry: MediaEntry, variantUrl: string | undefined): nu
     if (dur > 0 && v && v.bandwidth > 0) return Math.round((v.bandwidth * dur) / 8);
   }
   return 0;
+}
+
+function audioTrackOptionsHtml(entry: MediaEntry, selectedId: string | null): string {
+  const tracks = entry.audioTracks ?? [];
+  return tracks
+    .map((t) => {
+      const sel = t.id === selectedId ? ' selected' : '';
+      return `<option value="${escapeHtml(t.id)}"${sel}>${escapeHtml(formatAudioTrack(t))}</option>`;
+    })
+    .join('');
 }
 
 function qualityOptionsHtml(entry: MediaEntry): string {
@@ -338,6 +351,17 @@ function renderRow(entry: MediaEntry): string {
     ? ''
     : `<select class="quality" aria-label="Quality">${qualityOptionsHtml(entry)}</select>`;
 
+  // Audio-track picker — only when the entry actually has multiple
+  // tracks (YouTube multi-dub videos). Hidden during downloads for the
+  // same reason as the quality picker.
+  const audioTrackSelect =
+    !downloadState && hasAudioTrackPicker(entry)
+      ? `<select class="audio-track" aria-label="Audio track">${audioTrackOptionsHtml(
+          entry,
+          pickDefaultAudioTrackId(entry, downloadState),
+        )}</select>`
+      : '';
+
   // Best-effort duration / size — only known once a media playlist has
   // been parsed. `pickDisplayVariantUrl` returns the URL the badges
   // should describe: the in-flight download's picked URL when one
@@ -382,6 +406,7 @@ function renderRow(entry: MediaEntry): string {
       <div class="row-meta">${metaHtml}</div>
       <div class="row-actions">
         ${qualitySelect}
+        ${audioTrackSelect}
         ${action}
       </div>
     </div>
@@ -668,18 +693,31 @@ $content.addEventListener('click', (e: MouseEvent) => {
   const filenameInput = row.querySelector<HTMLInputElement>('.filename-input');
   const filenameOverride = filenameInput?.value?.trim();
 
+  // Audio-track id from the row's audio-track <select>, when the
+  // picker was rendered (multi-dub videos). Omit when the entry has
+  // only one track — SW falls back to the variant's default
+  // pairedAudioUrl in that case.
+  const audioSel = row.querySelector<HTMLSelectElement>('.audio-track');
+  const audioTrackId = audioSel?.value || undefined;
+
   log.info('[VDL] download clicked', {
     mediaId: entry.id,
     adapterId: entry.adapterId,
     kind: entry.kind,
     variantUrl: redactUrl(variantUrl),
     filename: filenameOverride ?? null,
+    audioTrackId: audioTrackId ?? null,
   });
 
   chrome.runtime
     .sendMessage({
       type: MSG.START_DOWNLOAD,
-      payload: { mediaId: entry.id, variantUrl, filename: filenameOverride },
+      payload: {
+        mediaId: entry.id,
+        variantUrl,
+        filename: filenameOverride,
+        ...(audioTrackId ? { audioTrackId } : {}),
+      },
     })
     .then((resp) => {
       log.debug('[VDL] start ack', resp);

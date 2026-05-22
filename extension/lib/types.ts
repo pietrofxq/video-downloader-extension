@@ -57,6 +57,14 @@ export interface MediaEntry {
   totalDuration?: number;
   /** Set if parsing the manifest failed; popup shows "manifest unavailable". */
   parseError?: string;
+  /**
+   * Available audio tracks when the video has multiple dubs. YouTube
+   * adapter populates this; HLS / other adapters leave it unset. The
+   * popup renders a second picker when present and `length > 1`; the
+   * SW substitutes the chosen track's URL for the variant's default
+   * `pairedAudioUrl` at download time.
+   */
+  audioTracks?: AudioTrack[];
 }
 
 // ---------- HLS parsing ----------
@@ -96,6 +104,32 @@ export interface HlsVariant {
   signatureCipher?: string;
   /** Same as `signatureCipher` but for the paired audio stream. */
   pairedSignatureCipher?: string;
+}
+
+/**
+ * A single audio rendition of a YouTube video when the video has
+ * multiple audio tracks (dubs). YouTube ships one set of AAC formats
+ * per track, each tagged with `audioTrack: { id, displayName,
+ * audioIsDefault }`. The adapter groups them and surfaces one
+ * AudioTrack per `id` with the best AAC format's URL / cipher /
+ * size already picked.
+ *
+ * On entries without dubs the list is undefined (most videos); the
+ * popup hides the audio-track picker in that case and the default
+ * paired audio baked into each variant is used.
+ */
+export interface AudioTrack {
+  /** YouTube `audioTrack.id` — e.g. "en.4" / "fr.4". Stable per video. */
+  id: string;
+  /** Human-readable name from `audioTrack.displayName`. */
+  displayName: string;
+  /** True for the canonical "original" track (`audioIsDefault`). */
+  isDefault: boolean;
+  /** AAC format URL after signature decode; safe to fetch as-is when no cipher. */
+  url: string;
+  contentLength?: number;
+  /** Set when the chosen AAC format was cipher-gated; downloader re-deciphers. */
+  signatureCipher?: string;
 }
 
 export interface HlsAlternate {
@@ -156,6 +190,14 @@ export interface DownloadRequest {
    */
   signatureCipher?: string;
   pairedSignatureCipher?: string;
+  /**
+   * Selected audio track id when the user picked a non-default dub.
+   * Carried through for logging / state visibility only — the SW has
+   * already resolved the audio track into the `pairedAudioUrl` /
+   * `pairedSignatureCipher` / `pairedAudioContentLength` fields above,
+   * so the offscreen downloader doesn't need to inspect this.
+   */
+  audioTrackId?: string;
 }
 
 export interface DownloadOutcome {
@@ -184,6 +226,14 @@ export interface DownloadState {
    * bandwidth) and looked like the quality picked had reverted.
    */
   variantUrl?: string;
+  /**
+   * Audio track id the SW resolved for this download (when the entry
+   * had multiple `audioTracks` and the user picked one). Surfaced
+   * back to the popup so the audio-track picker stays pinned to the
+   * chosen track after the dropdowns are replaced by the in-progress
+   * UI — same role `variantUrl` plays for the quality picker.
+   */
+  audioTrackId?: string;
   status: DownloadStatus;
   stage: DownloadStage;
   /**
@@ -262,6 +312,13 @@ export interface DiscoveredStream {
    * internally for the adaptive HD path.
    */
   variants?: HlsVariant[];
+  /**
+   * Available audio tracks (dubs) for this video. Adapters that
+   * surface multi-track YouTube videos populate this; otherwise leave
+   * unset. The SW copies it onto the promoted MediaEntry. See
+   * `MediaEntry.audioTracks` for the consumer side.
+   */
+  audioTracks?: AudioTrack[];
 }
 
 /**

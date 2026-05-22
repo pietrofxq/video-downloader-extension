@@ -3,6 +3,7 @@ import { pickAdapter, getAdapter, ADAPTERS } from './index.js';
 import hotmart from './hotmart.js';
 import youtube, {
   _clearInnerTubeCacheForTests,
+  buildAudioTracks,
   buildStreamsFromPlayerResponse,
   discoverYouTubeStreams,
   fetchInnerTubePlayer,
@@ -358,6 +359,152 @@ describe('buildStreamsFromPlayerResponse', () => {
     expect(out[0].variants?.[0].pairedAudioUrl).toBeUndefined();
   });
 
+  it('prefers audioIsDefault when picking the default paired audio (multi-dub video)', () => {
+    // The bug this regression-tests: a video with English (original) +
+    // French dub, where the French dub happens to win the bitrate
+    // sort. Picking purely by bitrate paired French audio with the
+    // English-original video. The fix prefers `audioIsDefault === true`
+    // tracks first; bitrate is only the within-default tiebreaker.
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://x/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://x/140-en',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+            audioTrack: { id: 'en.4', displayName: 'English (original)', audioIsDefault: true },
+          },
+          {
+            itag: 140,
+            url: 'https://x/140-fr',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 160_000,
+            audioTrack: { id: 'fr.4', displayName: 'French', audioIsDefault: false },
+          },
+        ],
+      },
+    });
+    const adaptive = out[0].variants?.find((v) => v.url === 'https://x/137');
+    // Without the fix this would pair French (higher bitrate); with
+    // the fix it pairs English (the audioIsDefault track).
+    expect(adaptive?.pairedAudioUrl).toBe('https://x/140-en');
+  });
+
+  it('still pairs single-track videos by bitrate (audioTrack absent)', () => {
+    // Sanity: when no track is marked default — i.e. a single-track
+    // video that doesn't even ship the audioTrack field — the
+    // fallback path picks highest-bitrate AAC. Preserves v0.11
+    // behavior for the common case.
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://x/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 139,
+            url: 'https://x/139-aac-48',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 48_000,
+          },
+          {
+            itag: 140,
+            url: 'https://x/140-aac-128',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+          },
+        ],
+      },
+    });
+    const adaptive = out[0].variants?.find((v) => v.url === 'https://x/137');
+    expect(adaptive?.pairedAudioUrl).toBe('https://x/140-aac-128');
+  });
+
+  it('surfaces audioTracks on the DiscoveredStream when video has multiple dubs', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://x/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://x/140-en',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+            contentLength: '512000',
+            audioTrack: { id: 'en.4', displayName: 'English (original)', audioIsDefault: true },
+          },
+          {
+            itag: 140,
+            url: 'https://x/140-fr',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 160_000,
+            contentLength: '640000',
+            audioTrack: { id: 'fr.4', displayName: 'French', audioIsDefault: false },
+          },
+        ],
+      },
+    });
+    expect(out[0].audioTracks).toHaveLength(2);
+    // Default track sorted first so the popup picker defaults to original.
+    expect(out[0].audioTracks?.[0].id).toBe('en.4');
+    expect(out[0].audioTracks?.[0].isDefault).toBe(true);
+    expect(out[0].audioTracks?.[0].url).toBe('https://x/140-en');
+    expect(out[0].audioTracks?.[0].contentLength).toBe(512000);
+    expect(out[0].audioTracks?.[1].id).toBe('fr.4');
+    expect(out[0].audioTracks?.[1].isDefault).toBe(false);
+  });
+
+  it('omits audioTracks on single-track videos (no audioTrack field at all)', () => {
+    const out = buildStreamsFromPlayerResponse({
+      videoDetails: { videoId: 'abc' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://x/137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://x/140',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+          },
+        ],
+      },
+    });
+    // Single-track videos elide audioTrack entirely — the popup
+    // shouldn't render a 1-option picker, so audioTracks stays unset.
+    expect(out[0].audioTracks).toBeUndefined();
+  });
+
   it('admits VP9 / AV1 video variants (codec compatibility is enforced at dispatch)', () => {
     // discoverStreams no longer filters by video codec — the picker
     // surfaces the full inventory, and the dispatch + future muxer
@@ -389,6 +536,76 @@ describe('buildStreamsFromPlayerResponse', () => {
     });
     expect(out).toHaveLength(1);
     expect(out[0].variants).toHaveLength(2);
+  });
+});
+
+describe('buildAudioTracks', () => {
+  it('returns undefined when zero AAC formats are present', () => {
+    expect(buildAudioTracks([])).toBeUndefined();
+  });
+
+  it('returns undefined when a single track is present (no picker needed)', () => {
+    expect(
+      buildAudioTracks([
+        {
+          itag: 140,
+          url: 'https://x/140',
+          mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+          bitrate: 128_000,
+          audioTrack: { id: 'en.4', displayName: 'English', audioIsDefault: true },
+        },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('picks the highest-bitrate AAC format per track id', () => {
+    const out = buildAudioTracks([
+      {
+        itag: 139,
+        url: 'https://x/139-en-low',
+        mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+        bitrate: 48_000,
+        audioTrack: { id: 'en.4', displayName: 'English', audioIsDefault: true },
+      },
+      {
+        itag: 140,
+        url: 'https://x/140-en-high',
+        mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+        bitrate: 128_000,
+        audioTrack: { id: 'en.4', displayName: 'English', audioIsDefault: true },
+      },
+      {
+        itag: 140,
+        url: 'https://x/140-fr',
+        mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+        bitrate: 128_000,
+        audioTrack: { id: 'fr.4', displayName: 'French', audioIsDefault: false },
+      },
+    ]);
+    expect(out).toHaveLength(2);
+    const en = out?.find((t) => t.id === 'en.4');
+    expect(en?.url).toBe('https://x/140-en-high');
+  });
+
+  it('skips Opus / WebM audio (mux pipeline only handles AAC/m4a today)', () => {
+    expect(
+      buildAudioTracks([
+        {
+          itag: 251,
+          url: 'https://x/251',
+          mimeType: 'audio/webm; codecs="opus"',
+          bitrate: 160_000,
+          audioTrack: { id: 'en.4', displayName: 'English', audioIsDefault: true },
+        },
+        {
+          itag: 251,
+          url: 'https://x/251-fr',
+          mimeType: 'audio/webm; codecs="opus"',
+          bitrate: 160_000,
+          audioTrack: { id: 'fr.4', displayName: 'French', audioIsDefault: false },
+        },
+      ]),
+    ).toBeUndefined();
   });
 });
 

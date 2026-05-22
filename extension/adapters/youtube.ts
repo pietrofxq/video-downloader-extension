@@ -1,6 +1,6 @@
 import { log } from '../lib/log.js';
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
-import type { Adapter, DiscoveredStream, HlsVariant, PageMeta } from '../lib/types.ts';
+import type { Adapter, AudioTrack, DiscoveredStream, HlsVariant, PageMeta } from '../lib/types.ts';
 import {
   INNERTUBE_CLIENTS,
   buildInnerTubePlayerBody,
@@ -143,6 +143,23 @@ interface YtFormat {
   contentLength?: string;
   /** Frames per second when declared. */
   fps?: number;
+  /**
+   * Per-track metadata when the video ships multiple audio renditions
+   * (dubs). YouTube returns ALL tracks' AAC/Opus formats inside
+   * `adaptiveFormats[]`, each tagged with this object. Absent on
+   * single-track videos.
+   *
+   * `audioIsDefault` is the load-bearing flag — the canonical
+   * "original" track for the video is marked true on its formats and
+   * is what the player picks unless the user overrides. Without
+   * checking this, picking the highest-bitrate AAC across the array
+   * picks an arbitrary dub.
+   */
+  audioTrack?: {
+    id?: string;
+    displayName?: string;
+    audioIsDefault?: boolean;
+  };
 }
 
 /**
@@ -319,22 +336,85 @@ function variantFromFormat(f: YtFormat, pairedAudio?: YtFormat): HlsVariant | nu
 
 /**
  * Pick a single default audio rendition to pair with every adaptive
- * (video-only) variant. Highest-bitrate AAC/m4a wins because that's
- * what the v0.11 mux path expects; itag 140 is the universal anchor.
+ * (video-only) variant.
+ *
+ * Multi-dub videos (e.g. official channels with French/Spanish/German
+ * tracks) ship ALL tracks' AAC formats in `adaptiveFormats[]`, each
+ * tagged with an `audioTrack` object whose `audioIsDefault: true`
+ * marks the canonical original track. Picking purely by bitrate would
+ * grab whichever dub happened to win the bitrate tiebreak — that's
+ * how a French dub ended up paired with an English-original video in
+ * the field. Filter to `audioIsDefault === true` first; fall back to
+ * "any AAC" only when no track is marked default (single-track videos
+ * and older payloads that elided the field).
+ *
  * Returns undefined when no compatible audio is available — adaptive
  * variants then fall back to "video-only download" handling later.
  */
 function pickDefaultAudioFormat(adaptiveFormats: YtFormat[]): YtFormat | undefined {
-  // Either a direct url or a cipher (signatureCipher / legacy cipher —
-  // 1080p+ era YouTube serves audio gated too) is acceptable.
-  // urlAndCipherFromFormat pulls the working URL out of either shape;
-  // the downloader applies the signature transform when one is set.
-  const candidates = adaptiveFormats.filter(
-    (f) => (f.url || f.signatureCipher || f.cipher) && isAacAudioMp4(f.mimeType),
-  );
-  if (candidates.length === 0) return undefined;
-  candidates.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
-  return candidates[0];
+  const isAacWithUrl = (f: YtFormat): boolean =>
+    !!(f.url || f.signatureCipher || f.cipher) && isAacAudioMp4(f.mimeType);
+
+  // Pass 1: tracks explicitly marked default.
+  const defaults = adaptiveFormats.filter((f) => isAacWithUrl(f) && f.audioTrack?.audioIsDefault);
+  if (defaults.length > 0) {
+    defaults.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+    return defaults[0];
+  }
+  // Pass 2: any AAC — covers single-track videos (`audioTrack`
+  // entirely absent) and older response shapes.
+  const fallback = adaptiveFormats.filter(isAacWithUrl);
+  if (fallback.length === 0) return undefined;
+  fallback.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+  return fallback[0];
+}
+
+/**
+ * Group `adaptiveFormats[]` AAC entries by `audioTrack.id` and emit
+ * one `AudioTrack` per distinct track. Each emitted track points at
+ * the highest-bitrate AAC format for that group — the user picks
+ * a track in the popup and the SW substitutes the underlying URL
+ * for the variant's default `pairedAudioUrl` at download time.
+ *
+ * Returns undefined when the video has zero or one distinct track —
+ * the popup hides the picker in that case and the existing
+ * `variant.pairedAudioUrl` plumbing covers it.
+ *
+ * Exported for unit tests.
+ */
+export function buildAudioTracks(adaptiveFormats: YtFormat[]): AudioTrack[] | undefined {
+  const byId = new Map<string, YtFormat[]>();
+  for (const f of adaptiveFormats) {
+    if (!isAacAudioMp4(f.mimeType)) continue;
+    if (!f.url && !f.signatureCipher && !f.cipher) continue;
+    const id = f.audioTrack?.id;
+    if (!id) continue; // single-track videos elide audioTrack entirely
+    const group = byId.get(id);
+    if (group) group.push(f);
+    else byId.set(id, [f]);
+  }
+  if (byId.size < 2) return undefined; // hide the picker for single-track or no-track payloads
+
+  const tracks: AudioTrack[] = [];
+  for (const [id, formats] of byId) {
+    formats.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+    const best = formats[0];
+    const { url, signatureCipher } = urlAndCipherFromFormat(best);
+    if (!url) continue;
+    const at = best.audioTrack ?? {};
+    tracks.push({
+      id,
+      displayName: at.displayName || id,
+      isDefault: at.audioIsDefault === true,
+      url,
+      ...(best.contentLength ? { contentLength: Number(best.contentLength) } : {}),
+      ...(signatureCipher ? { signatureCipher } : {}),
+    });
+  }
+  // Default track first, then the rest. Within each group preserve
+  // insertion order so the listing stays stable across discoveries.
+  tracks.sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
+  return tracks.length > 0 ? tracks : undefined;
 }
 
 /**
@@ -382,11 +462,13 @@ export function buildStreamsFromPlayerResponse(
     else urlState = `no-url(keys=${Object.keys(f).join(',')})`;
     return [`itag=${f.itag ?? '?'}`, urlState, f.mimeType?.split(';')[0] ?? 'no-mime'].join(' ');
   };
+  const audioTracks = buildAudioTracks(adaptiveFormats);
   log.info('youtube discoverStreams', {
     source,
     progressive: progressiveFormats.map(summarize),
     adaptive: adaptiveFormats.map(summarize),
     defaultAudio: defaultAudio ? summarize(defaultAudio) : null,
+    audioTracks: audioTracks?.map((t) => `${t.id}${t.isDefault ? '*' : ''}:${t.displayName}`),
   });
 
   const variants: HlsVariant[] = [];
@@ -425,6 +507,7 @@ export function buildStreamsFromPlayerResponse(
       kind: 'dash',
       ...(lengthSecs > 0 ? { totalDuration: lengthSecs } : {}),
       variants,
+      ...(audioTracks ? { audioTracks } : {}),
     },
   ];
 }
