@@ -1,10 +1,15 @@
 import { escapeHtml } from '../lib/dom-utils.js';
 import { filterTopLevel } from '../lib/entry-filter.js';
 import { log, redactUrl } from '../lib/log.js';
-import { classifyUrl } from '../lib/media-detection.js';
 import { MSG, parsePortMessageFromSW } from '../lib/messages.js';
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
-import type { DownloadStage, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
+import type { DownloadStage, DownloadState, MediaEntry } from '../lib/types.ts';
+import {
+  filterDownloadableVariants,
+  formatVariant,
+  pickDisplayVariantUrl,
+  pickDownloadVariantUrl,
+} from './popup-helpers.js';
 
 const $content = document.getElementById('content')!;
 const $gear = document.getElementById('open-options');
@@ -157,63 +162,26 @@ function resolveSizeBytes(entry: MediaEntry, variantUrl: string | undefined): nu
   return 0;
 }
 
-function formatVariant(v: HlsVariant): string {
-  const resPart = v.resolution?.includes('x')
-    ? `${v.resolution.split('x')[1]}p`
-    : v.resolution || '';
-  const bwPart = v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : '';
-  if (resPart && bwPart) return `${resPart} (${bwPart})`;
-  return resPart || bwPart || 'variant';
-}
-
-// Adaptive (DASH/YouTube fMP4) variants need a paired audio URL AND
-// an AVC video codec to ride the v0.11.1 two-track combine muxer —
-// the muxer is stream-copy in mp4 only, so VP9-in-webm and AV1-in-cmaf
-// can't go through it. Progressive (single-stream) and HLS variants
-// are always downloadable.
-//
-// We still surface the unsupported ones so users see the full
-// inventory; they get an inline label and are sorted behind the
-// downloadable ones so the browser's default <option> picks something
-// that will actually save.
-function isVariantDownloadable(v: HlsVariant): boolean {
-  const kind = classifyUrl(v.url);
-  if (kind !== 'dash') return true;
-  if (!v.pairedAudioUrl) return false;
-  // codecs is RFC 6381 (e.g. `avc1.640028`, `vp09.00.50.08`,
-  // `av01.0.05M.08`). Empty / null is treated as unknown — assume
-  // muxable rather than hide the variant entirely.
-  const codecs = v.codecs ?? '';
-  if (!codecs) return true;
-  return /^avc1\./i.test(codecs);
-}
-
-function unsupportedLabel(v: HlsVariant): string {
-  const codecs = (v.codecs ?? '').toLowerCase();
-  if (codecs.startsWith('vp09') || codecs.startsWith('vp9')) return 'VP9 — not supported';
-  if (codecs.startsWith('av01') || codecs.startsWith('av1')) return 'AV1 — not supported';
-  if (!v.pairedAudioUrl) return 'video-only — not supported';
-  return 'not supported';
-}
-
 function qualityOptionsHtml(entry: MediaEntry): string {
   if (entry.parseError) {
     return '<option value="auto">Manifest unavailable</option>';
   }
   if (Array.isArray(entry.variants) && entry.variants.length > 0) {
-    const decorated = entry.variants.map((v) => ({
-      v,
-      ok: isVariantDownloadable(v),
-    }));
-    // Supported variants first so the default <option> is one the
-    // download dispatch accepts. Within each group the existing
-    // bandwidth-descending order is preserved (stable sort).
-    decorated.sort((a, b) => Number(b.ok) - Number(a.ok));
-    return decorated
-      .map(({ v, ok }) => {
-        const label = ok ? formatVariant(v) : `${formatVariant(v)} — ${unsupportedLabel(v)}`;
-        return `<option value="${escapeHtml(v.url)}">${escapeHtml(label)}</option>`;
-      })
+    // Filter out variants the muxer can't handle (VP9 in webm, AV1 in
+    // cmaf, video-only adaptive without paired audio). The previous
+    // approach surfaced them labeled "— not supported" but that meant
+    // the dropdown's first option was sometimes unselectable junk and
+    // the user had to scroll past noise to find a downloadable
+    // quality. Cleaner UX to hide them.
+    const downloadable = filterDownloadableVariants(entry.variants);
+    if (downloadable.length === 0) {
+      // Entry has variants but none are downloadable (e.g., a YouTube
+      // video that only ships VP9/AV1 at this resolution). Surface the
+      // gap explicitly so the user understands why the picker is empty.
+      return '<option value="none">No supported variants</option>';
+    }
+    return downloadable
+      .map((v) => `<option value="${escapeHtml(v.url)}">${escapeHtml(formatVariant(v))}</option>`)
       .join('');
   }
   if (entry.isMaster === false) {
@@ -371,12 +339,13 @@ function renderRow(entry: MediaEntry): string {
     : `<select class="quality" aria-label="Quality">${qualityOptionsHtml(entry)}</select>`;
 
   // Best-effort duration / size — only known once a media playlist has
-  // been parsed. The popup keeps both as separate badges so future
-  // additions (codec, etc.) can slot in alongside. Size is computed
-  // per-variant from BANDWIDTH × duration; the change handler below
-  // patches it when the user picks a different quality.
-  const defaultVariantUrl =
-    entry.isMaster === false ? entry.url : (entry.variants?.[0]?.url ?? entry.url);
+  // been parsed. `pickDisplayVariantUrl` returns the URL the badges
+  // should describe: the in-flight download's picked URL when one
+  // exists (otherwise the size visibly "reverts" to variants[0] when
+  // the dropdown is replaced by the in-progress UI), else the entry's
+  // default. The change handler patches the badge live while the
+  // dropdown is still visible.
+  const defaultVariantUrl = pickDisplayVariantUrl(entry, downloadState);
   const dur = resolveDurationSeconds(entry, defaultVariantUrl);
   const size = resolveSizeBytes(entry, defaultVariantUrl);
   const metaParts: string[] = [];
@@ -680,20 +649,15 @@ $content.addEventListener('click', (e: MouseEvent) => {
   if (!id) return;
   const entry = entriesById.get(id);
   if (!entry) return;
-  // Resolve the chosen variant URL from the row's <select>. A real URL
-  // (one of entry.variants[].url) takes precedence; otherwise fall back to
-  // the entry's own URL (single-bitrate / unparsed cases).
+  // Resolve the chosen variant URL from the row's <select>. The
+  // helper takes (entry, dropdown value) and returns null only when
+  // the entry is a master playlist whose variants haven't parsed yet
+  // — defensive guard against the Download button being clicked
+  // before isReady would have disabled it.
   const sel = row.querySelector<HTMLSelectElement>('.quality');
   const chosen = sel?.value;
-  // Only fall back to entry.url when this is a known single-bitrate
-  // (media) playlist. If the entry is a master without parsed variants,
-  // entry.url IS the master URL and the downloader would reject it.
-  let variantUrl: string;
-  if (typeof chosen === 'string' && /^https?:/.test(chosen)) {
-    variantUrl = chosen;
-  } else if (entry.isMaster === false) {
-    variantUrl = entry.url;
-  } else {
+  const variantUrl = pickDownloadVariantUrl(entry, chosen);
+  if (variantUrl === null) {
     log.warn('[VDL] download blocked — manifest not parsed yet', { mediaId: entry.id });
     return;
   }

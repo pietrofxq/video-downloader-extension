@@ -835,6 +835,10 @@ async function handleStartDownload(payload: {
     mediaId,
     tabId: entryTabId,
     filename: `${filename}.mp4`,
+    // Picked variant URL so the popup can keep the size/duration badges
+    // pinned to the right variant after the dropdown is replaced by the
+    // in-progress UI.
+    variantUrl: finalVariantUrl,
     status: 'pending',
     stage: null,
     current: 0,

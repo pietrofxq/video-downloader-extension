@@ -176,6 +176,14 @@ export interface DownloadState {
   mediaId: string;
   tabId: number;
   filename: string;
+  /**
+   * URL of the chosen variant. Threaded from the popup's quality pick
+   * → SW. The popup re-uses this after the dropdown disappears (replaced
+   * by the in-progress UI) to compute the right size/duration badges —
+   * without it the badges silently fall back to variants[0] (highest
+   * bandwidth) and looked like the quality picked had reverted.
+   */
+  variantUrl?: string;
   status: DownloadStatus;
   stage: DownloadStage;
   /**
