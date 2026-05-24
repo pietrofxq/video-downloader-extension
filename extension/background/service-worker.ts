@@ -121,6 +121,16 @@ async function restoreDownloadState(): Promise<void> {
 const isHttpUrl = (u: string | undefined | null): u is string =>
   typeof u === 'string' && /^https?:/.test(u);
 
+/** Best-effort host extraction for the orphan-row section line. */
+function hostFromUrl(u: string | undefined | null): string {
+  if (!u) return '';
+  try {
+    return new URL(u).host;
+  } catch {
+    return '';
+  }
+}
+
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   // Chrome clears per-tab badge state on every tab navigation —
   // including same-URL refreshes that don't fire the URL branch
@@ -884,6 +894,32 @@ async function handleStartDownload(payload: {
     ...(resolvedAudioTrackId ? { audioTrackId: resolvedAudioTrackId } : {}),
   };
 
+  // Slim snapshot of the parent entry + picked variant for the popup's
+  // cross-tab "Active downloads" rows. Lets an orphan row (a download
+  // whose source-tab entry isn't in this popup's view) still show
+  // title / size / duration / codec — same shape as an inline row.
+  // See DownloadState.entrySnapshot.
+  const variantBytes =
+    pickedVariant?.contentLength && pickedVariant.contentLength > 0
+      ? pickedVariant.contentLength
+      : undefined;
+  const pairedBytes =
+    resolvedPairedAudioContentLength && resolvedPairedAudioContentLength > 0
+      ? resolvedPairedAudioContentLength
+      : undefined;
+  const entrySnapshot = {
+    title: meta.lessonTitle || meta.title || meta.ogTitle || meta.ogVideoTitle || undefined,
+    section: meta.sectionTitle || meta.ogSiteName || hostFromUrl(entry.pageUrl) || undefined,
+    kind: downloadKind,
+    adapterId: entry.adapterId,
+    ...(entry.totalDuration ? { totalDuration: entry.totalDuration } : {}),
+    ...(variantBytes ? { variantContentLength: variantBytes } : {}),
+    ...(pickedVariant?.resolution ? { variantResolution: pickedVariant.resolution } : {}),
+    ...(pickedVariant?.codecs ? { variantCodecs: pickedVariant.codecs } : {}),
+    ...(pickedVariant?.bandwidth ? { variantBandwidth: pickedVariant.bandwidth } : {}),
+    ...(pairedBytes ? { pairedAudioContentLength: pairedBytes } : {}),
+  };
+
   // Seed the per-request state BEFORE forwarding to the offscreen, so the
   // first DOWNLOAD_PROGRESS message can patch it instead of creating a
   // race-window where the popup sees progress but no row state.
@@ -897,6 +933,7 @@ async function handleStartDownload(payload: {
     // in-progress UI.
     variantUrl: finalVariantUrl,
     ...(resolvedAudioTrackId ? { audioTrackId: resolvedAudioTrackId } : {}),
+    entrySnapshot,
     status: 'pending',
     stage: null,
     current: 0,

@@ -523,8 +523,53 @@ function renderOrphanSection(orphans: DownloadState[]): string {
 }
 
 function renderOrphanRow(state: DownloadState): string {
+  const snap = state.entrySnapshot;
+  // Title: prefer the entry-snapshot title; fall back to the
+  // filename (sans extension). Pre-v0.11.7 states won't have a
+  // snapshot — the filename fallback keeps them looking sensible
+  // until the SW restarts and the state expires.
   const displayName = (state.filename || '').replace(/\.[^.]+$/, '') || 'download';
-  const tabLabel = `tab #${state.tabId}`;
+  const title = snap?.title || displayName;
+  // Section line: snapshot field if present, otherwise the
+  // historical "tab #N" label so we never blank that area out.
+  const section = snap?.section || `tab #${state.tabId}`;
+
+  // Size badge: snapshot's variant + paired-audio contentLength.
+  // Falls back to bandwidth × duration when contentLength is unset
+  // (HLS variants don't publish it; YouTube does).
+  const variantBytes = snap?.variantContentLength ?? 0;
+  const pairedBytes = snap?.pairedAudioContentLength ?? 0;
+  const duration = snap?.totalDuration ?? 0;
+  let bytes = variantBytes + pairedBytes;
+  if (bytes === 0 && duration > 0 && snap?.variantBandwidth) {
+    bytes = Math.round((snap.variantBandwidth * duration) / 8);
+  }
+
+  const metaParts: string[] = [];
+  const durLabel = formatDuration(duration);
+  if (durLabel) metaParts.push(`<span class="stat">${escapeHtml(durLabel)}</span>`);
+  const sizeLabel = formatSize(bytes);
+  if (sizeLabel) metaParts.push(`<span class="stat stat-size">~${escapeHtml(sizeLabel)}</span>`);
+  // Quality + codec tag (e.g. "1080p H.264") — same labeling the
+  // quality dropdown uses so the orphan row reads like a paused
+  // inline row.
+  if (snap) {
+    const qualityLabel = formatVariant({
+      url: '',
+      bandwidth: snap.variantBandwidth ?? 0,
+      resolution: snap.variantResolution ?? null,
+      codecs: snap.variantCodecs ?? null,
+    });
+    if (qualityLabel && qualityLabel !== 'variant') {
+      metaParts.push(`<span class="badge">${escapeHtml(qualityLabel)}</span>`);
+    }
+  }
+  // Kind badge (HLS / DASH / progressive). Skipped when no snapshot.
+  if (snap?.kind) {
+    metaParts.push(`<span class="badge">${escapeHtml(KIND_LABELS[snap.kind] || snap.kind)}</span>`);
+  }
+  const metaHtml = metaParts.join(' &middot; ');
+
   const action = renderActionForDownload(state);
   // For terminal states (saved/error/canceled) the user's mental
   // model is "I'm done with this — get it off my screen", not the
@@ -539,13 +584,20 @@ function renderOrphanRow(state: DownloadState): string {
   const removeBtn = isTerminal
     ? `<button type="button" class="orphan-remove dismiss-download" data-media-id="${escapeHtml(state.mediaId)}" title="Remove from list" aria-label="Remove from list">&#x2715;</button>`
     : '';
+  // Optional adapter pill in the top-right when the snapshot
+  // carries an adapterId — matches the inline row's header style.
+  const adapterPill = snap?.adapterId
+    ? `<span class="adapter-pill">${escapeHtml(snap.adapterId)}</span>`
+    : '';
   return `
     <div class="row row-orphan" data-media-id="${escapeHtml(state.mediaId)}">
       ${removeBtn}
-      <div class="row-title" title="${escapeHtml(state.filename || '')}">${escapeHtml(displayName)}</div>
-      <div class="row-meta">
-        <span class="stat">${escapeHtml(tabLabel)}</span>
+      <div class="row-header">
+        <span class="row-section">${escapeHtml(section)}</span>
+        ${adapterPill}
       </div>
+      <div class="row-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+      <div class="row-meta">${metaHtml}</div>
       <div class="row-actions">${action}</div>
     </div>
   `;

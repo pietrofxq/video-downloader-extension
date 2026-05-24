@@ -213,6 +213,34 @@ export interface DownloadOutcome {
 export type DownloadStatus = 'queued' | 'pending' | 'progress' | 'saved' | 'error' | 'canceled';
 export type DownloadStage = 'fetch' | 'decrypt' | 'remux' | null;
 
+/**
+ * Per-download snapshot of the parent MediaEntry plus the picked
+ * variant's display-relevant fields. Embedded into DownloadState
+ * so cross-tab orphan rows in the popup can show full row info
+ * (title, size, resolution, codec, duration, kind) without holding
+ * the source-tab's state.
+ */
+export interface DownloadEntrySnapshot {
+  /** From entry.meta — what the row's title line should display. */
+  title?: string;
+  /** From entry.meta — sectionTitle, ogSiteName, or page host. */
+  section?: string;
+  kind: MediaKind;
+  adapterId: string;
+  /** Seconds. From entry.totalDuration; 0/undefined when unknown. */
+  totalDuration?: number;
+  /** Picked variant's contentLength (bytes). */
+  variantContentLength?: number;
+  /** Picked variant's resolution string (e.g. "1920x1080"). */
+  variantResolution?: string | null;
+  /** Picked variant's codecs RFC 6381 string. */
+  variantCodecs?: string | null;
+  /** Picked variant's bandwidth (bps) — fallback when contentLength is unset. */
+  variantBandwidth?: number;
+  /** Paired audio's contentLength when present (adds to variantContentLength). */
+  pairedAudioContentLength?: number;
+}
+
 export interface DownloadState {
   requestId: string;
   mediaId: string;
@@ -234,6 +262,20 @@ export interface DownloadState {
    * UI — same role `variantUrl` plays for the quality picker.
    */
   audioTrackId?: string;
+  /**
+   * Slim entry snapshot taken at download-start time. Lets the popup
+   * render rich rows for cross-tab "orphan" downloads (whose MediaEntry
+   * lives on a different tab's state and isn't in this popup's
+   * entriesById map). Without it, orphan rows could only show
+   * filename + tab id; with it they show title, size, duration,
+   * resolution, codec, kind — same shape as inline rows.
+   *
+   * Captured by the SW in handleStartDownload from the MediaEntry +
+   * picked variant. Optional because pre-v0.11.7 download states
+   * persisted to chrome.storage.session won't have it on SW restart;
+   * the popup falls back to the minimal layout in that case.
+   */
+  entrySnapshot?: DownloadEntrySnapshot;
   status: DownloadStatus;
   stage: DownloadStage;
   /**
