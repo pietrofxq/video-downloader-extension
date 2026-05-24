@@ -480,7 +480,26 @@ Explicitly out of scope (carried forward to v0.11.6 or beyond):
 
 ---
 
-## v0.11.6 - YouTube 4K via VP9 (WebM container muxer)
+## v0.11.6 - YouTube SPA-nav correctness + cross-tab orphan rows
+
+Goal: fix the cluster of post-v0.11.5 field reports around YouTube's SPA navigation between watch pages.
+
+Tasks:
+
+- [x] **Stale inline player blob on SPA-nav.** YouTube doesn't rewrite the inline `ytInitialPlayerResponse` script tag when the user clicks through to a different video — the player UI hydrates from XHR responses but the script remains frozen at the initial-load video. Reading `videoId` from that blob always returned the original video's id, so `discoverStreams` happily produced the original variants and the SW dedupe layer kept the original entry. The popup never updated until full refresh.
+  - `extractVideoIdFromUrl()` reads the canonical id from the URL (`/watch?v=`, `/shorts/X`, `/embed/X`, `/live/X`, `youtu.be/X`).
+  - `discoverYouTubeStreams` compares URL videoId vs inline videoId; on mismatch, skips the "use inline if it has adaptive" shortcut and forces the InnerTube ladder against the URL's id.
+  - `scrapeYouTubeMeta` also prefers the URL videoId and ignores stale inline fields when ids disagree.
+- [x] **Race between `STREAMS_DISCOVERED` and `tabs.onUpdated`.** Both update the URL cache via `setTabUrl`; the navigatesuccess-triggered `STREAMS_DISCOVERED` could win the race and update the cache to the new URL, after which `tabs.onUpdated` saw `prev === nextUrl` and skipped its clear. `handleStreamsDiscovered` now does the same prev/next compare + clear so whichever fires first does the right thing.
+- [x] **Title still showed old video after SPA-nav.** Fallback chain preferred `og:title` over `document.title`, and YouTube updates `og:title` a few hundred ms later than `document.title`. The MutationObserver fires *because* `document.title` changed, so it's the freshest signal at that moment — when inline is stale, prefer it.
+- [x] **Cross-tab orphan rows show full info.** When a download is in flight on another tab (or the source-tab entry was cleared by nav), the popup's "Active downloads" section used to render filename + tab number only. New `DownloadState.entrySnapshot` captures title, section, kind, adapterId, duration, variant content-length, resolution, codec, bandwidth, paired-audio content-length at download-start time — orphan rows now render the same shape as inline rows (title, adapter pill, duration / size / quality+codec / kind badges, action). Falls back to the historical minimal layout when the snapshot is absent (older states).
+- [x] Diagnostic logs added throughout the SPA-nav flow so future regressions are visible: entry log with `pageUrl` + `urlVideoId`, "inline blob is stale (SPA-nav)" when ids disagree, "streams discovered on navigated tab — clearing previous entries" when the race wins, "tabs.onUpdated: title change, URL already in cache" debug-level for the other branch, "observe: title changed { prev, next }" on the title MutationObserver fire, and a debug-level dump of every title source in `scrapeYouTubeMeta`.
+
+**Ship criterion:** ✅ navigating between YouTube watch pages without refreshing updates the popup's row (title + variants + size) within the SPA-nav handoff; downloads remain visible cross-tab with full row info; AVC / AV1 paths unchanged.
+
+---
+
+## v0.11.7 - YouTube 4K via VP9 (WebM container muxer)
 
 Goal: lift the codec gate's remaining hole. YouTube serves some 4K content as VP9-only (no AV1 fallback) — those videos surface in the picker today as "No supported variants" or hide their highest qualities behind the `isVariantDownloadable` filter. v0.11.6 lights up the VP9 path by adding a WebM container muxer.
 
