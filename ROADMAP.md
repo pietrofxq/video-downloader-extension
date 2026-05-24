@@ -422,7 +422,24 @@ Manual verification (pending real-world smoke run):
 
 ---
 
-## v0.11.4 - YouTube 4K (AV1 + VP9) via streaming muxer
+## v0.11.4 - Popup polish + multi-dub audio picker
+
+Goal: clean up the regressions / rough edges that surfaced after v0.11.3 went out, and add a small feature for YouTube videos with multiple audio tracks (dubs).
+
+Tasks:
+
+- [x] **Quality picker "switches back to 1080p" after click.** The actual download URL was correct, but the size-badge derivation re-read `entry.variants[0]` after the dropdown was replaced by the in-progress UI — so the displayed size visibly reverted to the 1080p estimate regardless of the user's pick. Fix: `DownloadState.variantUrl` is now seeded by the SW at click time; the popup's `pickDisplayVariantUrl` helper pins the badge to it.
+- [x] **Hide unsupported variants from the quality picker.** v0.11.1 ranked VP9 / AV1 behind downloadable variants and labeled them "— not supported". Cleaner UX to drop them entirely. When every variant is unsupported, surface "No supported variants" so the empty state is explained.
+- [x] **× button on terminal-state orphan rows.** Cross-tab "Active downloads" rows in saved / error / canceled states now have a corner × that maps to the existing `dismiss-download` handler. Lets the user clear out leftovers from other tabs without "↻ Again"-ing them first.
+- [x] **Multi-dub audio: prefer the original track by default.** YouTube returns ALL dubs' AAC formats in `adaptiveFormats[]`, each tagged with an `audioTrack.audioIsDefault` flag. v0.11's picker filtered to AAC and sorted by bitrate — which silently paired whichever dub happened to win the bitrate tiebreak. Field report: English video downloaded with French audio. Fix: `pickDefaultAudioFormat` now filters to `audioIsDefault === true` first; bitrate is only a within-default tiebreaker.
+- [x] **Audio-track picker in the popup.** When a video has multiple tracks the popup renders a second dropdown next to the quality picker. New `AudioTrack` type; `audioTracks?` on `DiscoveredStream` / `MediaEntry`; `audioTrackId?` on `DownloadRequest` / `DownloadState` / `START_DOWNLOAD`. SW resolves the chosen id against `entry.audioTracks` and substitutes the chosen track's URL for the variant's default `pairedAudioUrl`. Picker hides when entry has 0 or 1 tracks — most videos.
+- [x] **Popup helpers extracted + tested.** `extension/popup/popup-helpers.ts` carries the variant-routing + audio-track helpers (`pickDisplayVariantUrl`, `pickDownloadVariantUrl`, `filterDownloadableVariants`, `hasAudioTrackPicker`, `pickDefaultAudioTrackId`, `formatAudioTrack`, …) so the next regression of this shape is caught by a fixture rather than a field report. 33 popup-helpers tests + 8 new adapter tests (audioIsDefault preference, `buildAudioTracks` shape, multi-dub fixtures); 269 total, `npm run check` green.
+
+**Ship criterion:** ✅ a YouTube video with multiple audio tracks downloads with the user-chosen (or default-original) audio paired correctly; the quality picker size badge tracks the chosen variant; unsupported variants don't pollute the dropdown.
+
+---
+
+## v0.11.5 - YouTube 4K (AV1 + VP9) via streaming muxer
 
 Goal: lift the 1080p AVC ceiling. YouTube caps AVC at 1080p; 1440p / 2160p / 4320p exist only as **VP9** (fragmented WebM) and **AV1** (fragmented MP4). v0.11.4 admits both codecs into the picker and grows the muxer to handle them — plus refactors the adaptive path to stream through OPFS so multi-GB sources don't blow the offscreen heap.
 
