@@ -86,16 +86,6 @@ export interface CombineProgress {
 const MDAT_COPY_CHUNK_BYTES = 1 * 1024 * 1024;
 
 /**
- * Chunk size for reading from the source while enumerating top-level
- * boxes. We only read box headers (8 or 16 bytes each) but slicing
- * the file per header is expensive, so the walker reads in larger
- * blocks. Each chunk covers many headers when boxes are small (moov,
- * ftyp, sidx) and is dwarfed by the box body when boxes are large
- * (mdat). Either way the cost amortizes.
- */
-const HEADER_WALK_CHUNK_BYTES = 64 * 1024;
-
-/**
  * Combine the two fMP4 byte streams into a single MP4 written to
  * `outputHandle`. The output is fully written before this resolves; the
  * caller turns the file handle into a Blob URL afterward.
@@ -269,11 +259,17 @@ interface ParsedFmp4 {
 }
 
 /**
- * Walk top-level boxes from the source. The walker reads in
- * HEADER_WALK_CHUNK_BYTES blocks so a single box-header lookup costs
- * one slice() instead of slicing per box. Boxes whose body extends
- * past the current chunk are skipped (we only need their headers); we
- * jump to wherever the next box starts.
+ * Walk top-level boxes from the source. Reads ONLY the 16 bytes
+ * needed for each header (8 for normal, +8 if size==1 largesize)
+ * instead of pulling a full chunk per box — the body lives on
+ * disk in the streaming case, so reading it here is wasted I/O.
+ *
+ * The bounds check in `readBoxHeader` rejects boxes whose
+ * totalSize exceeds the buffer we pass in — that's the right
+ * behavior when the buffer IS the whole file (in-memory case)
+ * but wrong here because we deliberately only buffer the header.
+ * We use `readBoxSizeUnbounded` instead, then bounds-check
+ * separately against `source.byteLength`.
  */
 async function enumerateTopBoxes(
   source: Fmp4Source,
@@ -281,17 +277,48 @@ async function enumerateTopBoxes(
   const out: Array<{ name: string; start: number; end: number }> = [];
   let pos = 0;
   while (pos + 8 <= source.byteLength) {
-    // Read enough to cover at least one largesize header (16 bytes)
-    // plus several more headers if boxes are small.
-    const readLen = Math.min(HEADER_WALK_CHUNK_BYTES, source.byteLength - pos);
-    const chunk = await source.read(pos, readLen);
-    if (chunk.byteLength < 8) break;
-    const hdr = readBoxHeader(chunk, 0);
+    const headerLen = Math.min(16, source.byteLength - pos);
+    const headerBytes = await source.read(pos, headerLen);
+    if (headerBytes.byteLength < 8) break;
+    const hdr = readBoxSizeUnbounded(headerBytes);
     if (!hdr) break;
-    out.push({ name: hdr.name, start: pos, end: pos + hdr.totalSize });
-    pos += hdr.totalSize;
+    // size==0 means "extends to EOF" — only legal on the final box.
+    const total = hdr.totalSize === -1 ? source.byteLength - pos : hdr.totalSize;
+    if (total < 8 || total > source.byteLength - pos) break;
+    out.push({ name: hdr.name, start: pos, end: pos + total });
+    pos += total;
   }
   return out;
+}
+
+/**
+ * Parse a box header from a 16-byte (or smaller, ≥8 byte) slice WITHOUT
+ * bounds-checking the body against the caller's buffer. Returns
+ * `totalSize: -1` for size==0 (caller resolves with source EOF).
+ *
+ * The non-streaming `readBoxHeader` below additionally bounds-checks
+ * `size <= buf.byteLength - offset`. That check enforces "box must
+ * fit in the buffer" — correct when the buffer is the full file but
+ * wrong when the buffer only holds the header.
+ */
+function readBoxSizeUnbounded(headerBytes: Uint8Array): { name: string; totalSize: number } | null {
+  if (headerBytes.byteLength < 8) return null;
+  let size = readU32(headerBytes, 0);
+  const name = readName(headerBytes, 4);
+  if (size === 1) {
+    if (headerBytes.byteLength < 16) return null;
+    const hi = readU32(headerBytes, 8);
+    const lo = readU32(headerBytes, 12);
+    // Bound the largesize at MAX_SAFE_INTEGER (see readBoxHeader notes).
+    if (hi > 0x1fffff) return null;
+    size = hi * 0x100000000 + lo;
+    if (size < 16) return null;
+  } else if (size === 0) {
+    return { name, totalSize: -1 };
+  } else if (size < 8) {
+    return null;
+  }
+  return { name, totalSize: size };
 }
 
 async function parseFmp4Structure(source: Fmp4Source): Promise<ParsedFmp4> {

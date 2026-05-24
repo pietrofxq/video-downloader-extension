@@ -594,6 +594,45 @@ describe('combineFmp4', () => {
     expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat']);
   });
 
+  it('walks past mdats whose body is larger than any header-read chunk (4K regression)', async () => {
+    // Reported field bug after Phase A landed: at 1440p+ the
+    // streaming walker stopped at the first moof and the parser
+    // threw "moof at offset N has no matching mdat (top-level box
+    // sequence: ftyp,moov,sidx,moof)". The cause was the walker
+    // bounds-checked a box's totalSize against the buffer slice
+    // it had just read for the header — fine in unit tests where
+    // small fixtures get returned whole, but wrong for OPFS-backed
+    // sources that strictly return only the requested bytes.
+    //
+    // Regression: fabricate a fixture with an mdat body sized
+    // bigger than any header-buffer slice the walker plausibly
+    // takes (we read 16 bytes per header; the mdat body here is
+    // 200 KB) plus a second moof+mdat behind it. If the walker
+    // mis-handles the large box it'll stop after the first
+    // mdat and the second pair won't pair up — same error shape
+    // as the field report.
+    const bigPayload = new Uint8Array(200 * 1024).fill(0x42);
+    const video = concat(
+      box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
+      makeMoov(1, 90000, 2000),
+      makeMoofMdat(1, 1, 0, bigPayload),
+      makeMoofMdat(1, 2, 1000, te('VID2')),
+    );
+    const audio = makeFmp4(1, 48000, [
+      { tfdt: 0, payload: te('AUD1') },
+      { tfdt: 1000, payload: te('AUD2') },
+    ]);
+
+    const file = makeMockFile();
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+    // All four pairs must reach the output. Pre-fix the walker
+    // would have stopped after the large mdat and the second pair
+    // would have been missing.
+    const top = topBoxes(file.bytes);
+    const tail = top.slice(2).map((b) => b.name);
+    expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat']);
+  });
+
   it('throws an informative error when a moof has no matching mdat', async () => {
     // A moof followed by EOF — no mdat to pair with.
     const orphanMoof = box('moof', makeMfhd(1), box('traf', makeTfhd(1), makeTfdt(0), makeTrun(1)));

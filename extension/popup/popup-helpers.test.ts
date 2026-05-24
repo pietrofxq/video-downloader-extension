@@ -363,11 +363,37 @@ describe('pickDownloadVariantUrl', () => {
 // ---------- formatVariant ----------
 
 describe('formatVariant', () => {
-  it('formats height + bandwidth when both present', () => {
-    expect(formatVariant(hotmartHlsVariant('1080p'))).toBe('1080p (3241 kbps)');
+  it('formats height + codec + bandwidth when all present', () => {
+    // Hotmart variants are tagged avc1 + mp4a; the codec helper
+    // resolves the video codec for display.
+    expect(formatVariant(hotmartHlsVariant('1080p'))).toBe('1080p H.264 (3241 kbps)');
   });
 
-  it('returns just resolution if bandwidth is missing', () => {
+  it('labels AV1 variants distinctly so they stand apart from AVC at the same resolution', () => {
+    // Field report (v0.11.5 Phase B follow-up): with AVC and AV1
+    // both at 1440p, the dropdown options were indistinguishable
+    // and users picked the wrong one. The codec label closes that
+    // gap.
+    const av1 = variant({
+      url: 'https://r1.googlevideo.com/videoplayback?itag=399&mime=video%2Fmp4',
+      bandwidth: 4_500_000,
+      resolution: '2560x1440',
+      codecs: 'av01.0.12M.08',
+    });
+    expect(formatVariant(av1)).toBe('1440p AV1 (4500 kbps)');
+  });
+
+  it('labels VP9 variants', () => {
+    const vp9 = variant({
+      url: 'https://r1.googlevideo.com/videoplayback?itag=248&mime=video%2Fwebm',
+      bandwidth: 3_000_000,
+      resolution: '1920x1080',
+      codecs: 'vp09.00.50.08',
+    });
+    expect(formatVariant(vp9)).toBe('1080p VP9 (3000 kbps)');
+  });
+
+  it('returns just resolution if bandwidth is missing (no codec)', () => {
     const v = variant({
       url: 'https://example.com/v',
       resolution: '1280x720',
