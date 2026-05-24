@@ -563,7 +563,7 @@ function scrapeYouTubeMeta(doc: Document): PageMeta {
   // URL is authoritative on SPA-nav (see extractVideoIdFromUrl). The
   // inline player blob is read for the title / channel fallback when
   // its videoId matches the URL — otherwise it's stale and we fall
-  // back to og:meta / document.title (both update on SPA-nav).
+  // back to DOM signals (which DO update on SPA-nav).
   const pageUrl = (typeof doc?.location?.href === 'string' && doc.location.href) || '';
   const urlVideoId = extractVideoIdFromUrl(pageUrl);
   const player = parseYtPlayerResponse(doc);
@@ -572,8 +572,31 @@ function scrapeYouTubeMeta(doc: Document): PageMeta {
   const videoDetails = inlineUsable ? (player?.videoDetails ?? {}) : {};
   const microformat = inlineUsable ? (player?.microformat?.playerMicroformatRenderer ?? {}) : {};
 
-  const title = videoDetails.title || ogTitle || docTitle || '';
+  // Title fallback order matters on SPA-nav. When inline is stale,
+  // the title MutationObserver in `observe` fires *because*
+  // doc.title changed — so doc.title is the freshest signal at that
+  // moment. og:title meta updates a few hundred ms later (YouTube's
+  // ordering, not ours), so a fresh scrape during that window sees
+  // a still-old og:title alongside the already-new doc.title. The
+  // field report was: "video updates but the title is still the
+  // old one" — that's exactly the og-before-doctitle fallback
+  // returning the stale value.
+  //
+  // When inline IS usable, videoDetails.title is canonical (no
+  // localized " - YouTube" suffix, no stripping needed).
+  const title = inlineUsable
+    ? videoDetails.title || ogTitle || docTitle || ''
+    : docTitle || ogTitle || '';
   const channelTitle = videoDetails.author || microformat.ownerChannelName || '';
+  log.debug('youtube scrapeYouTubeMeta', {
+    urlVideoId,
+    inlineVideoId,
+    inlineUsable,
+    docTitle,
+    ogTitle,
+    videoDetailsTitle: videoDetails.title,
+    chosenTitle: title,
+  });
   // Prefer the URL's videoId — it's the one the user actually
   // navigated to. Falls back to the inline blob's id when the URL
   // doesn't expose one (some embed paths).
@@ -868,6 +891,14 @@ const youtubeAdapter: Adapter = {
     const observer = new MutationObserver(() => {
       const t = doc.title || '';
       if (t === last) return;
+      // Diagnostic — fires only when the title actually changed. Useful
+      // for spotting "popup title didn't update" reports: if this log
+      // appears with the new title, the observer is firing and the
+      // re-scrape happens; downstream must be the problem (see
+      // setAdapterMeta back-patch). If the log doesn't appear at all,
+      // YouTube isn't triggering a MutationObserver-visible change for
+      // this transition and we'd need a different signal.
+      log.info('youtube observe: title changed', { prev: last, next: t });
       last = t;
       onUpdate(scrapeYouTubeMeta(doc));
     });
