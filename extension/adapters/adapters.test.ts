@@ -846,10 +846,15 @@ describe('extractVisitorData', () => {
 //   3. InnerTube clients all fail → result falls back to inline.
 //   4. InnerTube success on the first client → second client not tried.
 
-function makeFakeDoc(scriptBodies: string[], title = ''): Document {
+function makeFakeDoc(
+  scriptBodies: string[],
+  title = '',
+  opts: { locationHref?: string } = {},
+): Document {
   const scripts = scriptBodies.map((text) => ({ textContent: text }));
-  return {
+  const doc = {
     title,
+    location: opts.locationHref ? { href: opts.locationHref } : undefined,
     querySelectorAll: (sel: string): { length: number } & Iterable<unknown> => {
       if (sel === 'script') {
         return {
@@ -863,7 +868,8 @@ function makeFakeDoc(scriptBodies: string[], title = ''): Document {
       };
     },
     querySelector: () => null,
-  } as unknown as Document;
+  };
+  return doc as unknown as Document;
 }
 
 describe('discoverYouTubeStreams', () => {
@@ -1033,5 +1039,100 @@ describe('discoverYouTubeStreams', () => {
     await discoverYouTubeStreams(doc);
     // First client succeeded → no second call.
     expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('SPA-nav: treats inline as stale when URL videoId differs from inline videoId', async () => {
+    // Reproduces the field report: user navigates to /watch?v=NEW
+    // but YouTube doesn't rewrite the inline ytInitialPlayerResponse
+    // script tag — it still carries OLD's data. Pre-fix discoverStreams
+    // would happily return OLD's variants (and the SW would dedupe
+    // against the existing OLD entry, so the popup never updated).
+    // Post-fix: detect the videoId mismatch, skip inline, fetch
+    // InnerTube for the URL videoId.
+    const stale = {
+      videoDetails: { videoId: 'old-vid' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://video.example/OLD-137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://audio.example/OLD-140',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+          },
+        ],
+      },
+    };
+    const innertubeForNew = {
+      videoDetails: { videoId: 'new-vid' },
+      playabilityStatus: { status: 'OK' },
+      streamingData: {
+        adaptiveFormats: [
+          {
+            itag: 137,
+            url: 'https://video.example/NEW-137',
+            mimeType: 'video/mp4; codecs="avc1.640028"',
+            bitrate: 4_500_000,
+            width: 1920,
+            height: 1080,
+          },
+          {
+            itag: 140,
+            url: 'https://audio.example/NEW-140',
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+            bitrate: 128_000,
+          },
+        ],
+      },
+    };
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(innertubeForNew), { status: 200 }));
+    const doc = makeFakeDoc([`var ytInitialPlayerResponse = ${JSON.stringify(stale)};`], '', {
+      locationHref: 'https://www.youtube.com/watch?v=new-vid',
+    });
+    const streams = await discoverYouTubeStreams(doc);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(streams[0].url).toBe('youtube:new-vid');
+    // Variants must come from the InnerTube response, not the stale inline blob.
+    expect(streams[0].variants?.[0].url).toBe('https://video.example/NEW-137');
+  });
+});
+
+describe('extractVideoIdFromUrl', () => {
+  it('reads ?v= for /watch URLs', async () => {
+    const { extractVideoIdFromUrl } = await import('./youtube.js');
+    expect(extractVideoIdFromUrl('https://www.youtube.com/watch?v=abc123')).toBe('abc123');
+  });
+
+  it('reads the path segment for /shorts /embed /live', async () => {
+    const { extractVideoIdFromUrl } = await import('./youtube.js');
+    expect(extractVideoIdFromUrl('https://www.youtube.com/shorts/abc123')).toBe('abc123');
+    expect(extractVideoIdFromUrl('https://www.youtube.com/embed/abc123')).toBe('abc123');
+    expect(extractVideoIdFromUrl('https://www.youtube.com/live/abc123')).toBe('abc123');
+  });
+
+  it('reads the path for youtu.be short links', async () => {
+    const { extractVideoIdFromUrl } = await import('./youtube.js');
+    expect(extractVideoIdFromUrl('https://youtu.be/abc123')).toBe('abc123');
+    expect(extractVideoIdFromUrl('https://youtu.be/abc123?t=10')).toBe('abc123');
+  });
+
+  it('returns null for non-video YouTube URLs', async () => {
+    const { extractVideoIdFromUrl } = await import('./youtube.js');
+    expect(extractVideoIdFromUrl('https://www.youtube.com/')).toBeNull();
+    expect(extractVideoIdFromUrl('https://www.youtube.com/results?search_query=test')).toBeNull();
+  });
+
+  it('returns null for malformed URLs', async () => {
+    const { extractVideoIdFromUrl } = await import('./youtube.js');
+    expect(extractVideoIdFromUrl('not-a-url')).toBeNull();
+    expect(extractVideoIdFromUrl('')).toBeNull();
   });
 });

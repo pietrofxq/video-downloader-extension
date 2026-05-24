@@ -50,6 +50,48 @@ function isYouTubePage(pageUrl: string): boolean {
   }
 }
 
+/**
+ * The URL's videoId is authoritative on SPA navigation. The inline
+ * `ytInitialPlayerResponse` script tag is written once at full page
+ * load and YouTube does NOT rewrite it when the user clicks through
+ * to another video — fresh player data arrives via XHR to
+ * `/youtubei/v1/player` and the player UI hydrates from that. So a
+ * caller who reads `parseYtPlayerResponse(doc).videoDetails.videoId`
+ * on a watch page that's been SPA-navigated will see the ORIGINAL
+ * video's id, not the current one. That was the v0.11.6 field
+ * report ("popup keeps showing the previous video after navigation
+ * — only refresh fixes it"). The URL stays in sync via
+ * history.pushState, so use it as the source of truth.
+ *
+ * Returns null when the URL doesn't carry a recoverable id (channel
+ * pages, home page, etc. — `isYouTubePage` would've rejected those
+ * upstream but we defend anyway).
+ *
+ * Exported for unit tests.
+ */
+export function extractVideoIdFromUrl(pageUrl: string): string | null {
+  try {
+    const u = new URL(pageUrl);
+    const host = u.hostname;
+    if (host === 'youtu.be') {
+      const seg = u.pathname.slice(1).split('/')[0];
+      return seg || null;
+    }
+    if (u.pathname === '/watch') {
+      return u.searchParams.get('v');
+    }
+    for (const prefix of ['/shorts/', '/embed/', '/live/']) {
+      if (u.pathname.startsWith(prefix)) {
+        const seg = u.pathname.slice(prefix.length).split('/')[0];
+        return seg || null;
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
 // `<title>` on a watch page is "Video Title - YouTube" (or localized
 // variant). og:title carries just the video title and is the preferred
 // source; fall back to stripping the trailing " - YouTube" from the
@@ -518,16 +560,24 @@ function scrapeYouTubeMeta(doc: Document): PageMeta {
   const ogTitle = og('og:title');
   const docTitle = doc.title ? stripYouTubeSuffix(doc.title) : '';
 
-  // Prefer the player JSON when present — it carries the canonical
-  // title, the channel/owner name, and the videoId without the
-  // ambiguity of localized title suffixes.
+  // URL is authoritative on SPA-nav (see extractVideoIdFromUrl). The
+  // inline player blob is read for the title / channel fallback when
+  // its videoId matches the URL — otherwise it's stale and we fall
+  // back to og:meta / document.title (both update on SPA-nav).
+  const pageUrl = (typeof doc?.location?.href === 'string' && doc.location.href) || '';
+  const urlVideoId = extractVideoIdFromUrl(pageUrl);
   const player = parseYtPlayerResponse(doc);
-  const videoDetails = player?.videoDetails ?? {};
-  const microformat = player?.microformat?.playerMicroformatRenderer ?? {};
+  const inlineVideoId = player?.videoDetails?.videoId ?? null;
+  const inlineUsable = !urlVideoId || !inlineVideoId || urlVideoId === inlineVideoId;
+  const videoDetails = inlineUsable ? (player?.videoDetails ?? {}) : {};
+  const microformat = inlineUsable ? (player?.microformat?.playerMicroformatRenderer ?? {}) : {};
 
   const title = videoDetails.title || ogTitle || docTitle || '';
   const channelTitle = videoDetails.author || microformat.ownerChannelName || '';
-  const videoId = videoDetails.videoId || '';
+  // Prefer the URL's videoId — it's the one the user actually
+  // navigated to. Falls back to the inline blob's id when the URL
+  // doesn't expose one (some embed paths).
+  const videoId = urlVideoId || videoDetails.videoId || '';
 
   return {
     title,
@@ -678,22 +728,50 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
   // log shows whether the function even ran. If this line is missing,
   // the issue is upstream (page-content didn't dispatch / adapter
   // mismatch / build didn't include the new code).
-  log.info('youtube discoverYouTubeStreams: enter');
+  const pageUrl = (typeof doc?.location?.href === 'string' && doc.location.href) || '';
+  const urlVideoId = extractVideoIdFromUrl(pageUrl);
+  log.info('youtube discoverYouTubeStreams: enter', {
+    pageUrl,
+    urlVideoId,
+  });
 
   const inlinePlayer = parseYtPlayerResponse(doc);
-  const inlineStreams = buildStreamsFromPlayerResponse(inlinePlayer, 'inline');
-  if (hasAdaptiveStream(inlineStreams)) {
-    log.info('youtube discoverYouTubeStreams: inline has adaptive — using it');
+  const inlineVideoId = inlinePlayer?.videoDetails?.videoId ?? null;
+  // SPA-nav staleness: the inline ytInitialPlayerResponse blob is
+  // bolted to the page at full load and YouTube doesn't rewrite it
+  // when the user clicks through. So on a SPA-navigated watch page,
+  // inline carries the ORIGINAL videoId and url-derived id is the
+  // current one. When they disagree, the inline data is unusable —
+  // skip it and force the InnerTube ladder against the URL's id.
+  const inlineStale = !!urlVideoId && !!inlineVideoId && urlVideoId !== inlineVideoId;
+  if (inlineStale) {
+    log.info('youtube discoverYouTubeStreams: inline blob is stale (SPA-nav)', {
+      urlVideoId,
+      inlineVideoId,
+    });
+  }
+
+  const inlineStreams = inlineStale ? [] : buildStreamsFromPlayerResponse(inlinePlayer, 'inline');
+  if (!inlineStale && hasAdaptiveStream(inlineStreams)) {
+    log.info('youtube discoverYouTubeStreams: inline has adaptive — using it', {
+      urlVideoId,
+      inlineVideoId,
+    });
     return inlineStreams;
   }
 
-  const videoId = inlinePlayer?.videoDetails?.videoId;
+  // Resolution order for the InnerTube videoId: URL > inline. The
+  // URL is authoritative on SPA-nav; inline is a fallback for cases
+  // where the URL is opaque (some embed paths).
+  const videoId = urlVideoId ?? inlineVideoId;
   if (!videoId) {
     // Embed pages, malformed responses — nothing to fetch with. Return
     // whatever the inline scrape gave us (often just progressive).
     log.warn('youtube discoverYouTubeStreams: no videoId — skipping InnerTube', {
       hasPlayer: !!inlinePlayer,
       hasVideoDetails: !!inlinePlayer?.videoDetails,
+      urlVideoId,
+      inlineVideoId,
     });
     return inlineStreams;
   }

@@ -148,6 +148,19 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     // states get GC'd on tab close (onRemoved) + by explicit dismiss.
     const had = await clearTab(tabId);
     if (had) await updateBadge(tabId);
+  } else if (prev === nextUrl && changeInfo.title) {
+    // Diagnostic — fires on YouTube SPA navs where pushState updated
+    // both `tab.url` and `<title>` simultaneously, so by the time we
+    // get here the cached URL is already in sync with tab.url and we
+    // skip the clear. Useful for spotting "popup didn't refresh on
+    // nav" reports: if you see this with prev being a /watch URL and
+    // changeInfo.title being a different video's title, the nav was
+    // detected but the URL update outran our cache.
+    log.debug('tabs.onUpdated: title change, URL already in cache', {
+      tabId,
+      url: nextUrl,
+      title: changeInfo.title,
+    });
   }
 });
 
@@ -545,7 +558,28 @@ async function handleStreamsDiscovered({
   if (!resolvedPageUrl) {
     resolvedPageUrl = await getTabUrl(tabId);
   }
-  if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
+  // Race-window fix (v0.11.6): when the content script's
+  // `navigatesuccess` fires for a YouTube SPA-nav, this handler can
+  // race ahead of `chrome.tabs.onUpdated`. Without the prev/next
+  // compare here, we'd update the URL cache to the new URL and the
+  // later onUpdated fire would see prev === nextUrl and skip its
+  // clear. The user would see the previous video's entries linger
+  // until full refresh — that's the field report. Same compare
+  // logic as the tab listener so whichever fires first does the
+  // clear correctly.
+  if (resolvedPageUrl) {
+    const { prev } = await setTabUrl(tabId, resolvedPageUrl);
+    if (prev && prev !== resolvedPageUrl) {
+      log.info('streams discovered on navigated tab — clearing previous entries', {
+        tabId,
+        prev,
+        next: resolvedPageUrl,
+        adapterId,
+      });
+      await clearTab(tabId);
+      await updateBadge(tabId);
+    }
+  }
 
   let anyAdded = false;
   let dedupedCount = 0;
