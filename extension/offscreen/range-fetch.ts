@@ -205,6 +205,146 @@ export async function fetchArrayBufferRanged(args: RangeFetchArgs): Promise<Uint
   return out;
 }
 
+/**
+ * Same Range-fetch loop as {@link fetchArrayBufferRanged} but each
+ * chunk is appended directly to an OPFS file via positioned writes
+ * instead of accumulating in a JS-heap Uint8Array. Peak JS heap is
+ * one chunk (~8 MB) regardless of file size — required for the
+ * v0.11.5 4K path where the full stream is 1-3 GB per side and would
+ * OOM the offscreen document if buffered.
+ *
+ * The output handle is truncated at start; on completion the file's
+ * byte length equals `bytes`.
+ */
+export interface RangeFetchToOpfsArgs extends Omit<RangeFetchArgs, 'onProgress'> {
+  outputHandle: FileSystemFileHandle;
+  /** Reported as `(written, total)` after each chunk lands. `total` is
+   *  the chunk-sized lower bound until EOF, at which point it snaps to
+   *  the final value. */
+  onProgress?: (written: number, total: number) => void;
+}
+
+export async function fetchToOpfsRanged(args: RangeFetchToOpfsArgs): Promise<{ bytes: number }> {
+  const { proxyFetch, tabId, frameId, url, headers, onProgress, signal, outputHandle } = args;
+  const chunkBytes = args.chunkBytes ?? DEFAULT_CHUNK_BYTES;
+  signal?.throwIfAborted();
+
+  const writable = await outputHandle.createWritable({ keepExistingData: false });
+  let written = 0;
+  const writeChunk = async (chunk: Uint8Array): Promise<void> => {
+    if (chunk.byteLength === 0) return;
+    await writable.write(chunk as Uint8Array<ArrayBuffer>);
+    written += chunk.byteLength;
+  };
+
+  try {
+    const firstReply = await proxyFetchWithRetry(
+      proxyFetch,
+      {
+        tabId,
+        frameId,
+        url,
+        headers: { ...(headers ?? {}), Range: `bytes=0-${chunkBytes - 1}` },
+        responseType: 'arrayBuffer',
+      },
+      signal,
+    );
+    if (!firstReply.ok) {
+      throwFromReply(firstReply, url);
+    }
+    if (typeof firstReply.body !== 'string') {
+      throw new Error(`proxy fetch for ${url} returned non-string body on initial Range request`);
+    }
+    const firstBytes = base64ToUint8Array(firstReply.body);
+    const sizeInfo = parseTotalSize(firstReply, firstBytes.byteLength);
+
+    log.info('range-fetch-opfs: first chunk received', {
+      url: redactUrl(url),
+      bytes: firstBytes.byteLength,
+      status: firstReply.status,
+      contentRange: firstReply.contentRange,
+      contentLength: firstReply.contentLength,
+      total: sizeInfo.total,
+      knownTotal: sizeInfo.known,
+    });
+
+    await writeChunk(firstBytes);
+    onProgress?.(written, sizeInfo.known ? sizeInfo.total : written);
+
+    // Short-circuit identical to the in-memory path.
+    if (sizeInfo.known && written >= sizeInfo.total) {
+      return { bytes: written };
+    }
+    if (!sizeInfo.known && firstBytes.byteLength < chunkBytes) {
+      return { bytes: written };
+    }
+
+    if (sizeInfo.known) {
+      while (written < sizeInfo.total) {
+        signal?.throwIfAborted();
+        const end = Math.min(written + chunkBytes - 1, sizeInfo.total - 1);
+        const reply = await proxyFetchWithRetry(
+          proxyFetch,
+          {
+            tabId,
+            frameId,
+            url,
+            headers: { ...(headers ?? {}), Range: `bytes=${written}-${end}` },
+            responseType: 'arrayBuffer',
+          },
+          signal,
+        );
+        if (!reply.ok) {
+          throwFromReply(reply, url);
+        }
+        if (typeof reply.body !== 'string') {
+          throw new Error(
+            `proxy fetch for ${url} returned non-string body on chunk starting at ${written}`,
+          );
+        }
+        const chunk = base64ToUint8Array(reply.body);
+        await writeChunk(chunk);
+        onProgress?.(written, sizeInfo.total);
+      }
+      return { bytes: written };
+    }
+
+    // Unknown-total loop. Stop on 416, short chunk, or empty chunk.
+    while (true) {
+      signal?.throwIfAborted();
+      const end = written + chunkBytes - 1;
+      const reply = await proxyFetchWithRetry(
+        proxyFetch,
+        {
+          tabId,
+          frameId,
+          url,
+          headers: { ...(headers ?? {}), Range: `bytes=${written}-${end}` },
+          responseType: 'arrayBuffer',
+        },
+        signal,
+      );
+      if (!reply.ok) {
+        if (reply.status === 416) break;
+        throwFromReply(reply, url);
+      }
+      if (typeof reply.body !== 'string') {
+        throw new Error(
+          `proxy fetch for ${url} returned non-string body on chunk starting at ${written}`,
+        );
+      }
+      const chunk = base64ToUint8Array(reply.body);
+      if (chunk.byteLength === 0) break;
+      await writeChunk(chunk);
+      onProgress?.(written, written);
+      if (chunk.byteLength < chunkBytes) break;
+    }
+    return { bytes: written };
+  } finally {
+    await writable.close();
+  }
+}
+
 export interface RangeSizeInfo {
   /** Best estimate of the total file size. When `known` is false this is
    *  the fallback (typically the first chunk's own byte length). */

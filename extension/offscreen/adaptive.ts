@@ -16,32 +16,26 @@
 //   4. Return a Blob URL backed by the OPFS file; the SW hands it to
 //      chrome.downloads.download.
 //
-// KNOWN LIMIT (v0.11.1): each stream is fetched in one shot through
-// the content-script proxy. The proxy reply carries the body as a
-// base64-encoded string over `chrome.runtime.sendMessage`, so the
-// peak transit footprint is roughly 2× the file size — the encoded
-// reply traveling from content script → SW → offscreen, plus the
-// decoded buffer once it lands here. Chrome's message bus has a
-// practical cap in the tens-to-low-hundreds of megabytes; a 1080p
-// AVC video at ~4 Mbps × 10 min is right at that edge.
-//
-// Once we hit that wall on a real video, the fix is the chunked /
-// Range-based proxy already on the v1.3 progressive-download
-// roadmap: fetch the body in slices and append them to OPFS without
-// ever materializing the whole buffer in JS heap. Holding off on it
-// for v0.11.1 to keep the change surface bounded.
+// Peak JS heap (v0.11.5): bounded by the muxer's mdat-copy chunk
+// size (1 MB per side) plus each input's moov (typically tens of
+// KB). The full video and audio streams are staged to OPFS during
+// fetch via `fetchToOpfsRanged` and read on-demand by the combine
+// pass — no materialization of the full file in heap on either
+// side. Required for 4K (1-3 GB per side).
 
 import { UnsupportedFormatError } from '../lib/errors.js';
 import { log, redactUrl } from '../lib/log.js';
 import { type ProxyFetch } from './downloader.js';
-import { fetchArrayBufferRanged } from './range-fetch.js';
-import { combineFmp4 } from './mp4-combine.js';
+import { fetchToOpfsRanged } from './range-fetch.js';
+import { combineFmp4, fileSource } from './mp4-combine.js';
 import { OpfsWorkspace } from './storage.js';
 import { getYouTubeSolver } from './yt-sig.js';
 import type { DownloadProgress, DownloadResult } from './downloader.js';
 import type { DownloadRequest } from '../lib/types.ts';
 
 const OUTPUT_FILE_NAME = 'out.mp4';
+const VIDEO_STAGE_FILE = 'video.in';
+const AUDIO_STAGE_FILE = 'audio.in';
 
 function isYouTubeMediaUrl(url: string): boolean {
   try {
@@ -196,43 +190,41 @@ export async function downloadAdaptive(
   let succeeded = false;
   try {
     log.info('downloadAdaptive: starting parallel fetch', { requestId });
-    // Parallel fetch — the slower of the two gates the start of remux.
-    // v0.11.3: each side runs through fetchArrayBufferRanged, which
-    // issues `Range: bytes=A-B` requests in 8 MB chunks so a single
-    // base64 transit never exceeds chrome.runtime.sendMessage's
-    // practical cap.
-    //
-    // Each side updates its own byte counter; the unified `emit`
-    // closure then combines them so video + audio progress is
-    // surfaced together (vs. the old per-side onProgress that
-    // overwrote one another on the popup's progress bar).
-    const fetchSide = async (side: 'video' | 'audio', url: string): Promise<Uint8Array> => {
+    // Parallel fetch, OPFS-staged. Each side streams to its own
+    // workspace file via `fetchToOpfsRanged`; peak JS heap during
+    // fetch is one chunk per side (~8 MB) regardless of stream size.
+    // The combine pass later reads them on-demand via `fileSource`.
+    const videoStageHandle = await workspace.createOutputFile(VIDEO_STAGE_FILE);
+    const audioStageHandle = await workspace.createOutputFile(AUDIO_STAGE_FILE);
+    const fetchSide = async (
+      side: 'video' | 'audio',
+      url: string,
+      handle: FileSystemFileHandle,
+    ): Promise<number> => {
       log.info(`downloadAdaptive: fetch ${side} start`, {
         requestId,
         url: redactUrl(url),
       });
-      const bytes = await fetchArrayBufferRanged({
+      const { bytes } = await fetchToOpfsRanged({
         proxyFetch,
         tabId,
         frameId,
         url,
         headers: mergedHeaders,
         signal,
+        outputHandle: handle,
         onProgress: (written) => {
           if (side === 'video') videoBytesFetched = written;
           else audioBytesFetched = written;
           emit('fetch');
         },
       });
-      log.info(`downloadAdaptive: fetch ${side} done`, {
-        requestId,
-        bytes: bytes.byteLength,
-      });
+      log.info(`downloadAdaptive: fetch ${side} done`, { requestId, bytes });
       return bytes;
     };
-    const [videoBytes, audioBytes] = await Promise.all([
-      fetchSide('video', videoUrl),
-      fetchSide('audio', audioUrl),
+    const [videoBytesLen, audioBytesLen] = await Promise.all([
+      fetchSide('video', videoUrl, videoStageHandle),
+      fetchSide('audio', audioUrl, audioStageHandle),
     ]).catch((err: unknown) => {
       log.warn('adaptive fetch failed', {
         requestId,
@@ -248,25 +240,29 @@ export async function downloadAdaptive(
     // Fetch complete — pin the unified bar to FETCH_PORTION before
     // remux starts so the next transition is a smooth climb rather
     // than a snap-to-low-percent.
-    videoBytesFetched = videoBytes.byteLength;
-    audioBytesFetched = audioBytes.byteLength;
+    videoBytesFetched = videoBytesLen;
+    audioBytesFetched = audioBytesLen;
     fetchTotalAtCompletion = videoBytesFetched + audioBytesFetched;
     emit('fetch');
 
     // ---- Step 3: combine fMP4 streams into one MP4 written to OPFS. ----
     //
-    // Progress here is bytes-based — combineFmp4 emits (written / total)
-    // as it writes. We map it onto the 'remux' stage so the popup's
-    // unified-progress bar advances naturally past the fetch phase.
+    // Both inputs are now staged in OPFS. Wrap each as an Fmp4Source
+    // backed by File.slice() — the combine pass reads moofs in full
+    // (small) and stream-copies mdat ranges in 1 MB chunks, so peak
+    // JS heap during remux stays around a couple MB total no matter
+    // how large the inputs are.
     log.info('downloadAdaptive: starting combineFmp4', {
       requestId,
-      videoBytes: videoBytes.byteLength,
-      audioBytes: audioBytes.byteLength,
+      videoBytes: videoBytesLen,
+      audioBytes: audioBytesLen,
     });
+    const videoStageFile = await workspace.getOutputFile(VIDEO_STAGE_FILE);
+    const audioStageFile = await workspace.getOutputFile(AUDIO_STAGE_FILE);
     const outputHandle = await workspace.createOutputFile(OUTPUT_FILE_NAME);
     const combined = await combineFmp4(
-      videoBytes,
-      audioBytes,
+      fileSource(videoStageFile),
+      fileSource(audioStageFile),
       outputHandle,
       (p) => {
         remuxBytesWritten = p.written;

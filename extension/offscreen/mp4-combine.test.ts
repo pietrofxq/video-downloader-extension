@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { combineFmp4 } from './mp4-combine.js';
+import { combineFmp4, memorySource } from './mp4-combine.js';
 
 // ---------- synthetic fMP4 builder ----------
 //
@@ -341,7 +341,7 @@ describe('combineFmp4', () => {
     ]);
 
     const file = makeMockFile();
-    const result = await combineFmp4(video, audio, file.handle);
+    const result = await combineFmp4(memorySource(video), memorySource(audio), file.handle);
     expect(result.bytes).toBeGreaterThan(0);
     expect(file.bytes.byteLength).toBe(result.bytes);
 
@@ -358,7 +358,7 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -407,7 +407,7 @@ describe('combineFmp4', () => {
     ]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moofs = top.filter((b) => b.name === 'moof');
@@ -435,7 +435,7 @@ describe('combineFmp4', () => {
     ]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     // Read the mdat payloads in file order; assert ordering.
     const top = topBoxes(file.bytes);
@@ -451,7 +451,7 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -485,7 +485,7 @@ describe('combineFmp4', () => {
     });
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -513,7 +513,7 @@ describe('combineFmp4', () => {
     });
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -530,7 +530,9 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A') }]);
 
     const file = makeMockFile();
-    await expect(combineFmp4(justFtyp, audio, file.handle)).rejects.toThrow(/moov/);
+    await expect(
+      combineFmp4(memorySource(justFtyp), memorySource(audio), file.handle),
+    ).rejects.toThrow(/moov/);
   });
 
   it('honors abort signal before fetch', async () => {
@@ -540,9 +542,9 @@ describe('combineFmp4', () => {
     const ctrl = new AbortController();
     ctrl.abort(new DOMException('aborted', 'AbortError'));
     const file = makeMockFile();
-    await expect(combineFmp4(video, audio, file.handle, undefined, ctrl.signal)).rejects.toThrow(
-      /aborted/,
-    );
+    await expect(
+      combineFmp4(memorySource(video), memorySource(audio), file.handle, undefined, ctrl.signal),
+    ).rejects.toThrow(/aborted/);
   });
 
   it('handles a 64-bit largesize mdat (size==1)', async () => {
@@ -560,7 +562,7 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     // Output should contain both moofs + mdats — proof the parser
     // walked past the largesize mdat without throwing.
@@ -585,7 +587,7 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
     // Pairing succeeded — output has both moofs + mdats.
     const top = topBoxes(file.bytes);
     const tail = top.slice(2).map((b) => b.name);
@@ -604,6 +606,8 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await expect(combineFmp4(video, audio, file.handle)).rejects.toThrow(/no matching mdat/);
+    await expect(
+      combineFmp4(memorySource(video), memorySource(audio), file.handle),
+    ).rejects.toThrow(/no matching mdat/);
   });
 });
