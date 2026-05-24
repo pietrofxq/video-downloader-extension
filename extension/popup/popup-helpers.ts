@@ -22,6 +22,16 @@ import type { AudioTrack, DownloadState, HlsVariant, MediaEntry } from '../lib/t
  * of the quality dropdown entirely (v0.11.3 follow-up — earlier
  * iterations labeled them "— not supported" but that made the first
  * option in the picker sometimes unselectable noise).
+ *
+ * v0.11.5 Phase B: AV1 (`av01.*`) joined AVC as a muxable codec.
+ * YouTube serves AV1 in fragmented MP4 with the same box layout as
+ * AVC — only the sample entry FOURCC inside trak.mdia.minf.stbl.stsd
+ * differs (`av01` vs `avc1`), and combineFmp4 passes that subtree
+ * through verbatim. So no muxer changes were needed alongside this
+ * filter loosening — Chrome / VLC / QuickTime all play av01-in-mp4.
+ *
+ * VP9 (`vp09.*`) stays rejected because YouTube serves it in
+ * fragmented WebM, not ISOBMFF — needs a different muxer (Phase C).
  */
 export function isVariantDownloadable(v: HlsVariant): boolean {
   const kind = classifyUrl(v.url);
@@ -32,7 +42,7 @@ export function isVariantDownloadable(v: HlsVariant): boolean {
   // muxable rather than hide the variant entirely.
   const codecs = v.codecs ?? '';
   if (!codecs) return true;
-  return /^avc1\./i.test(codecs);
+  return /^avc1\./i.test(codecs) || /^av01\./i.test(codecs);
 }
 
 /**

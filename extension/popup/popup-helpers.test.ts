@@ -145,7 +145,12 @@ describe('isVariantDownloadable', () => {
     expect(isVariantDownloadable(ytVp9Variant('720p'))).toBe(false);
   });
 
-  it('rejects AV1 adaptive variants', () => {
+  it('admits AV1 adaptive variants (v0.11.5 — fMP4 same shape as AVC)', () => {
+    // YouTube serves AV1 inside the same ISOBMFF box layout as AVC;
+    // the sample entry inside trak.mdia.minf.stbl.stsd is the only
+    // thing that differs (`av01` vs `avc1`) and combineFmp4 copies
+    // the trak subtree verbatim. So once we lift the codec filter
+    // here, the existing muxer handles AV1 with no further changes.
     const av1 = variant({
       url: 'https://r1.googlevideo.com/videoplayback?itag=399&mime=video%2Fmp4',
       bandwidth: 2_000_000,
@@ -153,7 +158,21 @@ describe('isVariantDownloadable', () => {
       codecs: 'av01.0.05M.08',
       pairedAudioUrl: 'https://r1.googlevideo.com/videoplayback?itag=140&mime=audio%2Fmp4',
     });
-    expect(isVariantDownloadable(av1)).toBe(false);
+    expect(isVariantDownloadable(av1)).toBe(true);
+  });
+
+  it('admits AV1 4K variants — the actual reason for the codec lift', () => {
+    // YouTube caps AVC at 1080p; 1440p / 2160p exist only as AV1
+    // (in fMP4) or VP9 (in WebM, see Phase C). This is the test
+    // case the field cares about.
+    const av1_4k = variant({
+      url: 'https://r1.googlevideo.com/videoplayback?itag=571&mime=video%2Fmp4',
+      bandwidth: 12_000_000,
+      resolution: '3840x2160',
+      codecs: 'av01.0.13M.08',
+      pairedAudioUrl: 'https://r1.googlevideo.com/videoplayback?itag=140&mime=audio%2Fmp4',
+    });
+    expect(isVariantDownloadable(av1_4k)).toBe(true);
   });
 
   it('rejects adaptive variants without a paired audio stream', () => {
@@ -179,10 +198,18 @@ describe('isVariantDownloadable', () => {
 // ---------- filterDownloadableVariants ----------
 
 describe('filterDownloadableVariants', () => {
-  it('drops VP9 / AV1 variants from a mixed-codec YouTube inventory', () => {
+  it('drops VP9 variants but admits AVC + AV1 from a mixed-codec YouTube inventory', () => {
+    const av1Variant = variant({
+      url: 'https://r1.googlevideo.com/videoplayback?itag=399&mime=video%2Fmp4&q=1080p',
+      bandwidth: 2_500_000,
+      resolution: '1920x1080',
+      codecs: 'av01.0.08M.08',
+      pairedAudioUrl: 'https://r1.googlevideo.com/videoplayback?itag=140&mime=audio%2Fmp4',
+    });
     const all = [
       ytAvcAdaptiveVariant('1080p'),
       ytVp9Variant('1080p'),
+      av1Variant,
       ytAvcAdaptiveVariant('720p'),
       ytVp9Variant('720p'),
       ytProgressive360pVariant(),
@@ -190,8 +217,9 @@ describe('filterDownloadableVariants', () => {
     const filtered = filterDownloadableVariants(all);
     expect(filtered.map((v) => v.url)).toEqual([
       all[0].url, // 1080p AVC
-      all[2].url, // 720p AVC
-      all[4].url, // 360p progressive
+      all[2].url, // 1080p AV1
+      all[3].url, // 720p AVC
+      all[5].url, // 360p progressive
     ]);
   });
 
@@ -200,9 +228,11 @@ describe('filterDownloadableVariants', () => {
     expect(filterDownloadableVariants(all)).toEqual(all);
   });
 
-  it('returns an empty array when every variant is unsupported', () => {
-    // Video that only ships VP9/AV1 at this resolution — the popup
+  it('returns an empty array when every variant is VP9-only (unsupported until Phase C)', () => {
+    // Video that only ships VP9 at this resolution — the popup
     // would render a "No supported variants" placeholder option.
+    // Once Phase C adds WebM container support this fixture will
+    // need updating; until then VP9 is the unsupported codec.
     expect(filterDownloadableVariants([ytVp9Variant('1080p'), ytVp9Variant('720p')])).toEqual([]);
   });
 });
