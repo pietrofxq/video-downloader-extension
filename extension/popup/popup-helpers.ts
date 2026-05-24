@@ -22,6 +22,16 @@ import type { AudioTrack, DownloadState, HlsVariant, MediaEntry } from '../lib/t
  * of the quality dropdown entirely (v0.11.3 follow-up — earlier
  * iterations labeled them "— not supported" but that made the first
  * option in the picker sometimes unselectable noise).
+ *
+ * v0.11.5 Phase B: AV1 (`av01.*`) joined AVC as a muxable codec.
+ * YouTube serves AV1 in fragmented MP4 with the same box layout as
+ * AVC — only the sample entry FOURCC inside trak.mdia.minf.stbl.stsd
+ * differs (`av01` vs `avc1`), and combineFmp4 passes that subtree
+ * through verbatim. So no muxer changes were needed alongside this
+ * filter loosening — Chrome / VLC / QuickTime all play av01-in-mp4.
+ *
+ * VP9 (`vp09.*`) stays rejected because YouTube serves it in
+ * fragmented WebM, not ISOBMFF — needs a different muxer (Phase C).
  */
 export function isVariantDownloadable(v: HlsVariant): boolean {
   const kind = classifyUrl(v.url);
@@ -32,7 +42,7 @@ export function isVariantDownloadable(v: HlsVariant): boolean {
   // muxable rather than hide the variant entirely.
   const codecs = v.codecs ?? '';
   if (!codecs) return true;
-  return /^avc1\./i.test(codecs);
+  return /^avc1\./i.test(codecs) || /^av01\./i.test(codecs);
 }
 
 /**
@@ -46,10 +56,11 @@ export function isVariantDownloadable(v: HlsVariant): boolean {
  *     v0.11.3 quality-picker regression report.
  *  2. Entry is a media playlist (single bitrate) — `entry.url` IS
  *     the playable URL.
- *  3. Master playlist with parsed variants — first variant (highest
- *     bandwidth after the parser sort) as a sensible default; the
- *     change handler in popup.ts patches the badge live as the user
- *     picks different qualities.
+ *  3. Master playlist with parsed variants — first variant after
+ *     `filterDownloadableVariants` (resolution-desc, then bandwidth-desc)
+ *     so the badge matches the dropdown's default-selected option.
+ *     Without this alignment the badge could describe a VP9 variant
+ *     while the dropdown was actually showing AVC selected.
  *
  * Falls back to `entry.url` when none of the above apply (manifest
  * not parsed yet — the row's Download button stays disabled until
@@ -61,7 +72,12 @@ export function pickDisplayVariantUrl(
 ): string {
   if (downloadState?.variantUrl) return downloadState.variantUrl;
   if (entry.isMaster === false) return entry.url;
-  return entry.variants?.[0]?.url ?? entry.url;
+  if (Array.isArray(entry.variants) && entry.variants.length > 0) {
+    const sorted = filterDownloadableVariants(entry.variants);
+    if (sorted.length > 0) return sorted[0].url;
+    return entry.variants[0].url;
+  }
+  return entry.url;
 }
 
 /**
@@ -83,25 +99,67 @@ export function pickDownloadVariantUrl(
   return null;
 }
 
-/** Format a HlsVariant for display in the quality picker dropdown. */
+/**
+ * Friendly codec name for the quality dropdown. YouTube videos
+ * routinely ship the same resolution in both AVC and AV1; without
+ * the codec in the label, "1440p (12 Mbps)" and "1440p (5 Mbps)"
+ * look like the same option to a quick glance, and users pick the
+ * wrong one. Returns '' for codecs we don't have a friendly name
+ * for (the caller falls back to bandwidth as the disambiguator).
+ */
+function codecLabel(codecs: string | null): string {
+  if (!codecs) return '';
+  if (/^avc1\./i.test(codecs)) return 'H.264';
+  if (/^av01\./i.test(codecs)) return 'AV1';
+  if (/^vp09\./i.test(codecs)) return 'VP9';
+  return '';
+}
+
+/** Read the height from a "WxH" resolution string. 0 if absent / unparsed. */
+function variantHeight(v: HlsVariant): number {
+  if (!v.resolution) return 0;
+  const m = /x(\d+)/.exec(v.resolution);
+  return m ? Number(m[1]) : 0;
+}
+
+/**
+ * Format a HlsVariant for display in the quality picker dropdown.
+ * Includes the codec name when known so AVC vs AV1 at the same
+ * resolution are distinguishable at a glance.
+ */
 export function formatVariant(v: HlsVariant): string {
   const resPart = v.resolution?.includes('x')
     ? `${v.resolution.split('x')[1]}p`
     : v.resolution || '';
   const bwPart = v.bandwidth ? `${Math.round(v.bandwidth / 1000)} kbps` : '';
-  if (resPart && bwPart) return `${resPart} (${bwPart})`;
-  return resPart || bwPart || 'variant';
+  const codec = codecLabel(v.codecs);
+  const head = [resPart, codec].filter(Boolean).join(' ');
+  if (head && bwPart) return `${head} (${bwPart})`;
+  return head || bwPart || 'variant';
 }
 
 /**
- * Reduce an entry's variant list to what the dropdown should show.
- * Filters out anything unmuxable (VP9 / AV1 / adaptive-without-audio).
+ * Reduce an entry's variant list to what the dropdown should show
+ * and the order it should appear in.
  *
- * Returned in the order they should appear; the popup's renderer
- * preserves that order verbatim.
+ * Filtering: anything unmuxable today (VP9 in WebM, adaptive
+ * without paired audio).
+ *
+ * Sorting: resolution descending first, then bandwidth descending
+ * within each resolution. Avoids the post-Phase-B confusion where
+ * `1440p AV1 (5 Mbps)` would land between `1080p AVC (4.5 Mbps)`
+ * and `720p AVC (1.5 Mbps)` in a pure bandwidth-sorted list — the
+ * user would have to scan past 1080p to find a second 1440p.
  */
 export function filterDownloadableVariants(variants: readonly HlsVariant[]): HlsVariant[] {
-  return variants.filter(isVariantDownloadable);
+  return variants
+    .filter(isVariantDownloadable)
+    .slice()
+    .sort((a, b) => {
+      const dh = variantHeight(b) - variantHeight(a);
+      if (dh !== 0) return dh;
+      return (b.bandwidth ?? 0) - (a.bandwidth ?? 0);
+    });
 }
 
 /**

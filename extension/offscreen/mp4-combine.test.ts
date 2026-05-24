@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { combineFmp4 } from './mp4-combine.js';
+import { combineFmp4, memorySource } from './mp4-combine.js';
 
 // ---------- synthetic fMP4 builder ----------
 //
@@ -341,7 +341,7 @@ describe('combineFmp4', () => {
     ]);
 
     const file = makeMockFile();
-    const result = await combineFmp4(video, audio, file.handle);
+    const result = await combineFmp4(memorySource(video), memorySource(audio), file.handle);
     expect(result.bytes).toBeGreaterThan(0);
     expect(file.bytes.byteLength).toBe(result.bytes);
 
@@ -358,7 +358,7 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -407,7 +407,7 @@ describe('combineFmp4', () => {
     ]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moofs = top.filter((b) => b.name === 'moof');
@@ -435,7 +435,7 @@ describe('combineFmp4', () => {
     ]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     // Read the mdat payloads in file order; assert ordering.
     const top = topBoxes(file.bytes);
@@ -451,7 +451,7 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -485,7 +485,7 @@ describe('combineFmp4', () => {
     });
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -513,7 +513,7 @@ describe('combineFmp4', () => {
     });
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     const top = topBoxes(file.bytes);
     const moov = findFirst(top, 'moov');
@@ -530,7 +530,9 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A') }]);
 
     const file = makeMockFile();
-    await expect(combineFmp4(justFtyp, audio, file.handle)).rejects.toThrow(/moov/);
+    await expect(
+      combineFmp4(memorySource(justFtyp), memorySource(audio), file.handle),
+    ).rejects.toThrow(/moov/);
   });
 
   it('honors abort signal before fetch', async () => {
@@ -540,9 +542,9 @@ describe('combineFmp4', () => {
     const ctrl = new AbortController();
     ctrl.abort(new DOMException('aborted', 'AbortError'));
     const file = makeMockFile();
-    await expect(combineFmp4(video, audio, file.handle, undefined, ctrl.signal)).rejects.toThrow(
-      /aborted/,
-    );
+    await expect(
+      combineFmp4(memorySource(video), memorySource(audio), file.handle, undefined, ctrl.signal),
+    ).rejects.toThrow(/aborted/);
   });
 
   it('handles a 64-bit largesize mdat (size==1)', async () => {
@@ -560,7 +562,7 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
 
     // Output should contain both moofs + mdats — proof the parser
     // walked past the largesize mdat without throwing.
@@ -585,11 +587,50 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await combineFmp4(video, audio, file.handle);
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
     // Pairing succeeded — output has both moofs + mdats.
     const top = topBoxes(file.bytes);
     const tail = top.slice(2).map((b) => b.name);
     expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat']);
+  });
+
+  it('walks past mdats whose body is larger than any header-read chunk (4K regression)', async () => {
+    // Reported field bug after Phase A landed: at 1440p+ the
+    // streaming walker stopped at the first moof and the parser
+    // threw "moof at offset N has no matching mdat (top-level box
+    // sequence: ftyp,moov,sidx,moof)". The cause was the walker
+    // bounds-checked a box's totalSize against the buffer slice
+    // it had just read for the header — fine in unit tests where
+    // small fixtures get returned whole, but wrong for OPFS-backed
+    // sources that strictly return only the requested bytes.
+    //
+    // Regression: fabricate a fixture with an mdat body sized
+    // bigger than any header-buffer slice the walker plausibly
+    // takes (we read 16 bytes per header; the mdat body here is
+    // 200 KB) plus a second moof+mdat behind it. If the walker
+    // mis-handles the large box it'll stop after the first
+    // mdat and the second pair won't pair up — same error shape
+    // as the field report.
+    const bigPayload = new Uint8Array(200 * 1024).fill(0x42);
+    const video = concat(
+      box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
+      makeMoov(1, 90000, 2000),
+      makeMoofMdat(1, 1, 0, bigPayload),
+      makeMoofMdat(1, 2, 1000, te('VID2')),
+    );
+    const audio = makeFmp4(1, 48000, [
+      { tfdt: 0, payload: te('AUD1') },
+      { tfdt: 1000, payload: te('AUD2') },
+    ]);
+
+    const file = makeMockFile();
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+    // All four pairs must reach the output. Pre-fix the walker
+    // would have stopped after the large mdat and the second pair
+    // would have been missing.
+    const top = topBoxes(file.bytes);
+    const tail = top.slice(2).map((b) => b.name);
+    expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat']);
   });
 
   it('throws an informative error when a moof has no matching mdat', async () => {
@@ -604,6 +645,8 @@ describe('combineFmp4', () => {
     const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
 
     const file = makeMockFile();
-    await expect(combineFmp4(video, audio, file.handle)).rejects.toThrow(/no matching mdat/);
+    await expect(
+      combineFmp4(memorySource(video), memorySource(audio), file.handle),
+    ).rejects.toThrow(/no matching mdat/);
   });
 });
