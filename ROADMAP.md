@@ -2,7 +2,7 @@
 
 Shippable milestones for the Video Downloader extension. Each version is independently demoable — at the end of a version you should be able to load the extension unpacked and *show something working*.
 
-The engine is **site-agnostic**: generic media detection runs everywhere, and a **site-adapter** layer adds richer metadata, auth handling, and naming for specific origins. **Hotmart Club is the first and most-tested adapter** — its needs (cross-origin iframe, signed `hdntl` token, AES-128 segments) drive a lot of the design, but no Hotmart-specific code lives outside `extension/adapters/hotmart.js`. Adding another adapter (Vimeo, generic Video.js, Bunny CDN, etc.) is intentionally a small, well-scoped task — see v1.4.
+The engine is **site-agnostic**: generic media detection runs everywhere, and a **site-adapter** layer adds richer metadata, auth handling, and naming for specific origins. **YouTube and Hotmart Club have dedicated adapters today.** Hotmart's needs (cross-origin iframe, signed `hdntl` token, AES-128 segments) drove a lot of the early design, but no site-specific code lives outside `extension/adapters/`. Adding another adapter (Vimeo, generic Video.js, Bunny CDN, etc.) is intentionally a small, well-scoped task — see v1.4.
 
 A coding agent picking up work should:
 1. Find the lowest unchecked version section.
@@ -499,9 +499,48 @@ Tasks:
 
 ---
 
-## v0.11.7 - YouTube 4K via VP9 (WebM container muxer)
+## v0.11.7 - YouTube HD/4K playback fix (VLC) — shipped
 
-Goal: lift the codec gate's remaining hole. YouTube serves some 4K content as VP9-only (no AV1 fallback) — those videos surface in the picker today as "No supported variants" or hide their highest qualities behind the `isVariantDownloadable` filter. v0.11.6 lights up the VP9 path by adding a WebM container muxer.
+Tactical fix (not a planned milestone) that took the v0.11.7 version number when it shipped. YouTube adaptive (HD/4K) downloads played with heavy frame-skipping and lost audio after seeking in VLC. Two root causes in the fMP4 two-track combiner (`extension/offscreen/mp4-combine.ts`):
+
+- [x] **Audio track header in the wrong timescale.** The combined audio `tkhd.duration` (and any `edts/elst` segment_duration) was left in the audio source's movie timescale while the output `mvhd` used the video's — VLC read the audio track ~1.5× too long, drifting its master clock. Now rescaled into the output movie timescale.
+- [x] **Interleaved single-track moofs.** The combiner emitted one input's moof then the other's (the layout AGENTS.md §8a(1) flags as VLC-breaking). It now **de-fragments** both inputs into a plain `ftyp + moov + mdat` MP4 with real sample tables (`stts` / `ctts` / `stss` / `stsc` / `stsz` / `co64`) — the structure every player handles. ctts promoted to v1 for negative composition offsets; co64 + 64-bit mdat so multi-GB 4K stays addressable; sample payload stream-copied source→output so the 4K memory budget is preserved.
+- [x] ffmpeg-validated (clean decode, correct frame counts) and confirmed playing in VLC on a real 1080p download.
+
+**Ship criterion:** ✅ YouTube AVC/AV1 HD + 4K downloads play in VLC with correct frame timing, A/V sync, and working seek (verified 2026-05-26).
+
+---
+
+## v0.11.8 - UI, settings & quality-of-life
+
+Goal: the download pipeline is solid across HLS / YouTube AVC+AV1 / progressive, so the next focus is making the extension pleasant to use rather than adding more codecs or sites. This pulls the settings/options work forward from v1.0 (which becomes the release-gate milestone) and folds in popup polish. VP9 and broader site/codec support are deferred and picked up as needed (see v0.11.9, v0.12, v1.4).
+
+- [ ] **Options page (`options.html`)** with settings persisted in `chrome.storage.local`:
+  - Default quality (highest / 1080p / 720p / 480p / ask each time).
+  - Download concurrency (default 4, range 1–8).
+  - Filename template per adapter (default `{section} - {lesson}` for Hotmart, `{channel} - {title}` for YouTube, `{title} - {basename}` for default) with a live preview.
+  - Per-adapter enable/disable list with plain-language descriptions.
+  - Per-origin block list so users can silence detection on specific sites.
+  - "Reset detected videos for current tab" + "Clear all captured auth/header state" buttons.
+  - Plain-language explanation of why the `<all_urls>` permission is needed.
+- [ ] **Popup polish / QoL:**
+  - Remember the last-picked quality/codec preference and apply it as the default selection.
+  - Clearer empty / error / "DRM-protected" / "no supported variants" states.
+  - Copy-source-URL affordance (redacted) for debugging a failed download.
+  - Tidy the active-downloads section (grouping, clearer terminal-state rows).
+- [ ] **First-run disclaimer modal** in the popup ("only download content you have the right to"); acceptance stored in `chrome.storage.local`.
+- [ ] Wire the chosen settings through the existing pipeline (default-quality preselect, concurrency into the segment fetcher, per-adapter filename template into `deriveFilename`, block list into detection).
+- [ ] Tests for the settings store + filename-template rendering + block-list matching; `npm run check` green.
+
+**Ship criterion:** a user can set defaults (quality, concurrency, filename template), silence detection per origin, and sees a first-run disclaimer — no functionality regresses and `npm run check` passes.
+
+---
+
+## v0.11.9 - YouTube 4K via VP9 (WebM container muxer) — deferred (as-needed)
+
+> **Deferred.** AVC + AV1 already cover HD + 4K for the vast majority of YouTube videos. VP9-only 4K is rare enough that this is picked up only when a user actually hits a video with no AVC/AV1 fallback. Sits below the v0.11.8 quality-of-life work in priority.
+
+Goal: lift the codec gate's remaining hole. YouTube serves some 4K content as VP9-only (no AV1 fallback) — those videos surface in the picker today as "No supported variants" or hide their highest qualities behind the `isVariantDownloadable` filter. This milestone lights up the VP9 path by adding a WebM container muxer.
 
 Constraints retained from v0.11.5:
 - **No re-encoding.** Pure byte-level stream-copy.
@@ -550,21 +589,12 @@ Goal: make the HLS claim accurate before calling the extension broadly usable. P
 
 ---
 
-## v1.0 - Polish, settings, disclaimer
+## v1.0 - Release gate (polish, disclaimer, tag)
 
-Goal: shippable to friends - covers common HLS VOD end-to-end plus YouTube, with first-class Hotmart support.
+Goal: shippable to friends — covers common HLS VOD end-to-end plus YouTube and Hotmart.
 
-- [ ] First-run modal in the popup with the legal disclaimer ("only download content you have the right to"); acceptance stored in `chrome.storage.local`.
-- [ ] `options.html` page with:
-  - Default quality (highest / 1080p / 720p / 480p / ask each time).
-  - Concurrency (default 4, range 1-8).
-  - Subtitle output mode placeholder (off / sidecar once v1.1 lands).
-  - Filename template per-adapter (default `{section} - {lesson}.mp4` for Hotmart, `{title} - {basename}.mp4` for default) with a live preview.
-  - **Per-adapter enable/disable list** with descriptions.
-  - **Per-origin block list** so users can silence detection on specific sites.
-  - "Reset detected videos for current tab" button.
-  - "Clear all captured auth/header state" button.
-  - Plain-language explanation of why `<all_urls>` permission is needed.
+> The options page, per-adapter / per-origin settings, first-run disclaimer, and popup polish moved earlier to **v0.11.8**. v1.0 is now the release gate: final assets, security review, changelog, and the cross-site smoke matrix.
+
 - [ ] Final icon set + active-state badge styling.
 - [ ] Security/privacy review:
   - no full signed URLs in committed logs
@@ -660,7 +690,7 @@ Goal: adding a new site adapter is a documented, typed, small task. Hotmart and 
 
 ## Post-v1.4 (out of scope for now, parked here)
 
-- [ ] **Batch download** of all lessons in a section (Hotmart adapter; `plan.txt` §6 "Single-video vs batch"). Generalize to other adapters where applicable.
+- [ ] **Batch download** of all lessons in a section (Hotmart adapter). Generalize to other adapters where applicable.
 - [ ] **In-page Download button** injected next to the player by `page-content.js` (per-adapter opt-in).
 - [ ] **Firefox port** (MV3 in Firefox lacks `offscreen` - would need a different long-lived context strategy).
 - [ ] **Resume interrupted downloads** across browser restarts by persisting OPFS workspace manifests and request metadata.

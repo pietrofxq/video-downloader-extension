@@ -1,10 +1,10 @@
-# Video Downloader (with Hotmart Club support)
+# Video Downloader
 
-A Chrome extension (Manifest V3) that detects and downloads streaming video from arbitrary websites — HLS (`.m3u8`), DASH (`.mpd`), and progressive (`.mp4` / `.webm`) — through a generic media-detection engine plus a pluggable **site-adapter** layer that adds richer metadata, auth handling, and naming for specific sites. **Hotmart Club is the first first-class adapter**: it handles the cross-origin iframe, the signed Akamai token, and the AES-128 decryption automatically.
+A Chrome extension (Manifest V3) that detects and downloads streaming video from any website — HLS (`.m3u8`), DASH (`.mpd`), and progressive (`.mp4` / `.webm`) — through a generic media-detection engine plus a pluggable **site-adapter** layer that adds richer metadata, auth handling, and naming for specific sites. It works on most sites out of the box; **YouTube and Hotmart Club have dedicated adapters** today, and support for more sites is added as needed.
 
-> **Current coverage** (v0.11.5):
+> **Current coverage** (v0.11.7):
 > - **HLS** — variant playlists whose segments carry audio and video muxed into MPEG-TS (the common case, including Hotmart). Masters with separate alternate-audio renditions (`#EXT-X-MEDIA TYPE=AUDIO`) are detected but only the video rendition is downloaded — audio-rendition muxing is on the v0.12 roadmap.
-> - **YouTube** — adaptive HD (1080p) and 4K (2160p) for **AVC** and **AV1** codecs. The full pipeline is wired: InnerTube scrape (WEB_CREATOR / MWEB / TVHTML5) for catalog, SAPISIDHASH + visitorData auth, signatureCipher + n-param decipher, OPFS-staged chunked Range fetches, OPFS-streaming two-stream fMP4 combine muxer. Public non-DRM watch pages only; rentals, age-gated, region-locked, and live content are out of scope. **VP9** variants surface in the picker but stay rejected — they're in fragmented WebM, which needs a different container muxer (Phase C). Multi-dub videos get an audio-track picker; default pairs the original track.
+> - **YouTube** — adaptive HD (1080p) and 4K (2160p) for **AVC** and **AV1** codecs. The full pipeline is wired: InnerTube scrape (WEB_CREATOR / MWEB / TVHTML5) for catalog, SAPISIDHASH + visitorData auth, signatureCipher + n-param decipher, OPFS-staged chunked Range fetches, and an OPFS-streaming two-stream combiner that de-fragments video + audio into one plain MP4 (so seeking + A/V sync are correct in VLC). Public non-DRM watch pages only; rentals, age-gated, region-locked, and live content are out of scope. **VP9** variants surface in the picker but stay rejected — they're in fragmented WebM, which needs a different container muxer (deferred, picked up as needed). Multi-dub videos get an audio-track picker; default pairs the original track.
 
 > **Disclaimer**: This tool is intended for users who have the right to download the content they target — content they own, have purchased access to, or that is freely licensed. Do not use it to redistribute copyrighted material. DRM-protected streams (Widevine / PlayReady / FairPlay) are explicitly out of scope.
 
@@ -18,7 +18,36 @@ The extension watches every tab for media manifests using both `webRequest` list
 4. **Downloads** segments, decrypts when needed (AES-128 for HLS, ClearKey AES-CTR for DASH — no DRM), and **remuxes to fragmented MP4** (stream copy — no re-encoding) using `mux.js` inside an offscreen document. The remux step also patches the moov / moof boxes after `mux.js` produces them (see `AGENTS.md` §8 for the specific quirks).
 5. Saves the resulting MP4 via `chrome.downloads.download`.
 
-For Hotmart Club specifically: the player runs in a cross-origin iframe (`cf-embed.play.hotmart.com`) streaming HLS-packaged, AES-128 encrypted segments signed with a short-lived Akamai token (`hdntl`). The Hotmart adapter handles all of that automatically — the user just presses play and clicks Download.
+## Supported sites & adapter quirks
+
+Every site runs through the same engine (detect → route to an adapter → download → remux). The **default adapter** matches everything and is the baseline; sites with a dedicated adapter override only what they need on top of it.
+
+### Default adapter (fallback — every site)
+
+- **Matches:** always (lowest priority; runs when no specific adapter claims the page).
+- **Metadata:** page `<title>` + Open Graph tags; filename `{title} - {url basename}`.
+- **Fetching:** the media URL the player already requested, with cookies sent automatically. No URL signing, no cross-origin handling.
+- **Best for:** any site that serves a normal HLS / DASH / progressive URL the player fetches directly.
+
+### YouTube — `adapters/youtube.ts`
+
+YouTube never hands the page a usable media URL, so the adapter does real work the default never has to:
+
+- **Catalog comes from InnerTube, not the page.** Modern YouTube's WEB-client `ytInitialPlayerResponse` ships format metadata with **no URLs** (SABR). The adapter POSTs to `/youtubei/v1/player` **from the content-script context** (so Origin/Referer are `youtube.com`) using non-WEB clients (IOS / TVHTML5 / …) that still return URLs, authenticated with a `SAPISIDHASH` header + `visitorData`.
+- **Signature + n-param decipher.** Each `googlevideo` URL carries a `signatureCipher` / `n` value that must be transformed by a function buried in YouTube's `base.js`. The adapter AST-extracts that function and evaluates it inside a **sandboxed iframe** (MV3 CSP forbids `Function()` in the offscreen document).
+- **Two separate streams, combined.** HD/4K video and audio are independent files. They're fetched in parallel (chunked Range, OPFS-staged) and **de-fragmented into one plain MP4** — stream copy, no re-encode.
+- **Multi-dub audio picker** when a video ships several audio tracks (defaults to the original), plus **SPA-navigation handling** (the watch page swaps videos without reloading).
+- **Codecs:** AVC + AV1, including 4K. VP9-only videos surface in the picker but aren't downloadable yet (deferred). Public non-DRM watch pages only — rentals, age-gated, region-locked, and live are out of scope.
+
+### Hotmart Club — `adapters/hotmart.js`
+
+The player is locked inside a cross-origin iframe behind a signed token, which the default adapter can't reach:
+
+- **Cross-origin iframe.** The player runs in `cf-embed.play.hotmart.com`, whose DOM the top-page content script can't read. Stream URLs and metadata are relayed out through the iframe's own content script via messages.
+- **Signed Akamai token (`hdntl`).** Segment URLs are signed with a short-lived token, and fetches must originate from the **iframe's** origin (an extension-origin fetch gets 403'd). Segment / key / manifest fetches are therefore proxied through the iframe. A download started more than ~5 minutes after capture can hit token expiry → a "reload the page and try again" error.
+- **AES-128 HLS.** Segments are AES-128-CBC encrypted; the key is fetched once and segments are decrypted with Web Crypto before remux.
+- **Naming.** Filenames are scraped from the lesson + section in the player chrome: `{section} - {lesson}.mp4`.
+- Activates on `hotmart.com/*/club/*`; the user just presses play and clicks Download.
 
 ## File structure
 
@@ -60,8 +89,7 @@ hotmart-downloader/
 │   └── screenshots/
 ├── AGENTS.md                        # architectural notes for coding agents
 ├── ROADMAP.md                       # shippable milestones / checkboxes
-├── README.md                        # this file
-└── plan.txt                         # original product spec (Hotmart-specific)
+└── README.md                        # this file
 ```
 
 > The repo root is still named `hotmart-downloader/` for historical reasons; renaming is parked for post-v1.3.

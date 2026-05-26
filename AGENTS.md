@@ -8,7 +8,7 @@ This file briefs an LLM coding agent on the architecture, conventions, and gotch
 
 A **Manifest V3 Chrome extension** that detects, downloads, decrypts, and remuxes streaming video from arbitrary websites into plain MP4 files. Supports HLS (`.m3u8`), DASH (`.mpd`), and progressive (`.mp4` / `.webm`). A **site-adapter** system layers per-origin enhancements (metadata scraping, custom naming, auth quirks) on top of generic detection — **Hotmart Club** is the first and most-tested adapter, but the engine is site-agnostic and other adapters can be added without touching core code.
 
-The original product spec (Hotmart-specific) lives in `plan.txt`; this document covers the broader engineering picture.
+This document covers the project's architecture and engineering conventions.
 
 ---
 
@@ -244,7 +244,7 @@ mux.js was built for `SourceBuffer.appendBuffer()` — it expects the player to 
 
 ## 11. When you're stuck
 
-- The original Hotmart spec is in `plan.txt` — read §6 (Key Technical Considerations) and §7 (Edge Cases) before guessing at behavior. Other adapters should aim for the same level of care.
+- For Hotmart's signed-token / cross-origin-iframe quirks, read `extension/adapters/hotmart.js` and §8 above before guessing at behavior. Other adapters should aim for the same level of care.
 - The current milestone and checkbox list is in `ROADMAP.md`. Pick up from the first unchecked item under the current version header.
 - If a checkbox is ambiguous, prefer the simplest implementation that satisfies it and leaves room for the next milestone.
 - If you're tempted to special-case a site in core, stop — write or extend an adapter instead. See §4.
