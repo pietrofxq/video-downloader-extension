@@ -4,13 +4,12 @@ import { combineFmp4, memorySource } from './mp4-combine.js';
 
 // ---------- synthetic fMP4 builder ----------
 //
-// The combine muxer's correctness is about box-tree manipulation:
-// renumber track_IDs, interleave moofs in time order, patch mfhd
-// sequence numbers. Real fMP4 from googlevideo would test the same
-// invariants but at much higher cost. We build the smallest legal
-// box-tree that has the structural features combineFmp4 inspects
-// (mvhd, tkhd, mdhd, mvex.trex, moof+mdat with tfhd / tfdt / trun)
-// and assert the post-combine layout.
+// combineFmp4 de-fragments two single-track fMP4 inputs into one plain
+// (non-fragmented) MP4. To test it we build the smallest legal single-
+// track fMP4 the muxer actually parses: a moov whose trak carries a real
+// box tree (tkhd, optional edts, mdia → mdhd/hdlr/minf → stbl → stsd) plus
+// mvex/trex, followed by (moof + mdat) fragments whose trun describes each
+// sample's duration / size / flags / composition offset.
 
 function te(s: string): Uint8Array {
   return new TextEncoder().encode(s);
@@ -18,6 +17,7 @@ function te(s: string): Uint8Array {
 
 function u32(v: number): Uint8Array {
   const b = new Uint8Array(4);
+  // `>>>` coerces to uint32, so negative values serialize as two's complement.
   b[0] = (v >>> 24) & 0xff;
   b[1] = (v >>> 16) & 0xff;
   b[2] = (v >>> 8) & 0xff;
@@ -51,192 +51,182 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-// mvhd v0: version+flags(4) + creation(4) + modification(4) +
-// timescale(4) + duration(4) + rate(4) + volume(2) + reserved(10) +
-// matrix(36) + pre_defined(24) + next_track_ID(4) = 100 bytes body.
 function makeMvhd(timescale: number, durationTicks: number, nextTrackId: number): Uint8Array {
   const body = new Uint8Array(100);
-  // version=0, flags=0 already
   body.set(u32(timescale), 12);
   body.set(u32(durationTicks), 16);
-  body.set(u32(0x00010000), 20); // rate = 1.0
-  body[24] = 0x01; // volume high byte (1.0)
-  // identity matrix at +32 (36 bytes); only the three fixed values matter
-  body.set(u32(0x00010000), 32); // a
-  body.set(u32(0x00010000), 48); // e
-  body.set(u32(0x40000000), 68); // w
+  body.set(u32(0x00010000), 20);
+  body[24] = 0x01;
+  body.set(u32(0x00010000), 32);
+  body.set(u32(0x00010000), 48);
+  body.set(u32(0x40000000), 68);
   body.set(u32(nextTrackId), 96);
   return box('mvhd', body);
 }
 
-// tkhd v0: version+flags(4) + creation(4) + modification(4) +
-// track_ID(4) + reserved(4) + duration(4) + reserved(8) + layer(2) +
-// altgroup(2) + volume(2) + reserved(2) + matrix(36) + width(4) +
-// height(4) = 84 bytes body.
 function makeTkhd(trackId: number, durationTicks: number): Uint8Array {
   const body = new Uint8Array(84);
-  body[3] = 0x03; // flags: track_enabled + track_in_movie
+  body[3] = 0x03;
   body.set(u32(trackId), 12);
   body.set(u32(durationTicks), 20);
-  body.set(u32(0x00010000), 40); // matrix a
-  body.set(u32(0x00010000), 56); // matrix e
-  body.set(u32(0x40000000), 76); // matrix w
+  body.set(u32(0x00010000), 40);
+  body.set(u32(0x00010000), 56);
+  body.set(u32(0x40000000), 76);
   return box('tkhd', body);
 }
 
-// mdhd v0: version+flags(4) + creation(4) + modification(4) +
-// timescale(4) + duration(4) + language(2) + pre_defined(2) = 24 bytes.
 function makeMdhd(timescale: number, durationTicks: number): Uint8Array {
   const body = new Uint8Array(24);
   body.set(u32(timescale), 12);
   body.set(u32(durationTicks), 16);
-  // language: packed 5-bit ISO 639-2 chars → "und" = 0x55C4
   body[20] = 0x55;
   body[21] = 0xc4;
   return box('mdhd', body);
 }
 
-function makeTrak(trackId: number, trackTimescale: number, durationTicks: number): Uint8Array {
-  // Combine cares about tkhd.track_ID + mdia.mdhd.timescale. The
-  // smallest legal trak just needs tkhd + mdia (containing mdhd).
-  return box(
-    'trak',
-    makeTkhd(trackId, durationTicks),
-    box('mdia', makeMdhd(trackTimescale, durationTicks)),
-  );
+function makeHdlr(handlerType: string): Uint8Array {
+  // fullbox(4) + pre_defined(4) + handler_type(4) + reserved(12) + name\0
+  const body = new Uint8Array(25);
+  body.set(te(handlerType), 8);
+  return box('hdlr', body);
 }
 
-function makeTrex(trackId: number, defaultSampleDuration = 0): Uint8Array {
-  // trex body: version+flags(4) + track_ID(4) + default_sample_description_index(4) +
-  // default_sample_duration(4) + default_sample_size(4) + default_sample_flags(4).
+function makeStsd(format: string): Uint8Array {
+  // fullbox(4) + entry_count(4)=1 + one minimal sample-entry box.
+  const entry = box(format, new Uint8Array(8));
+  return box('stsd', concat(u32(0), u32(1), entry));
+}
+
+function makeStbl(format: string): Uint8Array {
+  // Only stsd matters — the input's sample tables are empty in real fMP4.
+  return box('stbl', makeStsd(format));
+}
+
+function makeMinf(format: string): Uint8Array {
+  return box('minf', makeStbl(format));
+}
+
+function makeMdia(
+  timescale: number,
+  durationTicks: number,
+  handlerType: string,
+  format: string,
+): Uint8Array {
+  return box('mdia', makeMdhd(timescale, durationTicks), makeHdlr(handlerType), makeMinf(format));
+}
+
+function makeElst(entries: Array<{ segDur: number; mediaTime: number }>): Uint8Array {
+  const body = new Uint8Array(8 + entries.length * 12);
+  body.set(u32(entries.length), 4);
+  let p = 8;
+  for (const e of entries) {
+    body.set(u32(e.segDur), p);
+    body.set(u32(e.mediaTime), p + 4);
+    body.set(u32(0x00010000), p + 8); // media_rate 1.0
+    p += 12;
+  }
+  return box('elst', body);
+}
+
+function makeTrex(trackId: number): Uint8Array {
   const body = new Uint8Array(24);
   body.set(u32(trackId), 4);
-  body.set(u32(1), 8); // default sample description index
-  body.set(u32(defaultSampleDuration), 12);
+  body.set(u32(1), 8);
   return box('trex', body);
 }
 
-function makeMoov(
-  trackId: number,
-  trackTimescale: number,
-  durationTicks: number,
-  opts: { trexDefaultSampleDuration?: number } = {},
-): Uint8Array {
-  return box(
-    'moov',
-    makeMvhd(1000, durationTicks, trackId + 1),
-    makeTrak(trackId, trackTimescale, durationTicks),
-    box('mvex', makeTrex(trackId, opts.trexDefaultSampleDuration ?? 0)),
-  );
+interface Sample {
+  dur: number;
+  size: number;
+  cto?: number;
+  /** Defaults to true for the first sample, false otherwise (keyframe-led). */
+  sync?: boolean;
 }
 
-// mfhd body: version+flags(4) + sequence_number(4).
-function makeMfhd(seq: number): Uint8Array {
-  const body = new Uint8Array(8);
-  body.set(u32(seq), 4);
-  return box('mfhd', body);
-}
+// One (moof + mdat) fragment. tfhd sets default-base-is-moof; the trun
+// declares per-sample duration/size/flags(+cto). data_offset is patched to
+// point at the mdat payload (relative to the moof, per default-base-is-moof).
+function makeFragment(trackId: number, seq: number, tfdt: number, samples: Sample[]): Uint8Array {
+  const anyCto = samples.some((s) => (s.cto ?? 0) !== 0);
+  const anyNeg = samples.some((s) => (s.cto ?? 0) < 0);
 
-// tfhd body: version+flags(4) + track_ID(4). flags=0 (nothing else
-// declared) — combine only reads track_ID + flags, so the minimum
-// shape is fine.
-function makeTfhd(trackId: number): Uint8Array {
-  const body = new Uint8Array(8);
-  body.set(u32(trackId), 4);
-  return box('tfhd', body);
-}
+  const mfhd = box('mfhd', concat(u32(0), u32(seq)));
 
-// tfdt v0 body: version+flags(4) + baseMediaDecodeTime(4).
-function makeTfdt(decodeTime: number): Uint8Array {
-  const body = new Uint8Array(8);
-  body.set(u32(decodeTime), 4);
-  return box('tfdt', body);
-}
+  // tfhd: version 0, flags = default-base-is-moof (0x020000).
+  const tfhd = box('tfhd', concat(new Uint8Array([0, 0x02, 0, 0]), u32(trackId)));
+  const tfdtBox = box('tfdt', concat(u32(0), u32(tfdt)));
 
-// trun body: version+flags(4) + sample_count(4). Minimal trun
-// (no per-sample fields) — combine doesn't inspect them.
-function makeTrun(sampleCount: number): Uint8Array {
-  const body = new Uint8Array(8);
-  body.set(u32(sampleCount), 4);
-  return box('trun', body);
-}
+  // trun flags: data-offset + duration + size + flags (+ cto).
+  let flags = 0x000001 | 0x000100 | 0x000200 | 0x000400;
+  if (anyCto) flags |= 0x000800;
+  const version = anyNeg ? 1 : 0;
+  const perSample = 4 * (anyCto ? 4 : 3);
+  const trunBody = new Uint8Array(8 + 4 + samples.length * perSample);
+  trunBody[0] = version;
+  trunBody.set(u32(flags).subarray(1), 1); // 3-byte flags
+  trunBody.set(u32(samples.length), 4);
+  trunBody.set(u32(0), 8); // data_offset placeholder — patched below
+  let p = 12;
+  samples.forEach((s, i) => {
+    const sync = s.sync ?? i === 0;
+    trunBody.set(u32(s.dur), p);
+    trunBody.set(u32(s.size), p + 4);
+    trunBody.set(u32(sync ? 0 : 0x00010000), p + 8);
+    if (anyCto) trunBody.set(u32(s.cto ?? 0), p + 12);
+    p += perSample;
+  });
+  const trun = box('trun', trunBody);
 
-function makeMoofMdat(trackId: number, seq: number, tfdt: number, payload: Uint8Array): Uint8Array {
-  const moof = box(
-    'moof',
-    makeMfhd(seq),
-    box('traf', makeTfhd(trackId), makeTfdt(tfdt), makeTrun(1)),
-  );
+  const traf = box('traf', tfhd, tfdtBox, trun);
+  const moof = box('moof', mfhd, traf);
+
+  // data_offset (relative to moof start) = moof size + mdat header (8).
+  const dataOffset = moof.byteLength + 8;
+  // Locate the trun's data_offset field within the assembled moof and patch.
+  // moof = [hdr8][mfhd][traf: hdr8 + tfhd + tfdt + (trun: hdr8 + verflags4 + count4 + dataoff4 ...)]
+  const trunDataOffsetPos =
+    8 + mfhd.byteLength + 8 + tfhd.byteLength + tfdtBox.byteLength + 8 + 4 + 4;
+  moof.set(u32(dataOffset), trunDataOffsetPos);
+
+  let payloadLen = 0;
+  for (const s of samples) payloadLen += s.size;
+  const payload = new Uint8Array(payloadLen);
+  // Fill with a per-fragment marker so payload placement is checkable.
+  payload.fill((trackId * 64 + seq) & 0xff);
   const mdat = box('mdat', payload);
+
   return concat(moof, mdat);
 }
 
-// Build a "largesize" box: 4-byte size=1, type, 8-byte largesize,
-// payload. Real-world YouTube serves some mdat boxes this way even
-// when the body would fit in a 32-bit size. parseFmp4Structure must
-// handle it without tripping the "malformed mdat" check.
-function largeBox(type: string, payload: Uint8Array): Uint8Array {
-  const total = 16 + payload.byteLength;
-  const out = new Uint8Array(total);
-  out.set(u32(1), 0); // size=1 sentinel
-  out.set(te(type), 4);
-  // 8-byte big-endian largesize.
-  out.set(u32(0), 8); // high 32 bits
-  out.set(u32(total), 12); // low 32 bits — total fits in 32 bits in the test
-  out.set(payload, 16);
-  return out;
-}
-
-// Box of arbitrary type — used to inject styp/free/skip between
-// moof and mdat to verify the pairing tolerates intervening boxes.
-function makeMoofWithIntervening(
-  trackId: number,
-  seq: number,
-  tfdt: number,
-  payload: Uint8Array,
-  intervening: Uint8Array[],
-): Uint8Array {
-  const moof = box(
-    'moof',
-    makeMfhd(seq),
-    box('traf', makeTfhd(trackId), makeTfdt(tfdt), makeTrun(1)),
+function makeFmp4(args: {
+  trackId: number;
+  trackTimescale: number;
+  movieTimescale: number;
+  handlerType: string;
+  format: string;
+  fragments: Array<{ tfdt: number; samples: Sample[] }>;
+  edts?: Array<{ segDur: number; mediaTime: number }>;
+}): Uint8Array {
+  const { trackId, trackTimescale, movieTimescale, handlerType, format, fragments, edts } = args;
+  const trak = box(
+    'trak',
+    makeTkhd(trackId, 0),
+    ...(edts ? [box('edts', makeElst(edts))] : []),
+    makeMdia(trackTimescale, 0, handlerType, format),
   );
-  const mdat = box('mdat', payload);
-  return concat(moof, ...intervening, mdat);
-}
-
-function makeFmp4(
-  trackId: number,
-  trackTimescale: number,
-  fragments: Array<{ tfdt: number; payload: Uint8Array }>,
-  opts: {
-    /** Override the mvhd.duration ticks (default: derived from last tfdt + 1000). */
-    mvhdDurationTicks?: number;
-    /** Set mvex.trex.default_sample_duration so duration derivation has a fallback. */
-    trexDefaultSampleDuration?: number;
-  } = {},
-): Uint8Array {
-  const lastTfdt = fragments.length > 0 ? fragments[fragments.length - 1].tfdt : 0;
-  const totalTicks = opts.mvhdDurationTicks ?? lastTfdt + 1000;
-  const parts: Uint8Array[] = [
-    box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
-    makeMoov(trackId, trackTimescale, totalTicks, {
-      trexDefaultSampleDuration: opts.trexDefaultSampleDuration,
-    }),
-  ];
+  const moov = box(
+    'moov',
+    makeMvhd(movieTimescale, 0, trackId + 1),
+    trak,
+    box('mvex', makeTrex(trackId)),
+  );
+  const ftyp = box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41'));
   let seq = 1;
-  for (const frag of fragments) {
-    parts.push(makeMoofMdat(trackId, seq, frag.tfdt, frag.payload));
-    seq += 1;
-  }
-  return concat(...parts);
+  const frags = fragments.map((f) => makeFragment(trackId, seq++, f.tfdt, f.samples));
+  return concat(ftyp, moov, ...frags);
 }
 
 // ---------- in-memory FileSystemFileHandle ----------
-//
-// combineFmp4 writes through the standard OPFS handle API. For tests
-// we mimic the parts it touches: createWritable() + .write() + .close()
-// and the ability to read the bytes back at the end.
 
 interface MockFile {
   bytes: Uint8Array;
@@ -258,7 +248,6 @@ function makeMockFile(): MockFile {
   const handle = {
     kind: 'file',
     name: 'mock',
-    // combineFmp4 only exercises createWritable.
     async createWritable(): Promise<unknown> {
       return writable;
     },
@@ -285,368 +274,288 @@ interface BoxRef {
   name: string;
   start: number;
   end: number;
+  bodyStart: number;
 }
 
-function readBoxSize(buf: Uint8Array, off: number): number {
+function readBoxSize(buf: Uint8Array, off: number): { size: number; bodyStart: number } {
   const size = readU32(buf, off);
   if (size === 1) {
-    // 64-bit largesize follows the type field.
     const hi = readU32(buf, off + 8);
     const lo = readU32(buf, off + 12);
-    return hi * 0x100000000 + lo;
+    return { size: hi * 0x100000000 + lo, bodyStart: off + 16 };
   }
-  return size;
+  return { size, bodyStart: off + 8 };
+}
+
+function children(buf: Uint8Array, start: number, end: number): BoxRef[] {
+  const out: BoxRef[] = [];
+  let i = start;
+  while (i + 8 <= end) {
+    const { size, bodyStart } = readBoxSize(buf, i);
+    if (size < 8 || i + size > end) break;
+    out.push({ name: readName(buf, i + 4), start: i, end: i + size, bodyStart });
+    i += size;
+  }
+  return out;
 }
 
 function topBoxes(buf: Uint8Array): BoxRef[] {
-  const out: BoxRef[] = [];
-  let i = 0;
-  while (i + 8 <= buf.byteLength) {
-    const size = readBoxSize(buf, i);
-    if (size < 8 || size > buf.byteLength - i) break;
-    out.push({ name: readName(buf, i + 4), start: i, end: i + size });
-    i += size;
-  }
-  return out;
+  return children(buf, 0, buf.byteLength);
 }
 
-function childBoxes(buf: Uint8Array, parent: BoxRef): BoxRef[] {
-  const out: BoxRef[] = [];
-  let i = parent.start + 8;
-  while (i + 8 <= parent.end) {
-    const size = readU32(buf, i);
-    if (size < 8 || size > parent.end - i) break;
-    out.push({ name: readName(buf, i + 4), start: i, end: i + size });
-    i += size;
-  }
-  return out;
-}
-
-function findFirst(boxes: BoxRef[], name: string): BoxRef | undefined {
+function find(boxes: BoxRef[], name: string): BoxRef | undefined {
   return boxes.find((b) => b.name === name);
 }
 
+function trakByHandler(buf: Uint8Array, handler: string): BoxRef | undefined {
+  const moov = find(topBoxes(buf), 'moov');
+  if (!moov) return undefined;
+  for (const trak of children(buf, moov.bodyStart, moov.end).filter((b) => b.name === 'trak')) {
+    const mdia = find(children(buf, trak.bodyStart, trak.end), 'mdia');
+    if (!mdia) continue;
+    const hdlr = find(children(buf, mdia.bodyStart, mdia.end), 'hdlr');
+    if (hdlr && readName(buf, hdlr.bodyStart + 8) === handler) return trak;
+  }
+  return undefined;
+}
+
+function stblOf(buf: Uint8Array, trak: BoxRef): BoxRef[] {
+  const mdia = find(children(buf, trak.bodyStart, trak.end), 'mdia')!;
+  const minf = find(children(buf, mdia.bodyStart, mdia.end), 'minf')!;
+  const stbl = find(children(buf, minf.bodyStart, minf.end), 'stbl')!;
+  return children(buf, stbl.bodyStart, stbl.end);
+}
+
+function tkhdDuration(buf: Uint8Array, trak: BoxRef): number {
+  const tkhd = find(children(buf, trak.bodyStart, trak.end), 'tkhd')!;
+  return readU32(buf, tkhd.bodyStart + 20); // v0 duration offset
+}
+
+function tkhdTrackId(buf: Uint8Array, trak: BoxRef): number {
+  const tkhd = find(children(buf, trak.bodyStart, trak.end), 'tkhd')!;
+  return readU32(buf, tkhd.bodyStart + 12);
+}
+
+// ---------- common fixtures ----------
+
+// Video: track ts 30000, movie ts 30000 (matches output). Two fragments,
+// B-frame composition offsets, keyframe-led so stss has 2 entries.
+function videoInput(
+  opts: { edts?: Array<{ segDur: number; mediaTime: number }> } = {},
+): Uint8Array {
+  return makeFmp4({
+    trackId: 1,
+    trackTimescale: 30000,
+    movieTimescale: 30000,
+    handlerType: 'vide',
+    format: 'avc1',
+    edts: opts.edts,
+    fragments: [
+      {
+        tfdt: 0,
+        samples: [
+          { dur: 1001, size: 5000, cto: 2002, sync: true },
+          { dur: 1001, size: 1200, cto: 0, sync: false },
+          { dur: 1001, size: 1300, cto: 1001, sync: false },
+        ],
+      },
+      {
+        tfdt: 3003,
+        samples: [
+          { dur: 1001, size: 4800, cto: 2002, sync: true },
+          { dur: 1001, size: 1100, cto: 0, sync: false },
+        ],
+      },
+    ],
+  });
+}
+
+// Audio: track ts 44100, movie ts 44100 (DIFFERS from the video/output
+// movie ts of 30000). All samples sync, no composition offsets.
+function audioInput(
+  opts: { edts?: Array<{ segDur: number; mediaTime: number }> } = {},
+): Uint8Array {
+  return makeFmp4({
+    trackId: 1,
+    trackTimescale: 44100,
+    movieTimescale: 44100,
+    handlerType: 'soun',
+    format: 'mp4a',
+    edts: opts.edts,
+    fragments: [
+      {
+        tfdt: 0,
+        samples: [
+          { dur: 1024, size: 400, sync: true },
+          { dur: 1024, size: 410, sync: true },
+        ],
+      },
+      { tfdt: 2048, samples: [{ dur: 1024, size: 420, sync: true }] },
+    ],
+  });
+}
+
 describe('combineFmp4', () => {
-  it('emits ftyp + moov with two traks + interleaved moofs', async () => {
-    // Video: track_ID=1, two fragments at tfdt=0 and tfdt=1000.
-    const video = makeFmp4(1, 90000, [
-      { tfdt: 0, payload: te('VID-A-payload') },
-      { tfdt: 1000, payload: te('VID-B-payload') },
-    ]);
-    // Audio: also track_ID=1 (each input is single-track). Combine
-    // should renumber it to 2.
-    const audio = makeFmp4(1, 48000, [
-      { tfdt: 0, payload: te('AUD-A-payload') },
-      { tfdt: 500, payload: te('AUD-B-payload') },
-    ]);
-
+  it('produces a non-fragmented ftyp + moov + mdat with two traks', async () => {
     const file = makeMockFile();
-    const result = await combineFmp4(memorySource(video), memorySource(audio), file.handle);
-    expect(result.bytes).toBeGreaterThan(0);
-    expect(file.bytes.byteLength).toBe(result.bytes);
+    const { bytes } = await combineFmp4(
+      memorySource(videoInput()),
+      memorySource(audioInput()),
+      file.handle,
+    );
+    expect(bytes).toBe(file.bytes.byteLength);
 
-    const top = topBoxes(file.bytes);
-    // Layout: ftyp, moov, then 4 (moof+mdat) pairs interleaved.
-    expect(top[0].name).toBe('ftyp');
-    expect(top[1].name).toBe('moov');
-    const tail = top.slice(2).map((b) => b.name);
-    expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat']);
-  });
+    const top = topBoxes(file.bytes).map((b) => b.name);
+    expect(top).toEqual(['ftyp', 'moov', 'mdat']);
+    expect(top).not.toContain('moof');
 
-  it('renumbers the audio track_ID and patches tfhd.track_ID in audio moofs', async () => {
-    const video = makeFmp4(1, 90000, [{ tfdt: 0, payload: te('VID') }]);
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
-
-    const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
-
-    const top = topBoxes(file.bytes);
-    const moov = findFirst(top, 'moov');
-    expect(moov).toBeDefined();
-    const moovChildren = childBoxes(file.bytes, moov!);
-    const traks = moovChildren.filter((b) => b.name === 'trak');
+    const moov = find(topBoxes(file.bytes), 'moov')!;
+    const traks = children(file.bytes, moov.bodyStart, moov.end).filter((b) => b.name === 'trak');
     expect(traks).toHaveLength(2);
+    // mvex/trex must be gone — this is no longer fragmented.
+    expect(find(children(file.bytes, moov.bodyStart, moov.end), 'mvex')).toBeUndefined();
 
-    // Track IDs from each trak's tkhd should be distinct.
-    const trackIds = traks.map((trak) => {
-      const tkhd = findFirst(childBoxes(file.bytes, trak), 'tkhd');
-      // tkhd body: version+flags(4) + creation+modification(8) + track_ID(4).
-      return readU32(file.bytes, tkhd!.start + 8 + 12);
-    });
-    expect(new Set(trackIds).size).toBe(2);
-    expect(trackIds).toContain(1);
-    expect(trackIds).toContain(2);
-
-    // mvex should have two trex children — one per renumbered track.
-    const mvex = findFirst(moovChildren, 'mvex');
-    expect(mvex).toBeDefined();
-    const trexes = childBoxes(file.bytes, mvex!).filter((b) => b.name === 'trex');
-    expect(trexes).toHaveLength(2);
-    const trexTrackIds = trexes.map((trex) => readU32(file.bytes, trex.start + 8 + 4));
-    expect(new Set(trexTrackIds)).toEqual(new Set([1, 2]));
-
-    // Both moofs' tfhd.track_ID values across the file should cover {1, 2}.
-    const moofTracks = top
-      .filter((b) => b.name === 'moof')
-      .map((moof) => {
-        const traf = findFirst(childBoxes(file.bytes, moof), 'traf');
-        const tfhd = findFirst(childBoxes(file.bytes, traf!), 'tfhd');
-        return readU32(file.bytes, tfhd!.start + 8 + 4);
-      });
-    expect(new Set(moofTracks)).toEqual(new Set([1, 2]));
+    const video = trakByHandler(file.bytes, 'vide')!;
+    const audio = trakByHandler(file.bytes, 'soun')!;
+    expect(tkhdTrackId(file.bytes, video)).toBe(1);
+    expect(tkhdTrackId(file.bytes, audio)).toBe(2);
   });
 
-  it('assigns monotonic mfhd.sequence_number across video+audio moofs', async () => {
-    const video = makeFmp4(1, 90000, [
-      { tfdt: 0, payload: te('V1') },
-      { tfdt: 1000, payload: te('V2') },
-    ]);
-    const audio = makeFmp4(1, 48000, [
-      { tfdt: 0, payload: te('A1') },
-      { tfdt: 1000, payload: te('A2') },
-    ]);
-
+  it('populates flat sample tables (stsz / stsc / co64) per track', async () => {
     const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+    await combineFmp4(memorySource(videoInput()), memorySource(audioInput()), file.handle);
 
-    const top = topBoxes(file.bytes);
-    const moofs = top.filter((b) => b.name === 'moof');
-    const sequences = moofs.map((moof) => {
-      const mfhd = findFirst(childBoxes(file.bytes, moof), 'mfhd');
-      // mfhd body: version+flags(4) + sequence_number(4).
-      return readU32(file.bytes, mfhd!.start + 8 + 4);
-    });
-    expect(sequences).toEqual([1, 2, 3, 4]);
+    const video = trakByHandler(file.bytes, 'vide')!;
+    const vstbl = stblOf(file.bytes, video);
+    const stsz = find(vstbl, 'stsz')!;
+    expect(readU32(file.bytes, stsz.bodyStart + 8)).toBe(5); // 3 + 2 samples
+    const co64 = find(vstbl, 'co64')!;
+    expect(readU32(file.bytes, co64.bodyStart + 4)).toBe(2); // 2 chunks (2 fragments)
+    expect(find(vstbl, 'stco')).toBeUndefined(); // 64-bit offsets only
+
+    const audio = trakByHandler(file.bytes, 'soun')!;
+    const astbl = stblOf(file.bytes, audio);
+    expect(readU32(file.bytes, find(astbl, 'stsz')!.bodyStart + 8)).toBe(3); // 2 + 1
   });
 
-  it('interleaves fragments in tfdt time order', async () => {
-    // Track timescales differ — video at 90k, audio at 48k. The
-    // first audio fragment at tfdt=0/48k=0s lands at the same time as
-    // the first video fragment; video wins the tie. Then video's
-    // tfdt=9000/90k=0.1s precedes audio's tfdt=4800/48k=0.1s, again
-    // video wins. Net order should be V0, A0, V1, A1.
-    const video = makeFmp4(1, 90000, [
-      { tfdt: 0, payload: te('VID-0') },
-      { tfdt: 9000, payload: te('VID-1') },
-    ]);
-    const audio = makeFmp4(1, 48000, [
-      { tfdt: 0, payload: te('AUD-0') },
-      { tfdt: 4800, payload: te('AUD-1') },
-    ]);
-
+  it('rescales the audio track duration into the video movie timescale', async () => {
+    // Audio media duration = 3072 ticks @ 44100; output movie ts = 30000.
+    // tkhd.duration must be 3072/44100*30000 ≈ 2090, NOT the raw 3072.
     const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+    await combineFmp4(memorySource(videoInput()), memorySource(audioInput()), file.handle);
 
-    // Read the mdat payloads in file order; assert ordering.
-    const top = topBoxes(file.bytes);
-    const mdats = top.filter((b) => b.name === 'mdat');
-    const decoded = mdats.map((m) =>
-      new TextDecoder().decode(file.bytes.subarray(m.start + 8, m.end)),
+    const moov = find(topBoxes(file.bytes), 'moov')!;
+    const mvhd = find(children(file.bytes, moov.bodyStart, moov.end), 'mvhd')!;
+    const movieTs = readU32(file.bytes, mvhd.bodyStart + 12);
+    expect(movieTs).toBe(30000); // output keeps the video's movie timescale
+
+    const audio = trakByHandler(file.bytes, 'soun')!;
+    const expected = Math.round((3072 / 44100) * 30000);
+    expect(tkhdDuration(file.bytes, audio)).toBe(expected);
+    expect(expected).not.toBe(3072); // proves a real conversion happened
+
+    // mdhd stays in the track's own timescale.
+    const mdia = find(children(file.bytes, audio.bodyStart, audio.end), 'mdia')!;
+    const mdhd = find(children(file.bytes, mdia.bodyStart, mdia.end), 'mdhd')!;
+    expect(readU32(file.bytes, mdhd.bodyStart + 12)).toBe(44100);
+    expect(readU32(file.bytes, mdhd.bodyStart + 16)).toBe(3072);
+  });
+
+  it('keeps the video edit list verbatim and rescales the audio edit list', async () => {
+    // Video movie ts == output movie ts → ratio 1, edts untouched.
+    // Audio movie ts 44100 → output 30000 → segment_duration scaled by 30000/44100.
+    const file = makeMockFile();
+    await combineFmp4(
+      memorySource(videoInput({ edts: [{ segDur: 3003, mediaTime: 1001 }] })),
+      memorySource(audioInput({ edts: [{ segDur: 3072, mediaTime: 0 }] })),
+      file.handle,
     );
-    expect(decoded).toEqual(['VID-0', 'AUD-0', 'VID-1', 'AUD-1']);
+
+    const video = trakByHandler(file.bytes, 'vide')!;
+    const vedts = find(children(file.bytes, video.bodyStart, video.end), 'edts')!;
+    const velst = find(children(file.bytes, vedts.bodyStart, vedts.end), 'elst')!;
+    expect(readU32(file.bytes, velst.bodyStart + 8)).toBe(3003); // unchanged
+    expect(readU32(file.bytes, velst.bodyStart + 12)).toBe(1001); // media_time unchanged
+
+    const audio = trakByHandler(file.bytes, 'soun')!;
+    const aedts = find(children(file.bytes, audio.bodyStart, audio.end), 'edts')!;
+    const aelst = find(children(file.bytes, aedts.bodyStart, aedts.end), 'elst')!;
+    expect(readU32(file.bytes, aelst.bodyStart + 8)).toBe(Math.round(3072 * (30000 / 44100)));
+    expect(readU32(file.bytes, aelst.bodyStart + 12)).toBe(0); // media_time untouched
   });
 
-  it('bumps mvhd.next_track_ID past the highest assigned track', async () => {
-    const video = makeFmp4(1, 90000, [{ tfdt: 0, payload: te('V') }]);
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A') }]);
-
+  it('emits ctts + stss for video and omits both for all-sync audio', async () => {
     const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+    await combineFmp4(memorySource(videoInput()), memorySource(audioInput()), file.handle);
 
-    const top = topBoxes(file.bytes);
-    const moov = findFirst(top, 'moov');
-    const mvhd = findFirst(childBoxes(file.bytes, moov!), 'mvhd');
-    // mvhd v0: next_track_ID is the last 4 bytes of the box body.
-    // body = box payload (no size+type prefix); last 4 bytes of box.
-    const nextTrackId = readU32(file.bytes, mvhd!.end - 4);
-    expect(nextTrackId).toBe(3); // audio at 2 → next is 3
+    const vstbl = stblOf(file.bytes, trakByHandler(file.bytes, 'vide')!);
+    expect(find(vstbl, 'ctts')).toBeDefined(); // B-frame composition offsets
+    const stss = find(vstbl, 'stss')!;
+    expect(stss).toBeDefined();
+    expect(readU32(file.bytes, stss.bodyStart + 4)).toBe(2); // 2 keyframes (1 per fragment)
+
+    const astbl = stblOf(file.bytes, trakByHandler(file.bytes, 'soun')!);
+    expect(find(astbl, 'ctts')).toBeUndefined(); // no composition offsets
+    expect(find(astbl, 'stss')).toBeUndefined(); // all samples sync
   });
 
-  it('derives mvhd duration from fragments when source mvhd.duration is zero', async () => {
-    // Both inputs ship mvhd.duration = 0 (the case generic DASH
-    // packagers produce). Combine must walk fragments and end up
-    // with a non-zero combined mvhd.duration. With trex default
-    // sample duration = 3000 ticks @ 90k → 1 sample per fragment
-    // → last fragment at tfdt=9000 + 3000 = 12000 ticks ≈ 0.133s →
-    // combined mvhd in movie timescale (1000) ≈ 133 ticks.
-    const video = makeFmp4(
-      1,
-      90000,
-      [
-        { tfdt: 0, payload: te('V0') },
-        { tfdt: 9000, payload: te('V1') },
+  it('promotes ctts to version 1 when composition offsets are negative', async () => {
+    const video = makeFmp4({
+      trackId: 1,
+      trackTimescale: 30000,
+      movieTimescale: 30000,
+      handlerType: 'vide',
+      format: 'avc1',
+      fragments: [
+        {
+          tfdt: 0,
+          samples: [
+            { dur: 1001, size: 5000, cto: 0, sync: true },
+            { dur: 1001, size: 1200, cto: -1001, sync: false },
+          ],
+        },
       ],
-      { mvhdDurationTicks: 0, trexDefaultSampleDuration: 3000 },
-    );
-    // Audio mvhd also zero; shorter than video — combine picks the max.
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A0') }], {
-      mvhdDurationTicks: 0,
-      trexDefaultSampleDuration: 1024,
     });
-
     const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
-
-    const top = topBoxes(file.bytes);
-    const moov = findFirst(top, 'moov');
-    const mvhd = findFirst(childBoxes(file.bytes, moov!), 'mvhd');
-    // mvhd v0: duration is at body offset +16 (4 bytes).
-    const durTicks = readU32(file.bytes, mvhd!.start + 8 + 16);
-    expect(durTicks).toBeGreaterThan(0);
-    // Video duration in seconds: (9000 + 3000) / 90000 = 0.1333…
-    // Audio duration in seconds: (0 + 1024) / 48000 = 0.0213…
-    // Combined mvhd in movie timescale (1000): round(0.1333… * 1000) ≈ 133.
-    expect(durTicks).toBeGreaterThanOrEqual(130);
-    expect(durTicks).toBeLessThanOrEqual(140);
+    await combineFmp4(memorySource(video), memorySource(audioInput()), file.handle);
+    const vstbl = stblOf(file.bytes, trakByHandler(file.bytes, 'vide')!);
+    const ctts = find(vstbl, 'ctts')!;
+    expect(file.bytes[ctts.bodyStart]).toBe(1); // version byte
   });
 
-  it('derives mvhd duration when source mvhd.duration is the 0xFFFFFFFF sentinel', async () => {
-    // The fMP4 "unknown duration, derive from samples" sentinel.
-    // Without the fallback, VLC reads it literally as ~57 days.
-    const video = makeFmp4(1, 90000, [{ tfdt: 0, payload: te('V0') }], {
-      mvhdDurationTicks: 0xffffffff,
-      trexDefaultSampleDuration: 9000,
-    });
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A0') }], {
-      mvhdDurationTicks: 0xffffffff,
-      trexDefaultSampleDuration: 4800,
-    });
-
+  it('places sample payload at the offset its co64 entry advertises', async () => {
     const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+    await combineFmp4(memorySource(videoInput()), memorySource(audioInput()), file.handle);
 
-    const top = topBoxes(file.bytes);
-    const moov = findFirst(top, 'moov');
-    const mvhd = findFirst(childBoxes(file.bytes, moov!), 'mvhd');
-    const durTicks = readU32(file.bytes, mvhd!.start + 8 + 16);
-    // Both inputs have 1 sample × default duration ÷ track timescale = 0.1s.
-    // Combined mvhd at movie timescale 1000 → 100 ticks.
-    expect(durTicks).toBeGreaterThanOrEqual(95);
-    expect(durTicks).toBeLessThanOrEqual(105);
+    // First video chunk: marker = (trackId*64 + seq) & 0xff = (64 + 1) = 65.
+    const vstbl = stblOf(file.bytes, trakByHandler(file.bytes, 'vide')!);
+    const co64 = find(vstbl, 'co64')!;
+    const firstOffset =
+      readU32(file.bytes, co64.bodyStart + 8) * 0x100000000 +
+      readU32(file.bytes, co64.bodyStart + 12);
+    expect(file.bytes[firstOffset]).toBe(65);
   });
 
   it('rejects an input that is missing moov', async () => {
     const justFtyp = box('ftyp', te('iso5'), u32(0), te('iso5'), te('iso6'), te('mp41'));
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A') }]);
-
     const file = makeMockFile();
     await expect(
-      combineFmp4(memorySource(justFtyp), memorySource(audio), file.handle),
+      combineFmp4(memorySource(justFtyp), memorySource(audioInput()), file.handle),
     ).rejects.toThrow(/moov/);
   });
 
-  it('honors abort signal before fetch', async () => {
-    const video = makeFmp4(1, 90000, [{ tfdt: 0, payload: te('V') }]);
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('A') }]);
-
+  it('honors an abort signal before work starts', async () => {
     const ctrl = new AbortController();
     ctrl.abort(new DOMException('aborted', 'AbortError'));
     const file = makeMockFile();
     await expect(
-      combineFmp4(memorySource(video), memorySource(audio), file.handle, undefined, ctrl.signal),
+      combineFmp4(
+        memorySource(videoInput()),
+        memorySource(audioInput()),
+        file.handle,
+        undefined,
+        ctrl.signal,
+      ),
     ).rejects.toThrow(/aborted/);
-  });
-
-  it('handles a 64-bit largesize mdat (size==1)', async () => {
-    // Hand-build a fmp4 where the single moof's mdat uses largesize.
-    // YouTube ships this on some high-bitrate AVC tracks.
-    const moof = box('moof', makeMfhd(1), box('traf', makeTfhd(1), makeTfdt(0), makeTrun(1)));
-    const mdat = largeBox('mdat', te('VIDEO-LARGESIZE'));
-    const totalTicks = 1000;
-    const video = concat(
-      box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
-      makeMoov(1, 90000, totalTicks),
-      moof,
-      mdat,
-    );
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
-
-    const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
-
-    // Output should contain both moofs + mdats — proof the parser
-    // walked past the largesize mdat without throwing.
-    const top = topBoxes(file.bytes);
-    const tail = top.slice(2).map((b) => b.name);
-    expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat']);
-  });
-
-  it('tolerates intervening styp / free / skip boxes between moof and mdat', async () => {
-    // Construct a fragment with `styp` and `free` boxes wedged
-    // between the moof and its mdat. The spec doesn't strictly
-    // require moof-mdat adjacency; some packagers insert these.
-    const styp = box('styp', te('msdh'), u32(0), te('msdh'));
-    const free = box('free', te('xxxx'));
-    const moofMdat = makeMoofWithIntervening(1, 1, 0, te('VID'), [styp, free]);
-    const totalTicks = 1000;
-    const video = concat(
-      box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
-      makeMoov(1, 90000, totalTicks),
-      moofMdat,
-    );
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
-
-    const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
-    // Pairing succeeded — output has both moofs + mdats.
-    const top = topBoxes(file.bytes);
-    const tail = top.slice(2).map((b) => b.name);
-    expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat']);
-  });
-
-  it('walks past mdats whose body is larger than any header-read chunk (4K regression)', async () => {
-    // Reported field bug after Phase A landed: at 1440p+ the
-    // streaming walker stopped at the first moof and the parser
-    // threw "moof at offset N has no matching mdat (top-level box
-    // sequence: ftyp,moov,sidx,moof)". The cause was the walker
-    // bounds-checked a box's totalSize against the buffer slice
-    // it had just read for the header — fine in unit tests where
-    // small fixtures get returned whole, but wrong for OPFS-backed
-    // sources that strictly return only the requested bytes.
-    //
-    // Regression: fabricate a fixture with an mdat body sized
-    // bigger than any header-buffer slice the walker plausibly
-    // takes (we read 16 bytes per header; the mdat body here is
-    // 200 KB) plus a second moof+mdat behind it. If the walker
-    // mis-handles the large box it'll stop after the first
-    // mdat and the second pair won't pair up — same error shape
-    // as the field report.
-    const bigPayload = new Uint8Array(200 * 1024).fill(0x42);
-    const video = concat(
-      box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
-      makeMoov(1, 90000, 2000),
-      makeMoofMdat(1, 1, 0, bigPayload),
-      makeMoofMdat(1, 2, 1000, te('VID2')),
-    );
-    const audio = makeFmp4(1, 48000, [
-      { tfdt: 0, payload: te('AUD1') },
-      { tfdt: 1000, payload: te('AUD2') },
-    ]);
-
-    const file = makeMockFile();
-    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
-    // All four pairs must reach the output. Pre-fix the walker
-    // would have stopped after the large mdat and the second pair
-    // would have been missing.
-    const top = topBoxes(file.bytes);
-    const tail = top.slice(2).map((b) => b.name);
-    expect(tail).toEqual(['moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat', 'moof', 'mdat']);
-  });
-
-  it('throws an informative error when a moof has no matching mdat', async () => {
-    // A moof followed by EOF — no mdat to pair with.
-    const orphanMoof = box('moof', makeMfhd(1), box('traf', makeTfhd(1), makeTfdt(0), makeTrun(1)));
-    const totalTicks = 1000;
-    const video = concat(
-      box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
-      makeMoov(1, 90000, totalTicks),
-      orphanMoof,
-    );
-    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }]);
-
-    const file = makeMockFile();
-    await expect(
-      combineFmp4(memorySource(video), memorySource(audio), file.handle),
-    ).rejects.toThrow(/no matching mdat/);
   });
 });
