@@ -577,6 +577,23 @@ function buildCombinedMoov(args: {
   );
   patchTkhdTrackId(audioTrak, audioNewTrackId);
 
+  // The audio trak's tkhd.duration (and any edts/elst segment_duration)
+  // are expressed in the AUDIO source's movie (mvhd) timescale. We graft
+  // the trak into the VIDEO's moov, keeping the VIDEO's mvhd timescale —
+  // and YouTube's audio fMP4 commonly uses its sample rate (44100 / 48000)
+  // as the movie timescale while the video stream uses 30000 / 90000.
+  // Leaving these movie-timescale fields untouched makes VLC read the audio
+  // track as (audioTs / videoTs)× too long (a 351s track reported as ~516s
+  // when 44100 is read against 30000). Since VLC's master clock is the
+  // audio track, that drifts audio against video — progressive frame
+  // dropping — and a seek maps to an audio sample past the real data, so
+  // audio cuts out. Rescale them into the video's movie timescale.
+  // elst.media_time stays as-is: it's in the track (media) timescale,
+  // which we don't touch — only segment_duration is movie-timescale.
+  if (audioParsed.movieTimescale > 0 && audioParsed.movieTimescale !== videoParsed.movieTimescale) {
+    rescaleTrakMovieDuration(audioTrak, videoParsed.movieTimescale, audioParsed.movieTimescale);
+  }
+
   // Preserve any extra top-level boxes from the video's moov that we
   // didn't account for (mvex, udta, iods, etc.). Walk the video moov;
   // skip mvhd + every trak (we provide our own); copy the rest as-is.
@@ -756,6 +773,70 @@ function patchTkhdTrackId(trak: Uint8Array, newTrackId: number): void {
       writeU32(trak, body + 20, newTrackId);
     }
   });
+}
+
+/**
+ * Rescale a trak's movie-timescale duration fields from `fromTimescale`
+ * to `toTimescale`, in place: `tkhd.duration` and every `edts/elst`
+ * entry's `segment_duration`. `elst.media_time` is left untouched — it's
+ * expressed in the track's own (media) timescale, not the movie one.
+ *
+ * tkhd duration offset: v0 body +20 (after creation+modification+
+ * track_ID+reserved, all 4-byte), v1 body +28 (8-byte creation+
+ * modification). Mirrors `patchTkhdTrackId`'s version split.
+ */
+function rescaleTrakMovieDuration(
+  trak: Uint8Array,
+  toTimescale: number,
+  fromTimescale: number,
+): void {
+  const rescale = (v: number): number => Math.round((v * toTimescale) / fromTimescale);
+  walkBoxes(trak, 8, trak.byteLength, (name, start, end) => {
+    if (name === 'tkhd') {
+      const body = start + 8;
+      const version = trak[body];
+      if (version === 0) {
+        writeU32(trak, body + 20, rescale(readU32(trak, body + 20)));
+      } else {
+        writeU64(trak, body + 28, rescale(Number(readU64BigInt(trak, body + 28))));
+      }
+    } else if (name === 'edts') {
+      walkBoxes(trak, start + 8, end, (subName, subStart, subEnd) => {
+        if (subName !== 'elst') return;
+        rescaleElstSegmentDurations(trak, subStart, subEnd, rescale);
+      });
+    }
+  });
+}
+
+/**
+ * Rescale every elst entry's `segment_duration` (movie timescale) in
+ * place. elst body: version+flags(4) + entry_count(4) + entries. A v0
+ * entry is segment_duration(4) + media_time(4) + media_rate(4); a v1
+ * entry is segment_duration(8) + media_time(8) + media_rate(4). Only the
+ * leading segment_duration is rewritten.
+ */
+function rescaleElstSegmentDurations(
+  buf: Uint8Array,
+  elstStart: number,
+  elstEnd: number,
+  rescale: (v: number) => number,
+): void {
+  const body = elstStart + 8;
+  const version = buf[body];
+  const count = readU32(buf, body + 4);
+  let p = body + 8;
+  for (let i = 0; i < count; i += 1) {
+    if (version === 0) {
+      if (p + 12 > elstEnd) break;
+      writeU32(buf, p, rescale(readU32(buf, p)));
+      p += 12;
+    } else {
+      if (p + 20 > elstEnd) break;
+      writeU64(buf, p, rescale(Number(readU64BigInt(buf, p))));
+      p += 20;
+    }
+  }
 }
 
 // ---------- box primitives ----------

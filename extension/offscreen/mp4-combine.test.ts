@@ -120,11 +120,11 @@ function makeMoov(
   trackId: number,
   trackTimescale: number,
   durationTicks: number,
-  opts: { trexDefaultSampleDuration?: number } = {},
+  opts: { trexDefaultSampleDuration?: number; movieTimescale?: number } = {},
 ): Uint8Array {
   return box(
     'moov',
-    makeMvhd(1000, durationTicks, trackId + 1),
+    makeMvhd(opts.movieTimescale ?? 1000, durationTicks, trackId + 1),
     makeTrak(trackId, trackTimescale, durationTicks),
     box('mvex', makeTrex(trackId, opts.trexDefaultSampleDuration ?? 0)),
   );
@@ -214,6 +214,9 @@ function makeFmp4(
     mvhdDurationTicks?: number;
     /** Set mvex.trex.default_sample_duration so duration derivation has a fallback. */
     trexDefaultSampleDuration?: number;
+    /** Movie (mvhd) timescale — defaults to 1000. YouTube's audio fMP4
+     *  uses its sample rate here, which differs from the video stream's. */
+    movieTimescale?: number;
   } = {},
 ): Uint8Array {
   const lastTfdt = fragments.length > 0 ? fragments[fragments.length - 1].tfdt : 0;
@@ -222,6 +225,7 @@ function makeFmp4(
     box('ftyp', te('iso5'), u32(512), te('iso5'), te('iso6'), te('mp41')),
     makeMoov(trackId, trackTimescale, totalTicks, {
       trexDefaultSampleDuration: opts.trexDefaultSampleDuration,
+      movieTimescale: opts.movieTimescale,
     }),
   ];
   let seq = 1;
@@ -394,6 +398,74 @@ describe('combineFmp4', () => {
         return readU32(file.bytes, tfhd!.start + 8 + 4);
       });
     expect(new Set(moofTracks)).toEqual(new Set([1, 2]));
+  });
+
+  it('rescales the audio trak duration into the video movie timescale', async () => {
+    // Field bug (YouTube HD, all qualities): the audio fMP4 uses its
+    // 48 kHz sample rate as BOTH its movie and track timescale, while
+    // the video stream's movie timescale is 30000. Grafted verbatim into
+    // the video's moov, the audio tkhd.duration (48000 ticks = 1.0s @
+    // 48k) is read against the video's 30000 movie timescale → 1.6s, so
+    // VLC sees the audio track ~1.6× too long, desyncs the master clock
+    // (frame skipping), and seeks land past the real audio (audio cuts
+    // out). The combine must convert it to the video movie timescale.
+    const video = makeFmp4(1, 30000, [{ tfdt: 0, payload: te('VID') }], {
+      movieTimescale: 30000,
+      mvhdDurationTicks: 30000, // 1.0s @ 30k
+    });
+    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }], {
+      movieTimescale: 48000,
+      mvhdDurationTicks: 48000, // 1.0s @ 48k
+    });
+
+    const file = makeMockFile();
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+
+    const top = topBoxes(file.bytes);
+    const moov = findFirst(top, 'moov');
+    const traks = childBoxes(file.bytes, moov!).filter((b) => b.name === 'trak');
+    // Pick the audio trak by its mdhd timescale (48000).
+    const audioTrak = traks.find((trak) => {
+      const mdia = findFirst(childBoxes(file.bytes, trak), 'mdia');
+      const mdhd = findFirst(childBoxes(file.bytes, mdia!), 'mdhd');
+      return readU32(file.bytes, mdhd!.start + 8 + 12) === 48000;
+    });
+    expect(audioTrak).toBeDefined();
+    const tkhd = findFirst(childBoxes(file.bytes, audioTrak!), 'tkhd');
+    // tkhd v0 duration at body +20. 48000 @ 48k movie ts → 30000 @ 30k.
+    const dur = readU32(file.bytes, tkhd!.start + 8 + 20);
+    expect(dur).toBe(30000);
+
+    // The video trak (movie ts == its own ts) must be left untouched.
+    const videoTrak = traks.find((trak) => {
+      const mdia = findFirst(childBoxes(file.bytes, trak), 'mdia');
+      const mdhd = findFirst(childBoxes(file.bytes, mdia!), 'mdhd');
+      return readU32(file.bytes, mdhd!.start + 8 + 12) === 30000;
+    });
+    const vtkhd = findFirst(childBoxes(file.bytes, videoTrak!), 'tkhd');
+    expect(readU32(file.bytes, vtkhd!.start + 8 + 20)).toBe(30000);
+  });
+
+  it('leaves the audio trak duration alone when timescales already match', async () => {
+    // Both inputs at movie ts 1000 (the common case for non-YouTube
+    // adaptive sources). No rescale should happen.
+    const video = makeFmp4(1, 90000, [{ tfdt: 0, payload: te('VID') }], {
+      mvhdDurationTicks: 1000,
+    });
+    const audio = makeFmp4(1, 48000, [{ tfdt: 0, payload: te('AUD') }], {
+      mvhdDurationTicks: 1000,
+    });
+
+    const file = makeMockFile();
+    await combineFmp4(memorySource(video), memorySource(audio), file.handle);
+
+    const top = topBoxes(file.bytes);
+    const moov = findFirst(top, 'moov');
+    const traks = childBoxes(file.bytes, moov!).filter((b) => b.name === 'trak');
+    for (const trak of traks) {
+      const tkhd = findFirst(childBoxes(file.bytes, trak), 'tkhd');
+      expect(readU32(file.bytes, tkhd!.start + 8 + 20)).toBe(1000);
+    }
   });
 
   it('assigns monotonic mfhd.sequence_number across video+audio moofs', async () => {
