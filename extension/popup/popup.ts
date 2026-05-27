@@ -13,7 +13,14 @@ import {
   pickDefaultAudioTrackId,
   pickDisplayVariantUrl,
   pickDownloadVariantUrl,
+  pickPreferredVariantUrl,
 } from './popup-helpers.js';
+import { getSettings, setSettings, type DefaultQuality } from '../lib/settings.js';
+
+// The user's default-quality preference, loaded once at startup. Drives
+// which option qualityOptionsHtml pre-selects. Defaults to 'highest'
+// until settings load (a tick before the first real render).
+let defaultQualityPref: DefaultQuality = 'highest';
 
 const $content = document.getElementById('content')!;
 const $gear = document.getElementById('open-options');
@@ -31,6 +38,25 @@ if ($version) {
 }
 
 $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
+
+// First-run disclaimer. Shown until the user accepts once; acceptance is
+// persisted in settings so it never reappears.
+function showDisclaimer(): void {
+  const overlay = document.getElementById('disclaimer');
+  const accept = document.getElementById('disclaimer-accept');
+  if (!overlay) return;
+  overlay.hidden = false;
+  accept?.addEventListener(
+    'click',
+    () => {
+      overlay.hidden = true;
+      void setSettings({ disclaimerAccepted: true }).catch((err) =>
+        log.warn('[VDL] failed to persist disclaimer acceptance', err),
+      );
+    },
+    { once: true },
+  );
+}
 
 // Reset clears the SW-side tab state for the active tab. The SW pushes
 // the resulting empty STATE through the popup port, so the row list
@@ -205,8 +231,12 @@ function qualityOptionsHtml(entry: MediaEntry): string {
       // gap explicitly so the user understands why the picker is empty.
       return '<option value="none">No supported variants</option>';
     }
+    const preferredUrl = pickPreferredVariantUrl(downloadable, defaultQualityPref);
     return downloadable
-      .map((v) => `<option value="${escapeHtml(v.url)}">${escapeHtml(formatVariant(v))}</option>`)
+      .map((v) => {
+        const sel = v.url === preferredUrl ? ' selected' : '';
+        return `<option value="${escapeHtml(v.url)}"${sel}>${escapeHtml(formatVariant(v))}</option>`;
+      })
       .join('');
   }
   if (entry.isMaster === false) {
@@ -907,6 +937,15 @@ function scheduleReconnect(tabId: number): void {
   if (tabId == null) {
     $content.innerHTML = renderEmpty();
     return;
+  }
+  // Load settings before the first render: drives the picker's default
+  // selection and the first-run disclaimer.
+  try {
+    const settings = await getSettings();
+    defaultQualityPref = settings.defaultQuality;
+    if (!settings.disclaimerAccepted) showDisclaimer();
+  } catch {
+    /* keep the 'highest' default; disclaimer stays hidden */
   }
   // Render whatever state we can immediately so the popup isn't blank
   // during the connect roundtrip. The SUBSCRIBE response will overwrite.

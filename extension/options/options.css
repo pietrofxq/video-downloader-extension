@@ -1,0 +1,258 @@
+:root {
+  --bg: #0e1015;
+  --panel: #161922;
+  --panel-elevated: #1c2030;
+  --text: #e8eaf0;
+  --text-strong: #ffffff;
+  --muted: #8b91a6;
+  --accent: #ff5d2e;
+  --accent-hover: #ff7a52;
+  --success: #34d399;
+  --danger: #f87171;
+  --border: #232735;
+  --border-strong: #2c3142;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+}
+
+.page-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.page-header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+
+.version {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.card-muted {
+  background: transparent;
+  border-style: dashed;
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.field {
+  margin-bottom: 16px;
+}
+
+.field:last-child {
+  margin-bottom: 0;
+}
+
+label {
+  display: block;
+  font-weight: 550;
+  color: var(--text-strong);
+  margin-bottom: 6px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+.hint code {
+  background: var(--panel-elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+
+select,
+input[type='text'] {
+  width: 100%;
+  background: var(--panel-elevated);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+select:focus,
+input[type='text']:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.range-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.range-row output {
+  min-width: 1.5em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.preview {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--success);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 450;
+  color: var(--text);
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.toggle-row input {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+}
+
+.block-add {
+  display: flex;
+  gap: 8px;
+}
+
+.block-add input {
+  flex: 1;
+}
+
+.btn {
+  background: var(--panel-elevated);
+  color: var(--text-strong);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.btn-warn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.block-list {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+}
+
+.block-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.block-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--panel-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 6px 6px 12px;
+  margin-bottom: 6px;
+}
+
+.block-remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.block-remove:hover {
+  color: var(--danger);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.saved-toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: var(--success);
+  color: #06281c;
+  font-weight: 600;
+  padding: 8px 18px;
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.saved-toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}

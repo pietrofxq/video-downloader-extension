@@ -10,6 +10,7 @@ import {
   pickDefaultAudioTrackId,
   pickDisplayVariantUrl,
   pickDownloadVariantUrl,
+  pickPreferredVariantUrl,
 } from './popup-helpers.js';
 import type { AudioTrack, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
 
@@ -428,6 +429,37 @@ describe('formatVariant', () => {
       bandwidth: 0,
     });
     expect(formatVariant(v)).toBe('auto');
+  });
+});
+
+// ---------- pickPreferredVariantUrl ----------
+
+describe('pickPreferredVariantUrl', () => {
+  const v1080 = variant({ url: 'u1080', resolution: '1920x1080' });
+  const v720 = variant({ url: 'u720', resolution: '1280x720' });
+  const v480 = variant({ url: 'u480', resolution: '854x480' });
+  const sorted = [v1080, v720, v480]; // height desc, as filterDownloadableVariants emits
+
+  it('returns null for an empty list', () => {
+    expect(pickPreferredVariantUrl([], 'highest')).toBeNull();
+  });
+
+  it('highest and ask both pick the top variant', () => {
+    expect(pickPreferredVariantUrl(sorted, 'highest')).toBe('u1080');
+    expect(pickPreferredVariantUrl(sorted, 'ask')).toBe('u1080');
+  });
+
+  it('picks the exact height when offered', () => {
+    expect(pickPreferredVariantUrl(sorted, '720p')).toBe('u720');
+    expect(pickPreferredVariantUrl(sorted, '480p')).toBe('u480');
+  });
+
+  it('falls back to the largest height at or below the target', () => {
+    expect(pickPreferredVariantUrl([v1080, v480], '720p')).toBe('u480');
+  });
+
+  it('falls back to the smallest when every variant is taller than the target', () => {
+    expect(pickPreferredVariantUrl([v1080, v720], '480p')).toBe('u720');
   });
 });
 

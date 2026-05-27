@@ -202,6 +202,19 @@ export async function removeTab(tabId: number): Promise<void> {
   await persist();
 }
 
+// Forget every tab's detected entries AND adapterMeta (captured page
+// metadata / header context). Used by the options page "Clear all
+// captured auth/header state" button. Returns the tabIds that had
+// state so the caller can refresh their badges + push empty popups.
+// tabUrls are kept so navigation tracking still works.
+export async function clearAll(): Promise<number[]> {
+  await init();
+  const affected = [...tabState.keys()];
+  tabState.clear();
+  await persist();
+  return affected;
+}
+
 export async function getTabUrl(tabId: number): Promise<string> {
   await init();
   return tabUrls.get(tabId) ?? '';

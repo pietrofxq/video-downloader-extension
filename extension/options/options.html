@@ -2,41 +2,109 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Video Downloader — Options</title>
-    <style>
-      body {
-        font-family:
-          system-ui,
-          -apple-system,
-          Segoe UI,
-          Roboto,
-          sans-serif;
-        padding: 32px;
-        max-width: 640px;
-        color: #222;
-        line-height: 1.5;
-      }
-      h1 {
-        font-size: 18px;
-        margin: 0 0 8px;
-      }
-      p {
-        color: #666;
-        margin: 8px 0;
-      }
-      code {
-        background: #f3f3f3;
-        padding: 1px 4px;
-        border-radius: 3px;
-      }
-    </style>
+    <title>Video Downloader — Settings</title>
+    <link rel="stylesheet" href="options.css" />
   </head>
   <body>
-    <h1>Video Downloader</h1>
-    <p>
-      Settings will land in <code>v1.0</code> — defaults, concurrency, subtitle mode, per-adapter
-      toggles, and filename templates.
-    </p>
-    <p>For now, defaults are baked in. See <code>ROADMAP.md</code> in the project repo.</p>
+    <main class="wrap">
+      <header class="page-header">
+        <h1>Video Downloader</h1>
+        <span class="version" id="ext-version"></span>
+      </header>
+
+      <section class="card">
+        <h2>Downloads</h2>
+
+        <div class="field">
+          <label for="default-quality">Default quality</label>
+          <select id="default-quality">
+            <option value="highest">Highest available</option>
+            <option value="1080p">1080p</option>
+            <option value="720p">720p</option>
+            <option value="480p">480p</option>
+            <option value="ask">Ask each time (no preselect)</option>
+          </select>
+          <p class="hint">
+            Which quality the popup picker selects by default. Falls back to the closest available
+            one when the exact height isn't offered.
+          </p>
+        </div>
+
+        <div class="field">
+          <label for="concurrency">Parallel segment downloads</label>
+          <div class="range-row">
+            <input id="concurrency" type="range" min="1" max="8" step="1" />
+            <output id="concurrency-out">4</output>
+          </div>
+          <p class="hint">
+            How many HLS segments are fetched at once. Higher is faster but heavier on the site's
+            server and your connection. Default 4.
+          </p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Filename templates</h2>
+        <p class="hint">
+          Tokens:
+          <code>{title}</code> <code>{section}</code> <code>{lesson}</code> <code>{channel}</code>
+          <code>{basename}</code> <code>{videoId}</code>. Empty tokens and their separators are
+          dropped. Leave blank to use the per-site default.
+        </p>
+        <div id="templates"></div>
+      </section>
+
+      <section class="card">
+        <h2>Sites</h2>
+        <p class="hint">Turn detection off for a whole adapter, or silence specific origins.</p>
+        <div id="adapters"></div>
+
+        <div class="field">
+          <label for="block-input">Block detection on these origins</label>
+          <div class="block-add">
+            <input
+              id="block-input"
+              type="text"
+              placeholder="example.com"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button type="button" id="block-add-btn" class="btn">Add</button>
+          </div>
+          <ul id="block-list" class="block-list"></ul>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Data</h2>
+        <div class="field">
+          <button type="button" id="clear-captured" class="btn btn-warn">
+            Clear all captured auth / header state
+          </button>
+          <p class="hint">
+            Forgets every detected video and any captured request headers across all tabs. Use the
+            popup's reset button to clear just the current tab.
+          </p>
+        </div>
+        <div class="field">
+          <button type="button" id="reset-settings" class="btn btn-warn">
+            Reset all settings to defaults
+          </button>
+        </div>
+      </section>
+
+      <section class="card card-muted">
+        <h2>Why “Read your data on all websites”?</h2>
+        <p class="hint">
+          The extension watches network requests for video manifests and fetches the video's own
+          segments to repackage them locally. That requires access to the sites you visit. It runs
+          entirely on your machine — there is no backend, no telemetry, and signed tokens in URLs
+          are redacted from logs and never persisted.
+        </p>
+      </section>
+
+      <p class="saved-toast" id="saved-toast" role="status" aria-live="polite">Saved</p>
+    </main>
+    <script type="module" src="options.js"></script>
   </body>
 </html>

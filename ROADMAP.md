@@ -533,22 +533,23 @@ Landed so far (incremental QoL fixes from field reports):
 - [x] **Reset also clears downloaded (saved) videos.** The header Reset button cleared the tab's detected entries but left saved/finished downloads lingering in the cross-tab "Active downloads" section (the SW deleted the states but never told open popups to drop them). `RESET_TAB` now clears the current tab's entries + downloads **plus every finished (saved/error/canceled) download across all tabs**, and broadcasts `DOWNLOAD_DISMISSED` to all popups so the rows actually disappear. In-progress downloads in other tabs keep running.
 - [x] **Quality dropdown stuck on "Loading…".** When an HLS entry was detected while the popup was already open, the eager `ensureParsed` could be cut off by an MV3 service-worker teardown with nothing to re-drive it (the SUBSCRIBE-time retry only runs on connect). Added an `ENSURE_PARSED` message + SW handler and a popup-side watchdog (`isManifestLoading` + capped, spaced nudges) that re-drives any entry still showing "Loading…". `ensureParsed` is in-flight-guarded, so nudges during a healthy parse are no-ops. 6 new `isManifestLoading` unit tests.
 
-- [ ] **Options page (`options.html`)** with settings persisted in `chrome.storage.local`:
+- [x] **Settings store (`lib/settings.ts`)** — typed `Settings` persisted in `chrome.storage.local` under one key, with a normalize-on-read merge (a partial/old/corrupt blob never crashes a caller), `getSettings` / `setSettings` / `onSettingsChanged`, and pure helpers (`clampConcurrency`, `isAdapterEnabled`, `isOriginBlocked`, `filenameTemplateFor`, `renderFilenameTemplate`). 19 unit tests.
+- [x] **Options page (`options.html` + `options.ts` + `options.css`)** with settings persisted in `chrome.storage.local`:
   - Default quality (highest / 1080p / 720p / 480p / ask each time).
-  - Download concurrency (default 4, range 1–8).
-  - Filename template per adapter (default `{section} - {lesson}` for Hotmart, `{channel} - {title}` for YouTube, `{title} - {basename}` for default) with a live preview.
-  - Per-adapter enable/disable list with plain-language descriptions.
-  - Per-origin block list so users can silence detection on specific sites.
-  - "Reset detected videos for current tab" + "Clear all captured auth/header state" buttons.
+  - Download concurrency (range 1–8, default 4).
+  - Filename template per adapter (defaults `{section} - {lesson}` Hotmart, `{channel} - {title}` YouTube, `{title} - {basename}` default) with a live preview.
+  - Per-adapter enable/disable list.
+  - Per-origin block list (add via host or full URL; normalized to host).
+  - "Clear all captured auth/header state" button (new `CLEAR_ALL_CAPTURED` SW message + `clearAll()` media-store helper). Per-tab reset stays on the popup's header button.
   - Plain-language explanation of why the `<all_urls>` permission is needed.
-- [ ] **Popup polish / QoL:**
-  - Remember the last-picked quality/codec preference and apply it as the default selection.
+- [x] **First-run disclaimer modal** in the popup ("only download content you have the right to"); acceptance stored in settings (`disclaimerAccepted`).
+- [x] **Wire the chosen settings through the pipeline:** default-quality preselect in the popup picker (`pickPreferredVariantUrl`, closest-height fallback), concurrency into the offscreen segment fetcher, per-adapter filename template into the SW download-filename path (falls back to `deriveFilename` when the template renders empty), per-adapter enable/disable + per-origin block list into both detection paths (`handleDetection` + `handleStreamsDiscovered`).
+- [x] Tests for the settings store + filename-template rendering + block-list matching + default-quality preselect; `npm run check` green (306 tests).
+- [ ] **Popup polish / QoL (remaining):**
+  - Remember the _last manually-picked_ quality/codec (distinct from the default-quality setting now wired).
   - Clearer empty / error / "DRM-protected" / "no supported variants" states.
   - Copy-source-URL affordance (redacted) for debugging a failed download.
   - Tidy the active-downloads section (grouping, clearer terminal-state rows).
-- [ ] **First-run disclaimer modal** in the popup ("only download content you have the right to"); acceptance stored in `chrome.storage.local`.
-- [ ] Wire the chosen settings through the existing pipeline (default-quality preselect, concurrency into the segment fetcher, per-adapter filename template into `deriveFilename`, block list into detection).
-- [ ] Tests for the settings store + filename-template rendering + block-list matching; `npm run check` green.
 
 **Ship criterion:** a user can set defaults (quality, concurrency, filename template), silence detection per origin, and sees a first-run disclaimer — no functionality regresses and `npm run check` passes.
 

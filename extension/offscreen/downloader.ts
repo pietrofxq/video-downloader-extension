@@ -10,10 +10,9 @@ import {
 } from '../lib/errors.js';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
 import { remuxTsToMp4ToOpfs, type RemuxSegmentSource } from './remux.js';
+import { getSettings } from '../lib/settings.js';
 import { OpfsWorkspace } from './storage.js';
 import type { DownloadOutcome, DownloadRequest } from '../lib/types.ts';
-
-const SEGMENT_CONCURRENCY = 4;
 
 // Internal shapes — kept private to this module. DownloadRequest /
 // DownloadOutcome are public (re-exported via lib/types.ts).
@@ -206,7 +205,9 @@ export async function downloadHlsAsTs(
   //    stages its decrypted bytes to OPFS at the segment's playlist
   //    index — only one segment lives in JS heap per worker at a time.
   //    A 2GB lesson that used to peak at ~2GB of accumulated TS now
-  //    peaks at ~SEGMENT_CONCURRENCY × max-segment-size (~16-32 MB).
+  //    peaks at ~concurrency × max-segment-size (~16-32 MB). Concurrency
+  //    is user-configurable (Settings → parallel segment downloads).
+  const concurrency = (await getSettings()).concurrency;
   const workspace = await OpfsWorkspace.open(requestId);
   let succeeded = false;
   try {
@@ -252,7 +253,7 @@ export async function downloadHlsAsTs(
       await workspace.writeSegment(idx, bytes);
     });
 
-    await runWithConcurrency(tasks, SEGMENT_CONCURRENCY, undefined, signal);
+    await runWithConcurrency(tasks, concurrency, undefined, signal);
     signal?.throwIfAborted();
 
     // 4. Stream segments back from OPFS into mux.js. RemuxSegmentSource

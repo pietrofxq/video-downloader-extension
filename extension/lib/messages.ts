@@ -37,6 +37,7 @@ export const MSG = Object.freeze({
   DISMISS_DOWNLOAD: 'DISMISS_DOWNLOAD',
   CANCEL_DOWNLOAD: 'CANCEL_DOWNLOAD',
   RESET_TAB: 'RESET_TAB',
+  CLEAR_ALL_CAPTURED: 'CLEAR_ALL_CAPTURED',
   ENSURE_PARSED: 'ENSURE_PARSED',
   STREAMS_DISCOVERED: 'STREAMS_DISCOVERED',
 } as const);
@@ -162,6 +163,12 @@ export interface ResetTabMessage extends MessageBase<typeof MSG.RESET_TAB> {
   payload: { tabId: number };
 }
 
+// Options page → SW: forget every tab's detected media + captured
+// metadata. The header-state clear; broader than RESET_TAB's per-tab scope.
+export interface ClearAllCapturedMessage extends MessageBase<typeof MSG.CLEAR_ALL_CAPTURED> {
+  payload?: Record<string, never>;
+}
+
 // Popup → SW: re-drive manifest parsing for any HLS entry on this tab
 // that's still unresolved (no variants, no parseError). The popup's
 // "Loading…" watchdog fires this when an eager parse was cut off by an
@@ -198,6 +205,7 @@ export type ExtensionMessage =
   | DismissDownloadMessage
   | CancelDownloadMessage
   | ResetTabMessage
+  | ClearAllCapturedMessage
   | EnsureParsedMessage
   | StreamsDiscoveredMessage;
 

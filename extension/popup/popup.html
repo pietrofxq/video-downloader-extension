@@ -33,6 +33,17 @@
       </div>
     </header>
     <main id="content"></main>
+    <div class="disclaimer-overlay" id="disclaimer" hidden>
+      <div class="disclaimer-card" role="dialog" aria-modal="true" aria-labelledby="disclaimer-h">
+        <h2 id="disclaimer-h">Before you download</h2>
+        <p>
+          Only download content you have the right to — content you own, have purchased access to,
+          or that is freely licensed. Don't use this to redistribute copyrighted material.
+          DRM-protected streams are out of scope.
+        </p>
+        <button type="button" class="disclaimer-accept" id="disclaimer-accept">I understand</button>
+      </div>
+    </div>
     <!-- v0.9 (subtitle support) will re-add a footer with a real
          "Include subtitles" toggle bound to detected subtitle tracks.
          Until then the placeholder UI is removed to avoid implying

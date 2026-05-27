@@ -9,6 +9,7 @@
 // and side-effecting wiring stay in popup.ts.
 
 import { classifyUrl } from '../lib/media-detection.js';
+import type { DefaultQuality } from '../lib/settings.js';
 import type { AudioTrack, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
 
 /**
@@ -160,6 +161,37 @@ export function filterDownloadableVariants(variants: readonly HlsVariant[]): Hls
       if (dh !== 0) return dh;
       return (b.bandwidth ?? 0) - (a.bandwidth ?? 0);
     });
+}
+
+/**
+ * Pick which variant URL the quality dropdown should pre-select, given the
+ * user's default-quality preference. `downloadable` must be the output of
+ * filterDownloadableVariants (sorted by height desc). 'highest' / 'ask'
+ * select the top variant; a numeric preference (1080/720/480) picks the
+ * exact height, else the closest available one (largest height ≤ target,
+ * falling back to the smallest when every variant is taller). Returns null
+ * for an empty list.
+ */
+export function pickPreferredVariantUrl(
+  downloadable: readonly HlsVariant[],
+  preference: DefaultQuality,
+): string | null {
+  if (downloadable.length === 0) return null;
+  if (preference === 'highest' || preference === 'ask') return downloadable[0].url;
+  const target = parseInt(preference, 10); // '1080p' → 1080
+  if (!Number.isFinite(target)) return downloadable[0].url;
+  let exact: HlsVariant | undefined;
+  let largestAtMost: HlsVariant | undefined; // height ≤ target (list is desc, so first wins)
+  for (const v of downloadable) {
+    const h = variantHeight(v);
+    if (h === target) {
+      exact = v;
+      break;
+    }
+    if (h <= target && !largestAtMost) largestAtMost = v;
+  }
+  const chosen = exact ?? largestAtMost ?? downloadable[downloadable.length - 1];
+  return chosen.url;
 }
 
 /**

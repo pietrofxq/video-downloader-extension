@@ -13,6 +13,7 @@ import { fetchManifest } from '../lib/manifest-fetch.js';
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import {
   addEntry,
+  clearAll,
   clearTab,
   getTabEntries,
   getTabState,
@@ -23,6 +24,14 @@ import {
   setAdapterMeta,
   setTabUrl,
 } from '../lib/media-store.js';
+import {
+  filenameTemplateFor,
+  getSettings,
+  hostOf,
+  isAdapterEnabled,
+  isOriginBlocked,
+  renderFilenameTemplate,
+} from '../lib/settings.js';
 import type {
   DiscoveredStream,
   DownloadState,
@@ -126,6 +135,17 @@ function hostFromUrl(u: string | undefined | null): string {
   if (!u) return '';
   try {
     return new URL(u).host;
+  } catch {
+    return '';
+  }
+}
+
+// Last path segment of a URL, used as the {basename} filename-template
+// token (and the default adapter's filename tail).
+function basenameFromUrl(u: string): string {
+  try {
+    const parsed = new URL(u);
+    return parsed.pathname.split('/').filter(Boolean).pop() || parsed.host;
   } catch {
     return '';
   }
@@ -437,6 +457,26 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
       sendResponse({ ok: false });
       return false;
     }
+    case MSG.CLEAR_ALL_CAPTURED: {
+      // Options page: forget every tab's detected media + captured meta.
+      // Also drop all finished download states so saved rows don't linger.
+      for (const id of clearFinishedDownloadStatesAllTabs()) {
+        broadcastDownloadDismissed([id]);
+      }
+      clearAll()
+        .then(async (affected) => {
+          for (const tabId of affected) {
+            await updateBadge(tabId);
+            await broadcastTabState(tabId);
+          }
+          sendResponse({ ok: true });
+        })
+        .catch((err) => {
+          log.warn('CLEAR_ALL_CAPTURED failed', err);
+          sendResponse({ ok: false });
+        });
+      return true; // async sendResponse
+    }
     case MSG.GET_TAB_STATE: {
       const reqTab = msg.payload?.tabId ?? sender.tab?.id;
       if (reqTab == null) {
@@ -520,6 +560,18 @@ async function handleDetection({
   if (resolvedPageUrl) await setTabUrl(tabId, resolvedPageUrl);
 
   const adapter = pickAdapter(resolvedPageUrl, url);
+
+  // Respect user settings: silence detection on blocked origins and for
+  // disabled adapters before anything reaches the popup list.
+  const settings = await getSettings();
+  if (isOriginBlocked(settings, resolvedPageUrl)) {
+    log.debug('detection skipped (origin blocked)', { tabId, host: hostOf(resolvedPageUrl) });
+    return;
+  }
+  if (!isAdapterEnabled(settings, adapter.id)) {
+    log.debug('detection skipped (adapter disabled)', { tabId, adapter: adapter.id });
+    return;
+  }
 
   // Adapters with discoverStreams (YouTube) are the canonical catalog
   // source for their pages. Passive webRequest captures of their CDN
@@ -617,6 +669,18 @@ async function handleStreamsDiscovered({
       await clearTab(tabId);
       await updateBadge(tabId);
     }
+  }
+
+  // Respect user settings — silence detection on blocked origins / for
+  // disabled adapters, same as the passive webRequest path.
+  const settings = await getSettings();
+  if (isOriginBlocked(settings, resolvedPageUrl)) {
+    log.debug('streams discovered but origin blocked', { tabId, host: hostOf(resolvedPageUrl) });
+    return;
+  }
+  if (!isAdapterEnabled(settings, adapterId)) {
+    log.debug('streams discovered but adapter disabled', { tabId, adapter: adapterId });
+    return;
   }
 
   let anyAdded = false;
@@ -847,14 +911,29 @@ async function handleStartDownload(payload: {
   // Honor a user-supplied filename from the popup row's input if it
   // resolves to something non-empty post-sanitize; otherwise the adapter
   // derives one from the page meta + URL.
-  const baseName =
-    filenameOverride && filenameOverride.trim().length > 0
-      ? filenameOverride
-      : adapter.deriveFilename({
-          pageMeta: meta,
-          url: entry.url,
-          mediaEntry: entry,
-        });
+  let baseName: string;
+  if (filenameOverride && filenameOverride.trim().length > 0) {
+    baseName = filenameOverride;
+  } else {
+    // Try the user's per-adapter filename template first; an empty render
+    // (all tokens missing) falls back to the adapter's own deriveFilename.
+    const settings = await getSettings();
+    const templated = renderFilenameTemplate(filenameTemplateFor(settings, adapter.id), {
+      title: meta.title || meta.ogTitle || meta.ogVideoTitle || undefined,
+      lesson: meta.lessonTitle,
+      section: meta.sectionTitle,
+      channel: meta.channelTitle,
+      basename: basenameFromUrl(entry.url),
+      videoId: meta.videoId,
+    });
+    baseName =
+      templated ||
+      adapter.deriveFilename({
+        pageMeta: meta,
+        url: entry.url,
+        mediaEntry: entry,
+      });
+  }
   const filename = sanitizeFilename(baseName, { fallback: 'video' });
 
   const requestId = crypto.randomUUID();

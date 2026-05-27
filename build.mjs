@@ -25,6 +25,8 @@ const ENTRIES = {
   'background/service-worker.js': { entry: 'background/service-worker', format: 'esm' },
   // Popup uses <script type="module"> — keep as ESM bundle.
   'popup/popup.js': { entry: 'popup/popup', format: 'esm' },
+  // Options page uses <script type="module"> — ESM bundle.
+  'options/options.js': { entry: 'options/options', format: 'esm' },
   // Offscreen is a stub for v0.1 but treated the same way.
   'offscreen/offscreen.js': { entry: 'offscreen/offscreen', format: 'esm' },
   // Sandbox page for YouTube n/sig script eval — runs under a more
@@ -49,6 +51,7 @@ const STATIC_FILES = [
   'offscreen/offscreen.html',
   'offscreen/sandbox.html',
   'options/options.html',
+  'options/options.css',
 ];
 
 const STATIC_DIRS = ['icons', 'vendor'];
