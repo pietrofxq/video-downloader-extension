@@ -18,6 +18,9 @@ beforeEach(async () => {
         set: vi.fn(async (obj: Record<string, unknown>) => {
           Object.assign(backing, obj);
         }),
+        remove: vi.fn(async (key: string) => {
+          delete backing[key];
+        }),
       },
       onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
     },
@@ -60,6 +63,31 @@ describe('getSettings / setSettings', () => {
     expect(s.defaultQuality).toBe('highest');
     expect(s.concurrency).toBe(mod.CONCURRENCY_DEFAULT);
     expect(s.blockedOrigins).toEqual([]);
+  });
+});
+
+describe('last-picked quality', () => {
+  it('returns null when nothing was picked', async () => {
+    expect(await mod.getLastQualityHeight()).toBeNull();
+  });
+
+  it('round-trips a picked height', async () => {
+    await mod.setLastQualityHeight(720);
+    expect(await mod.getLastQualityHeight()).toBe(720);
+  });
+
+  it('clears on null and ignores non-positive values', async () => {
+    await mod.setLastQualityHeight(1080);
+    await mod.setLastQualityHeight(null);
+    expect(await mod.getLastQualityHeight()).toBeNull();
+    await mod.setLastQualityHeight(0);
+    expect(await mod.getLastQualityHeight()).toBeNull();
+  });
+
+  it('does not leak into the settings blob', async () => {
+    await mod.setLastQualityHeight(480);
+    const s = await mod.getSettings();
+    expect(s).toEqual(mod.DEFAULT_SETTINGS);
   });
 });
 

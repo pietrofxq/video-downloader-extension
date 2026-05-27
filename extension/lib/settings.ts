@@ -25,8 +25,6 @@ export interface Settings {
   adapterEnabled: Record<string, boolean>;
   /** Page-origin hosts where detection is silenced (exact host match). */
   blockedOrigins: string[];
-  /** First-run disclaimer acceptance. */
-  disclaimerAccepted: boolean;
 }
 
 // Per-adapter filename template defaults. The token set is documented in
@@ -47,7 +45,6 @@ export const DEFAULT_SETTINGS: Settings = {
   filenameTemplates: {},
   adapterEnabled: {},
   blockedOrigins: [],
-  disclaimerAccepted: false,
 };
 
 const SETTINGS_KEY = 'settings';
@@ -86,7 +83,6 @@ export function normalizeSettings(raw: unknown): Settings {
     blockedOrigins: Array.isArray(r.blockedOrigins)
       ? r.blockedOrigins.filter((s): s is string => typeof s === 'string')
       : [],
-    disclaimerAccepted: r.disclaimerAccepted === true,
   };
 }
 
@@ -105,6 +101,37 @@ export async function setSettings(patch: Partial<Settings>): Promise<Settings> {
   const next = normalizeSettings({ ...current, ...patch });
   await chrome.storage.local.set({ [SETTINGS_KEY]: next });
   return next;
+}
+
+// ---------- last-picked quality (sticky picker default) ----------
+//
+// Distinct from the `defaultQuality` setting: this is the height the user
+// last manually chose in the popup picker, remembered so the next video's
+// picker pre-selects the same quality. Stored under its own key so a pick
+// doesn't churn the whole settings blob. Cleared when the user changes the
+// explicit defaultQuality in options, so that setting always wins fresh.
+const LAST_QUALITY_KEY = 'lastQualityHeight';
+
+export async function getLastQualityHeight(): Promise<number | null> {
+  try {
+    const got = await chrome.storage.local.get(LAST_QUALITY_KEY);
+    const v = got[LAST_QUALITY_KEY];
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setLastQualityHeight(height: number | null): Promise<void> {
+  try {
+    if (height == null || !Number.isFinite(height) || height <= 0) {
+      await chrome.storage.local.remove(LAST_QUALITY_KEY);
+    } else {
+      await chrome.storage.local.set({ [LAST_QUALITY_KEY]: Math.round(height) });
+    }
+  } catch {
+    // best-effort; a failed remember just means no stickiness this time
+  }
 }
 
 /** Subscribe to settings changes. Returns an unsubscribe function. */

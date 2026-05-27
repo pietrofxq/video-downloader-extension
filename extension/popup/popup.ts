@@ -5,7 +5,6 @@ import { MSG, parsePortMessageFromSW } from '../lib/messages.js';
 import { sanitizeFilename } from '../lib/sanitize-filename.js';
 import type { DownloadStage, DownloadState, MediaEntry } from '../lib/types.ts';
 import {
-  filterDownloadableVariants,
   formatAudioTrack,
   formatVariant,
   hasAudioTrackPicker,
@@ -14,13 +13,21 @@ import {
   pickDisplayVariantUrl,
   pickDownloadVariantUrl,
   pickPreferredVariantUrl,
+  qualityPickerState,
+  sortOrphansForDisplay,
 } from './popup-helpers.js';
-import { getSettings, setSettings, type DefaultQuality } from '../lib/settings.js';
+import {
+  getLastQualityHeight,
+  getSettings,
+  setLastQualityHeight,
+  type DefaultQuality,
+} from '../lib/settings.js';
 
-// The user's default-quality preference, loaded once at startup. Drives
-// which option qualityOptionsHtml pre-selects. Defaults to 'highest'
-// until settings load (a tick before the first real render).
+// The user's default-quality preference + the last height they manually
+// picked, loaded once at startup. Together they drive which option
+// qualityOptionsHtml pre-selects (last-picked wins when present).
 let defaultQualityPref: DefaultQuality = 'highest';
+let lastQualityHeight: number | null = null;
 
 const $content = document.getElementById('content')!;
 const $gear = document.getElementById('open-options');
@@ -38,25 +45,6 @@ if ($version) {
 }
 
 $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
-
-// First-run disclaimer. Shown until the user accepts once; acceptance is
-// persisted in settings so it never reappears.
-function showDisclaimer(): void {
-  const overlay = document.getElementById('disclaimer');
-  const accept = document.getElementById('disclaimer-accept');
-  if (!overlay) return;
-  overlay.hidden = false;
-  accept?.addEventListener(
-    'click',
-    () => {
-      overlay.hidden = true;
-      void setSettings({ disclaimerAccepted: true }).catch((err) =>
-        log.warn('[VDL] failed to persist disclaimer acceptance', err),
-      );
-    },
-    { once: true },
-  );
-}
 
 // Reset clears the SW-side tab state for the active tab. The SW pushes
 // the resulting empty STATE through the popup port, so the row list
@@ -213,36 +201,47 @@ function audioTrackOptionsHtml(entry: MediaEntry, selectedId: string | null): st
     .join('');
 }
 
+// Height from a "WxH" resolution string; 0 when absent/unparsed. Used to
+// tag quality <option>s so the change handler can remember the picked
+// height (the sticky last-quality default).
+function variantHeightFromResolution(resolution: string | null | undefined): number {
+  if (!resolution) return 0;
+  const m = /x(\d+)/.exec(resolution);
+  return m ? Number(m[1]) : 0;
+}
+
 function qualityOptionsHtml(entry: MediaEntry): string {
-  if (entry.parseError) {
-    return '<option value="auto">Manifest unavailable</option>';
-  }
-  if (Array.isArray(entry.variants) && entry.variants.length > 0) {
-    // Filter out variants the muxer can't handle (VP9 in webm, AV1 in
-    // cmaf, video-only adaptive without paired audio). The previous
-    // approach surfaced them labeled "— not supported" but that meant
-    // the dropdown's first option was sometimes unselectable junk and
-    // the user had to scroll past noise to find a downloadable
-    // quality. Cleaner UX to hide them.
-    const downloadable = filterDownloadableVariants(entry.variants);
-    if (downloadable.length === 0) {
-      // Entry has variants but none are downloadable (e.g., a YouTube
-      // video that only ships VP9/AV1 at this resolution). Surface the
-      // gap explicitly so the user understands why the picker is empty.
-      return '<option value="none">No supported variants</option>';
+  // qualityPickerState centralizes the state machine (shared with the
+  // "Loading…" watchdog); this just maps each state to <option>s. The
+  // muxer-unsupported variants (VP9/AV1-only, video-only without paired
+  // audio) are already filtered out by the 'variants' case, so the
+  // dropdown never leads with an unselectable junk option.
+  const state = qualityPickerState(entry);
+  switch (state.kind) {
+    case 'parse-error':
+      return '<option value="auto">Couldn’t read manifest</option>';
+    case 'no-supported':
+      return '<option value="none">No supported quality</option>';
+    case 'single':
+      return '<option value="single">Single quality</option>';
+    case 'loading':
+      return '<option value="auto">Loading…</option>';
+    case 'variants': {
+      const preferredUrl = pickPreferredVariantUrl(
+        state.variants,
+        defaultQualityPref,
+        lastQualityHeight,
+      );
+      return state.variants
+        .map((v) => {
+          const sel = v.url === preferredUrl ? ' selected' : '';
+          const h = variantHeightFromResolution(v.resolution);
+          const hAttr = h > 0 ? ` data-height="${h}"` : '';
+          return `<option value="${escapeHtml(v.url)}"${hAttr}${sel}>${escapeHtml(formatVariant(v))}</option>`;
+        })
+        .join('');
     }
-    const preferredUrl = pickPreferredVariantUrl(downloadable, defaultQualityPref);
-    return downloadable
-      .map((v) => {
-        const sel = v.url === preferredUrl ? ' selected' : '';
-        return `<option value="${escapeHtml(v.url)}"${sel}>${escapeHtml(formatVariant(v))}</option>`;
-      })
-      .join('');
   }
-  if (entry.isMaster === false) {
-    return '<option value="single">Single quality</option>';
-  }
-  return '<option value="auto">Loading…</option>';
 }
 
 // filterTopLevel lives in lib/entry-filter.js — the SW shares it for the
@@ -441,7 +440,11 @@ function renderRow(entry: MediaEntry): string {
     <div class="row" data-media-id="${escapeHtml(entry.id)}">
       <div class="row-header">
         <span class="row-section" title="${escapeHtml(entry.pageUrl)}">${escapeHtml(section)}</span>
-        <span class="adapter-pill">${escapeHtml(entry.adapterId)}</span>
+        <span class="row-header-right">
+          <button type="button" class="copy-url" data-media-id="${escapeHtml(entry.id)}"
+                  title="Copy source URL (redacted)" aria-label="Copy source URL">&#x2398;</button>
+          <span class="adapter-pill">${escapeHtml(entry.adapterId)}</span>
+        </span>
       </div>
       <div class="row-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
       <div class="row-filename">${filenameField}</div>
@@ -538,11 +541,12 @@ function render(state: TabStateMsg | null | undefined): void {
   // downloads whose tab navigated away / cleared its entry list.
   // The inline per-row progress UI (renderActionForDownload) still
   // handles downloads whose mediaId IS visible — they're not duplicated.
-  const orphans: DownloadState[] = [];
+  const orphansRaw: DownloadState[] = [];
   for (const ds of downloadsByMediaId.values()) {
-    if (!entriesById.has(ds.mediaId)) orphans.push(ds);
+    if (!entriesById.has(ds.mediaId)) orphansRaw.push(ds);
   }
-  orphans.sort((a, b) => b.startedAt - a.startedAt);
+  // Group live downloads above finished ones (each newest-first).
+  const orphans = sortOrphansForDisplay(orphansRaw);
 
   const snap = captureFormState();
   const orphanHtml = orphans.length > 0 ? renderOrphanSection(orphans) : '';
@@ -717,6 +721,15 @@ $content.addEventListener('change', (e: Event) => {
   const entry = entriesById.get(id);
   if (!entry) return;
   const chosen = sel.value;
+
+  // Remember the manually-picked height as the sticky default for the
+  // next video's picker (the data-height we tagged the option with).
+  const pickedHeight = Number(sel.selectedOptions[0]?.dataset.height);
+  if (Number.isFinite(pickedHeight) && pickedHeight > 0) {
+    lastQualityHeight = pickedHeight;
+    void setLastQualityHeight(pickedHeight);
+  }
+
   const variantUrl = /^https?:/.test(chosen) ? chosen : entry.url;
   const dur = resolveDurationSeconds(entry, variantUrl);
   const bytes = resolveSizeBytes(entry, variantUrl);
@@ -736,6 +749,24 @@ $content.addEventListener('change', (e: Event) => {
 // "the latest render's array reference". Lookup via the Map for O(1).
 $content.addEventListener('click', (e: MouseEvent) => {
   const target = e.target as HTMLElement | null;
+
+  // "Copy source URL" — copies the redacted media URL for debugging a
+  // failed download. Brief inline confirmation via the button title.
+  const copyBtn = target?.closest<HTMLButtonElement>('.copy-url');
+  if (copyBtn) {
+    const entry = copyBtn.dataset.mediaId ? entriesById.get(copyBtn.dataset.mediaId) : null;
+    if (entry) {
+      void navigator.clipboard
+        ?.writeText(redactUrl(entry.url))
+        .then(() => {
+          copyBtn.classList.add('copied');
+          setTimeout(() => copyBtn.classList.remove('copied'), 1200);
+        })
+        .catch((err) => log.warn('[VDL] copy url failed', err));
+    }
+    return;
+  }
+
   // "Show in folder" on a saved download row.
   const showBtn = target?.closest<HTMLElement>('.show-in-folder');
   if (showBtn) {
@@ -938,14 +969,14 @@ function scheduleReconnect(tabId: number): void {
     $content.innerHTML = renderEmpty();
     return;
   }
-  // Load settings before the first render: drives the picker's default
-  // selection and the first-run disclaimer.
+  // Load settings before the first render so the picker pre-selects the
+  // user's preferred (or last-picked) quality on the very first paint.
   try {
     const settings = await getSettings();
     defaultQualityPref = settings.defaultQuality;
-    if (!settings.disclaimerAccepted) showDisclaimer();
+    lastQualityHeight = await getLastQualityHeight();
   } catch {
-    /* keep the 'highest' default; disclaimer stays hidden */
+    /* keep the 'highest' default */
   }
   // Render whatever state we can immediately so the popup isn't blank
   // during the connect roundtrip. The SUBSCRIBE response will overwrite.

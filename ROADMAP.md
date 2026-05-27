@@ -542,16 +542,16 @@ Landed so far (incremental QoL fixes from field reports):
   - Per-origin block list (add via host or full URL; normalized to host).
   - "Clear all captured auth/header state" button (new `CLEAR_ALL_CAPTURED` SW message + `clearAll()` media-store helper). Per-tab reset stays on the popup's header button.
   - Plain-language explanation of why the `<all_urls>` permission is needed.
-- [x] **First-run disclaimer modal** in the popup ("only download content you have the right to"); acceptance stored in settings (`disclaimerAccepted`).
 - [x] **Wire the chosen settings through the pipeline:** default-quality preselect in the popup picker (`pickPreferredVariantUrl`, closest-height fallback), concurrency into the offscreen segment fetcher, per-adapter filename template into the SW download-filename path (falls back to `deriveFilename` when the template renders empty), per-adapter enable/disable + per-origin block list into both detection paths (`handleDetection` + `handleStreamsDiscovered`).
-- [x] Tests for the settings store + filename-template rendering + block-list matching + default-quality preselect; `npm run check` green (306 tests).
-- [ ] **Popup polish / QoL (remaining):**
-  - Remember the _last manually-picked_ quality/codec (distinct from the default-quality setting now wired).
-  - Clearer empty / error / "DRM-protected" / "no supported variants" states.
-  - Copy-source-URL affordance (redacted) for debugging a failed download.
-  - Tidy the active-downloads section (grouping, clearer terminal-state rows).
+- [x] **Popup polish / QoL:**
+  - [x] Remember the last manually-picked quality and pre-select it on the next video (`getLastQualityHeight` / `setLastQualityHeight`; `pickPreferredVariantUrl` takes it as a sticky override; cleared when the explicit default-quality changes).
+  - [x] Clearer empty / error / "no supported quality" / "couldn't read manifest" states via a single testable `qualityPickerState` classifier (shared with the "Loading…" watchdog). DRM stays a row-level label.
+  - [x] Copy-source-URL affordance per row (copies the redacted media URL for debugging a failed download).
+  - [x] Tidy the active-downloads section — `sortOrphansForDisplay` groups live downloads above finished ones, each newest-first.
+- [x] Tests for the settings store + filename-template rendering + block-list matching + default-quality preselect + sticky-last-quality + picker-state classifier + orphan ordering; `npm run check` green (321 tests).
+- [x] ~~First-run disclaimer modal~~ — **dropped** at the maintainer's request. The README already carries the use-only-content-you-have-rights-to disclaimer; a blocking modal on every fresh profile wasn't worth the friction. The `disclaimerAccepted` setting was removed.
 
-**Ship criterion:** a user can set defaults (quality, concurrency, filename template), silence detection per origin, and sees a first-run disclaimer — no functionality regresses and `npm run check` passes.
+**Ship criterion:** ✅ a user can set defaults (quality, concurrency, filename template), silence detection per origin / per adapter, and the popup remembers their last-picked quality — no functionality regresses and `npm run check` passes (321 tests).
 
 ---
 

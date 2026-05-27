@@ -7,6 +7,7 @@ import {
   getSettings,
   normalizeHost,
   renderFilenameTemplate,
+  setLastQualityHeight,
   setSettings,
   type DefaultQuality,
   type Settings,
@@ -137,6 +138,9 @@ function renderAll(): void {
 
 function wireDownloads(): void {
   $<HTMLSelectElement>('default-quality')?.addEventListener('change', (e) => {
+    // Setting an explicit default clears the sticky last-picked quality so
+    // the chosen default actually takes effect on the next video.
+    void setLastQualityHeight(null);
     void persist({ defaultQuality: (e.target as HTMLSelectElement).value as DefaultQuality });
   });
 
@@ -231,7 +235,8 @@ function wireData(): void {
   $('reset-settings')?.addEventListener('click', () => {
     if (!confirm('Reset all settings to their defaults?')) return;
     // setSettings merges over current; DEFAULT_SETTINGS covers every key,
-    // so this overwrites the lot.
+    // so this overwrites the lot. Also drop the sticky last-picked quality.
+    void setLastQualityHeight(null);
     void persist({ ...DEFAULT_SETTINGS }).then(renderAll);
   });
 }

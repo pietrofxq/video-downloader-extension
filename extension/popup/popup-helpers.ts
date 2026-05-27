@@ -163,52 +163,106 @@ export function filterDownloadableVariants(variants: readonly HlsVariant[]): Hls
     });
 }
 
+// Statuses that mean a download is still working. Everything else
+// (saved / error / canceled) is terminal.
+const ACTIVE_DOWNLOAD_STATUSES: ReadonlySet<string> = new Set(['queued', 'pending', 'progress']);
+
+export function isActiveDownload(state: DownloadState): boolean {
+  return ACTIVE_DOWNLOAD_STATUSES.has(state.status);
+}
+
 /**
- * Pick which variant URL the quality dropdown should pre-select, given the
- * user's default-quality preference. `downloadable` must be the output of
- * filterDownloadableVariants (sorted by height desc). 'highest' / 'ask'
- * select the top variant; a numeric preference (1080/720/480) picks the
- * exact height, else the closest available one (largest height ≤ target,
- * falling back to the smallest when every variant is taller). Returns null
- * for an empty list.
+ * Order the cross-tab "Active downloads" rows: in-progress ones
+ * (queued / pending / progress) first, then terminal ones
+ * (saved / error / canceled), each newest-first. Groups the live
+ * downloads at the top instead of interleaving them with finished rows
+ * by raw start time.
+ */
+export function sortOrphansForDisplay(orphans: readonly DownloadState[]): DownloadState[] {
+  return orphans.slice().sort((a, b) => {
+    const rank = (isActiveDownload(a) ? 0 : 1) - (isActiveDownload(b) ? 0 : 1);
+    if (rank !== 0) return rank;
+    return b.startedAt - a.startedAt;
+  });
+}
+
+/** Variant closest to a target height: exact, else largest ≤ target, else smallest. */
+function closestByHeight(
+  downloadable: readonly HlsVariant[],
+  target: number,
+): HlsVariant | undefined {
+  let largestAtMost: HlsVariant | undefined; // list is height-desc, so first ≤ target wins
+  for (const v of downloadable) {
+    const h = variantHeight(v);
+    if (h === target) return v;
+    if (h <= target && !largestAtMost) largestAtMost = v;
+  }
+  return largestAtMost ?? downloadable[downloadable.length - 1];
+}
+
+/**
+ * Pick which variant URL the quality dropdown should pre-select.
+ * `downloadable` must be the output of filterDownloadableVariants (sorted
+ * by height desc).
+ *
+ * Priority: the user's last manually-picked height (sticky) wins when set
+ * and any variant exists; otherwise the explicit default-quality
+ * preference applies — 'highest'/'ask' take the top variant, a numeric
+ * preference takes the closest available height. Returns null for an empty
+ * list.
  */
 export function pickPreferredVariantUrl(
   downloadable: readonly HlsVariant[],
   preference: DefaultQuality,
+  lastPickedHeight?: number | null,
 ): string | null {
   if (downloadable.length === 0) return null;
+  if (typeof lastPickedHeight === 'number' && lastPickedHeight > 0) {
+    return (closestByHeight(downloadable, lastPickedHeight) ?? downloadable[0]).url;
+  }
   if (preference === 'highest' || preference === 'ask') return downloadable[0].url;
   const target = parseInt(preference, 10); // '1080p' → 1080
   if (!Number.isFinite(target)) return downloadable[0].url;
-  let exact: HlsVariant | undefined;
-  let largestAtMost: HlsVariant | undefined; // height ≤ target (list is desc, so first wins)
-  for (const v of downloadable) {
-    const h = variantHeight(v);
-    if (h === target) {
-      exact = v;
-      break;
-    }
-    if (h <= target && !largestAtMost) largestAtMost = v;
+  return (closestByHeight(downloadable, target) ?? downloadable[0]).url;
+}
+
+/**
+ * Classify what the quality picker should show for an entry. Centralizes
+ * the decision so the popup render and the "Loading…" watchdog agree, and
+ * so each state is unit-testable:
+ *
+ *  - `parse-error`  — manifest fetch/parse failed (carries the reason).
+ *  - `variants`     — one or more downloadable qualities (carries them).
+ *  - `no-supported` — has variants but none are muxable (VP9/AV1-only, …).
+ *  - `single`       — a confirmed single-bitrate (non-master) playlist.
+ *  - `loading`      — still waiting on the manifest parse.
+ */
+export type QualityPickerState =
+  | { kind: 'parse-error'; reason: string }
+  | { kind: 'variants'; variants: HlsVariant[] }
+  | { kind: 'no-supported' }
+  | { kind: 'single' }
+  | { kind: 'loading' };
+
+export function qualityPickerState(entry: MediaEntry): QualityPickerState {
+  if (entry.parseError) return { kind: 'parse-error', reason: entry.parseError };
+  if (Array.isArray(entry.variants) && entry.variants.length > 0) {
+    const variants = filterDownloadableVariants(entry.variants);
+    return variants.length === 0 ? { kind: 'no-supported' } : { kind: 'variants', variants };
   }
-  const chosen = exact ?? largestAtMost ?? downloadable[downloadable.length - 1];
-  return chosen.url;
+  if (entry.isMaster === false) return { kind: 'single' };
+  return { kind: 'loading' };
 }
 
 /**
  * Is this entry still waiting on its HLS manifest parse — i.e. the
- * quality dropdown is showing "Loading…"? True when it's an HLS entry
- * with no parse error, no variants yet, and not already known to be a
- * single-bitrate (non-master) playlist. The popup's watchdog uses this
+ * quality dropdown is showing "Loading…"? The popup's watchdog uses this
  * to decide whether to nudge the SW to (re-)parse; the SW can be torn
- * down mid-parse and leave the dropdown stuck otherwise.
+ * down mid-parse and leave the dropdown stuck otherwise. Scoped to HLS:
+ * other kinds arrive with variants already populated.
  */
 export function isManifestLoading(entry: MediaEntry): boolean {
-  return (
-    entry.kind === 'hls' &&
-    !entry.parseError &&
-    !(Array.isArray(entry.variants) && entry.variants.length > 0) &&
-    entry.isMaster !== false
-  );
+  return entry.kind === 'hls' && qualityPickerState(entry).kind === 'loading';
 }
 
 /**

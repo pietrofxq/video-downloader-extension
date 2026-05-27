@@ -5,12 +5,15 @@ import {
   formatAudioTrack,
   formatVariant,
   hasAudioTrackPicker,
+  isActiveDownload,
   isManifestLoading,
   isVariantDownloadable,
   pickDefaultAudioTrackId,
   pickDisplayVariantUrl,
   pickDownloadVariantUrl,
   pickPreferredVariantUrl,
+  qualityPickerState,
+  sortOrphansForDisplay,
 } from './popup-helpers.js';
 import type { AudioTrack, DownloadState, HlsVariant, MediaEntry } from '../lib/types.ts';
 
@@ -460,6 +463,98 @@ describe('pickPreferredVariantUrl', () => {
 
   it('falls back to the smallest when every variant is taller than the target', () => {
     expect(pickPreferredVariantUrl([v1080, v720], '480p')).toBe('u720');
+  });
+
+  it('last-picked height wins over the default-quality preference', () => {
+    // preference says highest (1080), but the user last picked 720.
+    expect(pickPreferredVariantUrl(sorted, 'highest', 720)).toBe('u720');
+    expect(pickPreferredVariantUrl(sorted, '480p', 1080)).toBe('u1080');
+  });
+
+  it('last-picked height uses the closest-available fallback', () => {
+    expect(pickPreferredVariantUrl([v1080, v480], 'highest', 720)).toBe('u480');
+  });
+
+  it('ignores a null/zero last-picked height and uses the preference', () => {
+    expect(pickPreferredVariantUrl(sorted, '720p', null)).toBe('u720');
+    expect(pickPreferredVariantUrl(sorted, 'highest', 0)).toBe('u1080');
+  });
+});
+
+// ---------- sortOrphansForDisplay ----------
+
+describe('sortOrphansForDisplay', () => {
+  it('groups active downloads above finished ones, each newest-first', () => {
+    const list = [
+      downloadState({ mediaId: 'saved-old', status: 'saved', startedAt: 10 }),
+      downloadState({ mediaId: 'active-old', status: 'progress', startedAt: 20 }),
+      downloadState({ mediaId: 'saved-new', status: 'error', startedAt: 40 }),
+      downloadState({ mediaId: 'active-new', status: 'queued', startedAt: 30 }),
+    ];
+    const order = sortOrphansForDisplay(list).map((s) => s.mediaId);
+    expect(order).toEqual(['active-new', 'active-old', 'saved-new', 'saved-old']);
+  });
+
+  it('does not mutate the input array', () => {
+    const list = [
+      downloadState({ mediaId: 'a', status: 'saved', startedAt: 1 }),
+      downloadState({ mediaId: 'b', status: 'progress', startedAt: 2 }),
+    ];
+    const copy = [...list];
+    sortOrphansForDisplay(list);
+    expect(list).toEqual(copy);
+  });
+
+  it('treats pending/queued/progress as active and saved/error/canceled as terminal', () => {
+    expect(isActiveDownload(downloadState({ mediaId: 'a', status: 'pending' }))).toBe(true);
+    expect(isActiveDownload(downloadState({ mediaId: 'a', status: 'queued' }))).toBe(true);
+    expect(isActiveDownload(downloadState({ mediaId: 'a', status: 'progress' }))).toBe(true);
+    expect(isActiveDownload(downloadState({ mediaId: 'a', status: 'saved' }))).toBe(false);
+    expect(isActiveDownload(downloadState({ mediaId: 'a', status: 'error' }))).toBe(false);
+    expect(isActiveDownload(downloadState({ mediaId: 'a', status: 'canceled' }))).toBe(false);
+  });
+});
+
+// ---------- qualityPickerState ----------
+
+describe('qualityPickerState', () => {
+  it('parse-error carries the reason', () => {
+    const s = qualityPickerState(entry({ id: 'e', parseError: 'manifest fetch 403' }));
+    expect(s).toEqual({ kind: 'parse-error', reason: 'manifest fetch 403' });
+  });
+
+  it('variants carries the downloadable, sorted list', () => {
+    const s = qualityPickerState(
+      entry({
+        id: 'e',
+        isMaster: true,
+        variants: [hotmartHlsVariant('720p'), hotmartHlsVariant('1080p')],
+      }),
+    );
+    expect(s.kind).toBe('variants');
+    if (s.kind === 'variants') {
+      // filterDownloadableVariants sorts height-desc → 1080 leads.
+      expect(s.variants[0].resolution).toContain('1080');
+      expect(s.variants).toHaveLength(2);
+    }
+  });
+
+  it('no-supported when variants exist but none are muxable', () => {
+    const vp9 = variant({
+      url: 'https://r1.googlevideo.com/videoplayback?itag=248&mime=video%2Fwebm',
+      codecs: 'vp09.00.50.08',
+      pairedAudioUrl: 'https://r1.googlevideo.com/videoplayback?itag=251&mime=audio%2Fwebm',
+    });
+    const s = qualityPickerState(entry({ id: 'e', isMaster: true, variants: [vp9] }));
+    expect(s.kind).toBe('no-supported');
+  });
+
+  it('single for a confirmed non-master playlist', () => {
+    expect(qualityPickerState(entry({ id: 'e', isMaster: false })).kind).toBe('single');
+  });
+
+  it('loading while the manifest is still being parsed', () => {
+    expect(qualityPickerState(entry({ id: 'e' })).kind).toBe('loading');
   });
 });
 
