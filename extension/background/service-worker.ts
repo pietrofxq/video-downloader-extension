@@ -389,11 +389,14 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
     case MSG.RESET_TAB: {
       const tabId = msg.payload?.tabId;
       if (typeof tabId === 'number') {
-        // Mirror the on-navigation reset: drop per-tab download states +
-        // entries, refresh the badge, push an empty STATE to the popup.
-        // adapterMeta is intentionally preserved by clearTab so the next
-        // detection lands with the right title.
-        clearDownloadStatesForTab(tabId);
+        // Drop this tab's entries + download states (any status), plus
+        // every finished download across all tabs so saved rows in the
+        // cross-tab "Active downloads" section clear too. In-progress
+        // downloads in OTHER tabs keep running. adapterMeta is preserved
+        // by clearTab so the next detection lands with the right title.
+        const cleared = clearDownloadStatesForTab(tabId);
+        for (const id of clearFinishedDownloadStatesAllTabs()) cleared.add(id);
+        broadcastDownloadDismissed(cleared);
         clearTab(tabId)
           .then(async () => {
             await updateBadge(tabId);
@@ -402,6 +405,31 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
           })
           .catch((err) => {
             log.warn('RESET_TAB failed', err);
+            sendResponse({ ok: false });
+          });
+        return true; // async sendResponse
+      }
+      sendResponse({ ok: false });
+      return false;
+    }
+    case MSG.ENSURE_PARSED: {
+      // Popup "Loading…" watchdog — re-drive parsing for any unresolved
+      // HLS entry. Covers the case where an eager parse was cut off by an
+      // MV3 worker teardown while the popup stayed open. ensureParsed is
+      // idempotent + in-flight-guarded, so redundant nudges are cheap.
+      const tabId = msg.payload?.tabId;
+      if (typeof tabId === 'number') {
+        getTabState(tabId)
+          .then((state) => {
+            for (const entry of state.entries) {
+              if (entry.kind === 'hls' && !entry.variants && !entry.parseError) {
+                void ensureParsed(tabId, entry);
+              }
+            }
+            sendResponse({ ok: true });
+          })
+          .catch((err) => {
+            log.warn('ENSURE_PARSED failed', err);
             sendResponse({ ok: false });
           });
         return true; // async sendResponse
@@ -1334,10 +1362,15 @@ async function handleDownloadDone(payload: unknown): Promise<void> {
   chrome.downloads.onChanged.addListener(listener);
 }
 
-function clearDownloadStatesForTab(tabId: number): void {
+// Drop every download state for this tab (any status) plus its queued
+// runs. Returns the set of affected mediaIds so the caller can tell open
+// popups to drop the matching rows.
+function clearDownloadStatesForTab(tabId: number): Set<string> {
+  const clearedMediaIds = new Set<string>();
   let stateMutated = false;
   for (const [requestId, state] of downloadStates) {
     if (state.tabId === tabId) {
+      clearedMediaIds.add(state.mediaId);
       downloadStates.delete(requestId);
       stateMutated = true;
     }
@@ -1353,6 +1386,42 @@ function clearDownloadStatesForTab(tabId: number): void {
   }
   if (stateMutated) void persistDownloadStates();
   if (queueMutated) void persistDownloadQueue();
+  return clearedMediaIds;
+}
+
+// Drop finished (saved / error / canceled) download states across ALL
+// tabs. Used by Reset so the cross-tab "Active downloads" section is
+// wiped of completed rows; in-progress / queued downloads in other tabs
+// are left running. Returns the affected mediaIds.
+function clearFinishedDownloadStatesAllTabs(): Set<string> {
+  const clearedMediaIds = new Set<string>();
+  let mutated = false;
+  for (const [requestId, state] of downloadStates) {
+    if (state.status === 'saved' || state.status === 'error' || state.status === 'canceled') {
+      clearedMediaIds.add(state.mediaId);
+      downloadStates.delete(requestId);
+      mutated = true;
+    }
+  }
+  if (mutated) void persistDownloadStates();
+  return clearedMediaIds;
+}
+
+// Tell every open popup to drop the given mediaIds from its local
+// download cache (clears both inline rows and the cross-tab "Active
+// downloads" orphan rows). Unlike dismissDownloadStatesForMedia's
+// per-tab notify, this fans out to all ports because orphan rows render
+// regardless of which tab they originated from.
+function broadcastDownloadDismissed(mediaIds: Iterable<string>): void {
+  for (const mediaId of mediaIds) {
+    for (const [port] of popupPorts) {
+      try {
+        port.postMessage({ type: 'DOWNLOAD_DISMISSED', mediaId });
+      } catch {
+        // disconnected; onDisconnect cleans up
+      }
+    }
+  }
 }
 
 // Drop any cached DownloadState for this mediaId across all tabs and

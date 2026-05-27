@@ -163,6 +163,23 @@ export function filterDownloadableVariants(variants: readonly HlsVariant[]): Hls
 }
 
 /**
+ * Is this entry still waiting on its HLS manifest parse — i.e. the
+ * quality dropdown is showing "Loading…"? True when it's an HLS entry
+ * with no parse error, no variants yet, and not already known to be a
+ * single-bitrate (non-master) playlist. The popup's watchdog uses this
+ * to decide whether to nudge the SW to (re-)parse; the SW can be torn
+ * down mid-parse and leave the dropdown stuck otherwise.
+ */
+export function isManifestLoading(entry: MediaEntry): boolean {
+  return (
+    entry.kind === 'hls' &&
+    !entry.parseError &&
+    !(Array.isArray(entry.variants) && entry.variants.length > 0) &&
+    entry.isMaster !== false
+  );
+}
+
+/**
  * Should the popup render the audio-track picker for this entry?
  * Two or more tracks → yes (the user has a meaningful choice).
  * One track or none → no (the default paired audio covers it).

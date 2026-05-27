@@ -527,6 +527,12 @@ Tactical fix (not a planned milestone) that took the v0.11.8 version number when
 
 Goal: the download pipeline is solid across HLS / YouTube AVC+AV1 / progressive, so the next focus is making the extension pleasant to use rather than adding more codecs or sites. This pulls the settings/options work forward from v1.0 (which becomes the release-gate milestone) and folds in popup polish. VP9 and broader site/codec support are deferred and picked up as needed (see v0.11.10, v0.12, v1.4).
 
+Landed so far (incremental QoL fixes from field reports):
+
+- [x] **Extension version in the popup header.** Read from `chrome.runtime.getManifest().version` and stamped next to the title, so a user (or a bug report) can tell which build is loaded at a glance.
+- [x] **Reset also clears downloaded (saved) videos.** The header Reset button cleared the tab's detected entries but left saved/finished downloads lingering in the cross-tab "Active downloads" section (the SW deleted the states but never told open popups to drop them). `RESET_TAB` now clears the current tab's entries + downloads **plus every finished (saved/error/canceled) download across all tabs**, and broadcasts `DOWNLOAD_DISMISSED` to all popups so the rows actually disappear. In-progress downloads in other tabs keep running.
+- [x] **Quality dropdown stuck on "Loading…".** When an HLS entry was detected while the popup was already open, the eager `ensureParsed` could be cut off by an MV3 service-worker teardown with nothing to re-drive it (the SUBSCRIBE-time retry only runs on connect). Added an `ENSURE_PARSED` message + SW handler and a popup-side watchdog (`isManifestLoading` + capped, spaced nudges) that re-drives any entry still showing "Loading…". `ensureParsed` is in-flight-guarded, so nudges during a healthy parse are no-ops. 6 new `isManifestLoading` unit tests.
+
 - [ ] **Options page (`options.html`)** with settings persisted in `chrome.storage.local`:
   - Default quality (highest / 1080p / 720p / 480p / ask each time).
   - Download concurrency (default 4, range 1–8).

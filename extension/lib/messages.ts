@@ -37,6 +37,7 @@ export const MSG = Object.freeze({
   DISMISS_DOWNLOAD: 'DISMISS_DOWNLOAD',
   CANCEL_DOWNLOAD: 'CANCEL_DOWNLOAD',
   RESET_TAB: 'RESET_TAB',
+  ENSURE_PARSED: 'ENSURE_PARSED',
   STREAMS_DISCOVERED: 'STREAMS_DISCOVERED',
 } as const);
 
@@ -161,6 +162,15 @@ export interface ResetTabMessage extends MessageBase<typeof MSG.RESET_TAB> {
   payload: { tabId: number };
 }
 
+// Popup → SW: re-drive manifest parsing for any HLS entry on this tab
+// that's still unresolved (no variants, no parseError). The popup's
+// "Loading…" watchdog fires this when an eager parse was cut off by an
+// MV3 service-worker teardown and the dropdown is stuck. ensureParsed is
+// idempotent + in-flight-guarded, so this is safe to send repeatedly.
+export interface EnsureParsedMessage extends MessageBase<typeof MSG.ENSURE_PARSED> {
+  payload: { tabId: number };
+}
+
 // Content script → SW: catalog of streams the adapter found in the
 // page DOM/JSON. Used by sites whose media URLs aren't visible to
 // webRequest (YouTube's ytInitialPlayerResponse.streamingData). The SW
@@ -188,6 +198,7 @@ export type ExtensionMessage =
   | DismissDownloadMessage
   | CancelDownloadMessage
   | ResetTabMessage
+  | EnsureParsedMessage
   | StreamsDiscoveredMessage;
 
 // ---------- popup ↔ SW port wire ----------

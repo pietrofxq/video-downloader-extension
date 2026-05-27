@@ -5,6 +5,7 @@ import {
   formatAudioTrack,
   formatVariant,
   hasAudioTrackPicker,
+  isManifestLoading,
   isVariantDownloadable,
   pickDefaultAudioTrackId,
   pickDisplayVariantUrl,
@@ -427,6 +428,40 @@ describe('formatVariant', () => {
       bandwidth: 0,
     });
     expect(formatVariant(v)).toBe('auto');
+  });
+});
+
+// ---------- isManifestLoading ----------
+
+describe('isManifestLoading', () => {
+  it('true for an HLS master entry with no variants and no parse error', () => {
+    // This is the "Loading…" state the watchdog must re-drive.
+    expect(isManifestLoading(entry({ id: 'e' }))).toBe(true);
+  });
+
+  it('false once variants are populated', () => {
+    const e = entry({ id: 'e', isMaster: true, variants: [hotmartHlsVariant('1080p')] });
+    expect(isManifestLoading(e)).toBe(false);
+  });
+
+  it('false when the parse terminally failed', () => {
+    const e = entry({ id: 'e', parseError: 'manifest fetch 403' });
+    expect(isManifestLoading(e)).toBe(false);
+  });
+
+  it('false for a confirmed single-bitrate (non-master) playlist', () => {
+    // isMaster === false → the dropdown shows "Single quality", not Loading.
+    const e = entry({ id: 'e', isMaster: false });
+    expect(isManifestLoading(e)).toBe(false);
+  });
+
+  it('false for non-HLS kinds (YouTube/DASH discover variants differently)', () => {
+    expect(isManifestLoading(entry({ id: 'e', kind: 'dash' }))).toBe(false);
+    expect(isManifestLoading(entry({ id: 'e', kind: 'progressive' }))).toBe(false);
+  });
+
+  it('true with an empty variants array (no usable qualities yet)', () => {
+    expect(isManifestLoading(entry({ id: 'e', variants: [] }))).toBe(true);
   });
 });
 

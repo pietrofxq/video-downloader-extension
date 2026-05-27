@@ -9,6 +9,7 @@ import {
   formatAudioTrack,
   formatVariant,
   hasAudioTrackPicker,
+  isManifestLoading,
   pickDefaultAudioTrackId,
   pickDisplayVariantUrl,
   pickDownloadVariantUrl,
@@ -17,6 +18,17 @@ import {
 const $content = document.getElementById('content')!;
 const $gear = document.getElementById('open-options');
 const $reset = document.getElementById('reset-tab');
+const $version = document.getElementById('ext-version');
+
+// Stamp the running extension version into the header (read from the
+// manifest so it stays in sync with package.json/manifest.json bumps).
+if ($version) {
+  try {
+    $version.textContent = `v${chrome.runtime.getManifest().version}`;
+  } catch {
+    // getManifest can't realistically throw in an extension page; ignore.
+  }
+}
 
 $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
 
@@ -506,10 +518,13 @@ function render(state: TabStateMsg | null | undefined): void {
   const orphanHtml = orphans.length > 0 ? renderOrphanSection(orphans) : '';
   if (visible.length === 0 && orphans.length === 0) {
     $content.innerHTML = renderEmpty();
+    armLoadingWatchdog(visible);
     return;
   }
   $content.innerHTML = orphanHtml + visible.map(renderRow).join('');
   restoreFormState(snap);
+  // Re-drive any entry still stuck on "Loading…" (see armLoadingWatchdog).
+  armLoadingWatchdog(visible);
 }
 
 function renderOrphanSection(orphans: DownloadState[]): string {
@@ -794,8 +809,58 @@ const MAX_RECONNECT_ATTEMPTS = 8;
 let port: chrome.runtime.Port | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let retryCount = 0;
+let currentTabId: number | null = null;
+
+// ---------- "Loading…" watchdog ----------
+//
+// An HLS entry shows "Loading…" until the SW parses its manifest. The SW
+// kicks off that parse eagerly on detection, but the MV3 worker can be
+// torn down before the floating parse finishes — and if the popup is
+// already open, nothing re-drives it (the SUBSCRIBE-time retry only runs
+// on connect). So while any visible entry is stuck on "Loading…", nudge
+// the SW to re-parse, spaced out and capped so a genuinely slow/broken
+// manifest doesn't get hammered. ensureParsed is in-flight-guarded SW-
+// side, so a nudge during a healthy in-flight parse is a no-op.
+const WATCHDOG_DELAY_MS = 3000;
+const MAX_PARSE_NUDGES = 6;
+let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+const parseNudges = new Map<string, number>(); // mediaId -> nudge count
+
+function armLoadingWatchdog(entries: MediaEntry[]): void {
+  const stuck = entries.filter(isManifestLoading);
+  const stuckWithBudget = stuck.filter((e) => (parseNudges.get(e.id) ?? 0) < MAX_PARSE_NUDGES);
+  if (stuckWithBudget.length === 0) {
+    // Nothing left to nudge — drop any pending timer.
+    if (watchdogTimer) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+    return;
+  }
+  if (watchdogTimer) return; // already scheduled
+  watchdogTimer = setTimeout(() => {
+    watchdogTimer = null;
+    const stillStuck = (lastTabState.entries ?? []).filter(isManifestLoading);
+    let nudge = false;
+    for (const e of stillStuck) {
+      const n = parseNudges.get(e.id) ?? 0;
+      if (n < MAX_PARSE_NUDGES) {
+        parseNudges.set(e.id, n + 1);
+        nudge = true;
+      }
+    }
+    if (nudge && currentTabId != null) {
+      chrome.runtime
+        .sendMessage({ type: MSG.ENSURE_PARSED, payload: { tabId: currentTabId } })
+        .catch(() => {
+          // SW asleep / transient — the next render re-arms the watchdog.
+        });
+    }
+  }, WATCHDOG_DELAY_MS);
+}
 
 function connect(tabId: number): void {
+  currentTabId = tabId;
   try {
     port = chrome.runtime.connect({ name: 'popup' });
   } catch {
