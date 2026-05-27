@@ -511,9 +511,21 @@ Tactical fix (not a planned milestone) that took the v0.11.7 version number when
 
 ---
 
-## v0.11.8 - UI, settings & quality-of-life
+## v0.11.8 - HLS MP4 duration-doubling fix (QuickTime) — shipped
 
-Goal: the download pipeline is solid across HLS / YouTube AVC+AV1 / progressive, so the next focus is making the extension pleasant to use rather than adding more codecs or sites. This pulls the settings/options work forward from v1.0 (which becomes the release-gate milestone) and folds in popup polish. VP9 and broader site/codec support are deferred and picked up as needed (see v0.11.9, v0.12, v1.4).
+Tactical fix (not a planned milestone) that took the v0.11.8 version number when it shipped. HLS downloads (Hotmart + default adapter) produced a fragmented MP4 whose reported duration was **doubled in QuickTime / macOS only** — the file played correctly to its real end, but the scrubber showed 2× the length. VLC / Chrome / ffmpeg were unaffected. Root cause + fix in the mux.js remux post-patcher (`extension/offscreen/remux.ts`):
+
+- [x] **Populated base-movie header durations with no `mehd`.** The patcher wrote the real total into `mvhd` / `tkhd` / `mdhd` (to defeat mux.js's `0xFFFFFFFF` sentinel) but emitted no `mehd`. QuickTime computes a fragmented file's duration as `mvhd.duration + Σ(fragment durations)`, so a populated base movie + fragments covering the same span = 2×. (Confirmed empirically: keeping the headers + adding `mehd` still doubled in QuickTime; zeroing the headers fixed it.)
+- [x] **Fix = zero the headers + declare the total in `mehd`.** `injectMehdPlaceholder` inserts a 16-byte v0 `mehd` as the first child of `mvex` while the init segment is still ahead of the fragments (so no moof/mdat offsets shift); `patchHeaderDurations` now zeroes `mvhd` / `tkhd` / `mdhd` and writes the real total into the `mehd.fragment_duration`. This is the layout FFmpeg's `empty_moov` output uses — correct in QuickTime, VLC, Chrome, and ffmpeg.
+- [x] Regression test in `remux.test.ts` (zeroed headers + non-zero `mehd`); AGENTS.md §8a #6 updated. ffprobe-validated + confirmed in QuickTime + VLC on a real download.
+
+**Ship criterion:** ✅ HLS MP4 downloads report the correct duration in QuickTime as well as VLC / Chrome / ffmpeg (verified 2026-05-27).
+
+---
+
+## v0.11.9 - UI, settings & quality-of-life
+
+Goal: the download pipeline is solid across HLS / YouTube AVC+AV1 / progressive, so the next focus is making the extension pleasant to use rather than adding more codecs or sites. This pulls the settings/options work forward from v1.0 (which becomes the release-gate milestone) and folds in popup polish. VP9 and broader site/codec support are deferred and picked up as needed (see v0.11.10, v0.12, v1.4).
 
 - [ ] **Options page (`options.html`)** with settings persisted in `chrome.storage.local`:
   - Default quality (highest / 1080p / 720p / 480p / ask each time).
@@ -536,9 +548,9 @@ Goal: the download pipeline is solid across HLS / YouTube AVC+AV1 / progressive,
 
 ---
 
-## v0.11.9 - YouTube 4K via VP9 (WebM container muxer) — deferred (as-needed)
+## v0.11.10 - YouTube 4K via VP9 (WebM container muxer) — deferred (as-needed)
 
-> **Deferred.** AVC + AV1 already cover HD + 4K for the vast majority of YouTube videos. VP9-only 4K is rare enough that this is picked up only when a user actually hits a video with no AVC/AV1 fallback. Sits below the v0.11.8 quality-of-life work in priority.
+> **Deferred.** AVC + AV1 already cover HD + 4K for the vast majority of YouTube videos. VP9-only 4K is rare enough that this is picked up only when a user actually hits a video with no AVC/AV1 fallback. Sits below the v0.11.9 quality-of-life work in priority.
 
 Goal: lift the codec gate's remaining hole. YouTube serves some 4K content as VP9-only (no AV1 fallback) — those videos surface in the picker today as "No supported variants" or hide their highest qualities behind the `isVariantDownloadable` filter. This milestone lights up the VP9 path by adding a WebM container muxer.
 
@@ -593,7 +605,7 @@ Goal: make the HLS claim accurate before calling the extension broadly usable. P
 
 Goal: shippable to friends — covers common HLS VOD end-to-end plus YouTube and Hotmart.
 
-> The options page, per-adapter / per-origin settings, first-run disclaimer, and popup polish moved earlier to **v0.11.8**. v1.0 is now the release gate: final assets, security review, changelog, and the cross-site smoke matrix.
+> The options page, per-adapter / per-origin settings, first-run disclaimer, and popup polish moved earlier to **v0.11.9**. v1.0 is now the release gate: final assets, security review, changelog, and the cross-site smoke matrix.
 
 - [ ] Final icon set + active-state badge styling.
 - [ ] Security/privacy review:
