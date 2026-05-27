@@ -40,8 +40,14 @@ const HLS_TIMESCALE = 90_000;
  * mux.js leaves the mvhd/tkhd/mdhd duration fields at the 0xFFFFFFFF
  * sentinel that fragmented MP4 uses for "compute from samples". Some
  * players (VLC) take the sentinel literally → ~13 hours of fake
- * duration and unusable seeking. We patch the moov afterward with the
- * real total duration so progress + seek work everywhere.
+ * duration and unusable seeking. We patch the moov afterward: the
+ * base-movie header durations are zeroed (it carries no samples) and
+ * the real total is declared in an `mehd` box we inject into `mvex`
+ * (see injectMehdPlaceholder). This is the layout FFmpeg's empty_moov
+ * fragmented output uses, and it reads correctly across VLC, Chrome,
+ * ffmpeg AND QuickTime — the latter otherwise computes a fragmented
+ * file's duration as mvhd.duration + Σ(fragment durations), so a
+ * populated mvhd doubles the reported duration.
  *
  * Output is fragmented MP4 (fMP4) — H.264 + AAC stream copy.
  */
@@ -246,7 +252,9 @@ function pumpTransmuxer(
     transmuxer.on('data', (segment) => {
       try {
         if (!initSegment && segment.initSegment) {
-          initSegment = segment.initSegment;
+          // Inject the mehd slot here, while the init is still ahead of every
+          // fragment — growing it later would shift all moof/mdat offsets.
+          initSegment = injectMehdPlaceholder(segment.initSegment);
         }
         if (segment.data) {
           const normalized = normalizeMuxjsFragment(segment.data, nextFragmentSequence);
@@ -551,9 +559,16 @@ function makeBox(type: string, ...payloads: Uint8Array[]): Uint8Array {
 //
 //   2. mvhd / tkhd / mdhd duration fields are 0xFFFFFFFF (the fragmented-
 //      MP4 "unknown" sentinel). VLC reads that literally as ~13 hours.
-//      We replace them with the per-track totals computed in step 1.
+//      We ZERO them (the base movie carries no samples) and declare the
+//      real total — the longest track's content duration from step 1 — in
+//      an `mehd` box injected into `mvex` (injectMehdPlaceholder fills the
+//      slot; patchHeaderDurations writes the value). Zeroing the headers is
+//      what stops QuickTime from doubling the duration (it adds the moov
+//      duration to the fragment durations); mehd keeps every other player's
+//      seek bar correct.
 //
-// All boxes mux.js produces are version 0 (32-bit fields).
+// All boxes mux.js produces are version 0 (32-bit fields); the injected
+// mehd is v0 too.
 
 function collectTrackTimescales(buf: Uint8Array): Map<number, number> {
   const out = new Map<number, number>(); // trackId -> timescale
@@ -811,35 +826,28 @@ function patchHeaderDurations(
   }
   const mvhdDur = Math.round(movieDurSecs * movieTimescale);
 
-  // Patch mvhd duration + walk each trak to patch tkhd and mdhd.
+  // Zero the base-movie header durations (mvhd/tkhd/mdhd) and declare the
+  // real total in the mehd box injected into mvex. See the §moov & moof
+  // patchers note for why QuickTime needs this exact layout.
   walkBoxes(buf, moovStart, moovEnd, (name, bodyStart, bodyEnd) => {
     if (name === 'mvhd') {
-      writeMvhdOrMdhdDuration(buf, bodyStart, mvhdDur);
+      writeMvhdOrMdhdDuration(buf, bodyStart, 0);
     } else if (name === 'trak') {
-      patchTrakBox(buf, bodyStart, bodyEnd, trackTotals, trackTimescales, mvhdDur);
+      patchTrakBox(buf, bodyStart, bodyEnd);
+    } else if (name === 'mvex') {
+      writeMehdDuration(buf, bodyStart, bodyEnd, mvhdDur);
     }
   });
 }
 
-function patchTrakBox(
-  buf: Uint8Array,
-  start: number,
-  end: number,
-  trackTotals: Map<number, number>,
-  trackTimescales: Map<number, number>,
-  mvhdDur: number,
-): void {
-  let trackId = -1;
+function patchTrakBox(buf: Uint8Array, start: number, end: number): void {
   walkBoxes(buf, start, end, (name, bodyStart, bodyEnd) => {
     if (name === 'tkhd') {
-      const version = buf[bodyStart];
-      trackId = version === 0 ? readU32(buf, bodyStart + 12) : readU32(buf, bodyStart + 20);
-      writeTkhdDuration(buf, bodyStart, mvhdDur);
+      writeTkhdDuration(buf, bodyStart, 0);
     } else if (name === 'mdia') {
       walkBoxes(buf, bodyStart, bodyEnd, (subName, subStart) => {
-        if (subName === 'mdhd' && trackId >= 0) {
-          const totalTicks = trackTotals.get(trackId) ?? 0;
-          writeMvhdOrMdhdDuration(buf, subStart, totalTicks);
+        if (subName === 'mdhd') {
+          writeMvhdOrMdhdDuration(buf, subStart, 0);
         }
       });
     }
@@ -866,6 +874,25 @@ function writeTkhdDuration(buf: Uint8Array, bodyStart: number, value: number): v
   } else {
     writeU64(buf, bodyStart + 28, value);
   }
+}
+
+// mehd layout: version(1)+flags(3) + fragment_duration(4 or 8). v0 → at +4.
+// Walks the mvex body for the mehd box injected by injectMehdPlaceholder.
+function writeMehdDuration(
+  buf: Uint8Array,
+  mvexStart: number,
+  mvexEnd: number,
+  value: number,
+): void {
+  walkBoxes(buf, mvexStart, mvexEnd, (name, bodyStart) => {
+    if (name !== 'mehd') return;
+    const version = buf[bodyStart];
+    if (version === 0) {
+      writeU32(buf, bodyStart + 4, value);
+    } else {
+      writeU64(buf, bodyStart + 4, value);
+    }
+  });
 }
 
 /**
@@ -926,6 +953,71 @@ function maybePromoteTrun(buf: Uint8Array, bodyStart: number, bodyEnd: number): 
   if (negFound) {
     buf[bodyStart] = 1;
   }
+}
+
+/**
+ * Insert an empty `mehd` (movie-extends-header) box as the first child of
+ * `mvex` in a fragmented-MP4 init segment, returning a new buffer 16 bytes
+ * larger. fragment_duration is left at 0 here; patchHeaderDurations fills it
+ * once the real total is known.
+ *
+ * This must run while the init is still ahead of the fragments — growing it
+ * shifts every downstream moof/mdat by 16 bytes, which is harmless only
+ * because the fragments use moof-relative addressing (default-base-is-moof +
+ * moof-relative trun data_offset) and the moov sample tables are empty.
+ *
+ * Idempotent and defensive: returns the buffer unchanged if there's no
+ * moov/mvex or an mehd already exists.
+ */
+function injectMehdPlaceholder(init: Uint8Array): Uint8Array {
+  // Top-level moov.
+  let moovStart = -1;
+  let moovSize = -1;
+  let p = 0;
+  while (p + 8 <= init.length) {
+    const size = readU32(init, p);
+    if (size < 8 || size > init.length - p) break;
+    if (readName(init, p + 4) === 'moov') {
+      moovStart = p;
+      moovSize = size;
+      break;
+    }
+    p += size;
+  }
+  if (moovStart < 0) return init;
+
+  // mvex within moov.
+  let mvexStart = -1;
+  let mvexSize = -1;
+  walkBoxes(init, moovStart + 8, moovStart + moovSize, (name, bodyStart) => {
+    if (name === 'mvex') {
+      mvexStart = bodyStart - 8;
+      mvexSize = readU32(init, mvexStart);
+    }
+  });
+  if (mvexStart < 0) return init;
+
+  let hasMehd = false;
+  walkBoxes(init, mvexStart + 8, mvexStart + mvexSize, (name) => {
+    if (name === 'mehd') hasMehd = true;
+  });
+  if (hasMehd) return init;
+
+  const MEHD_SIZE = 16; // size(4)+type(4)+version/flags(4)+fragment_duration(4)
+  const insertAt = mvexStart + 8; // first child of mvex
+  const out = new Uint8Array(init.length + MEHD_SIZE);
+  out.set(init.subarray(0, insertAt), 0);
+  writeU32(out, insertAt, MEHD_SIZE);
+  out[insertAt + 4] = 0x6d; // 'm'
+  out[insertAt + 5] = 0x65; // 'e'
+  out[insertAt + 6] = 0x68; // 'h'
+  out[insertAt + 7] = 0x64; // 'd'
+  // version/flags (insertAt+8..11) + fragment_duration (insertAt+12..15) stay 0.
+  out.set(init.subarray(insertAt), insertAt + MEHD_SIZE);
+  // Grow the enclosing mvex and moov by the inserted box.
+  writeU32(out, mvexStart, mvexSize + MEHD_SIZE);
+  writeU32(out, moovStart, moovSize + MEHD_SIZE);
+  return out;
 }
 
 type BoxVisitor = (name: string, bodyStart: number, bodyEnd: number) => void;

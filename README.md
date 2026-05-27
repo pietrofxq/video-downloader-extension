@@ -2,7 +2,7 @@
 
 A Chrome extension (Manifest V3) that detects and downloads streaming video from any website — HLS (`.m3u8`), DASH (`.mpd`), and progressive (`.mp4` / `.webm`) — through a generic media-detection engine plus a pluggable **site-adapter** layer that adds richer metadata, auth handling, and naming for specific sites. It works on most sites out of the box; **YouTube and Hotmart Club have dedicated adapters** today, and support for more sites is added as needed.
 
-> **Current coverage** (v0.11.7):
+> **Current coverage** (v0.11.8):
 > - **HLS** — variant playlists whose segments carry audio and video muxed into MPEG-TS (the common case, including Hotmart). Masters with separate alternate-audio renditions (`#EXT-X-MEDIA TYPE=AUDIO`) are detected but only the video rendition is downloaded — audio-rendition muxing is on the v0.12 roadmap.
 > - **YouTube** — adaptive HD (1080p) and 4K (2160p) for **AVC** and **AV1** codecs. The full pipeline is wired: InnerTube scrape (WEB_CREATOR / MWEB / TVHTML5) for catalog, SAPISIDHASH + visitorData auth, signatureCipher + n-param decipher, OPFS-staged chunked Range fetches, and an OPFS-streaming two-stream combiner that de-fragments video + audio into one plain MP4 (so seeking + A/V sync are correct in VLC). Public non-DRM watch pages only; rentals, age-gated, region-locked, and live content are out of scope. **VP9** variants surface in the picker but stay rejected — they're in fragmented WebM, which needs a different container muxer (deferred, picked up as needed). Multi-dub videos get an audio-track picker; default pairs the original track.
 

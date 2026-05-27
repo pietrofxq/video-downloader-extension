@@ -43,7 +43,65 @@ describe('remuxTsToMp4', () => {
       }
     }
   });
+
+  // QuickTime/AVFoundation computes a fragmented file's duration as
+  // mvhd.duration + Σ(fragment durations), so a populated mvhd doubles the
+  // reported length. The fix zeroes the base-movie header durations and
+  // declares the real total in an mehd box injected into mvex.
+  it('zeroes moov header durations and declares the total in mehd', async () => {
+    const bytes = new Uint8Array(readFileSync(TS_FIXTURE));
+    const out = await remuxTsToMp4(
+      [
+        { bytes, duration: 6 },
+        { bytes, duration: 6 },
+      ],
+      () => {},
+    );
+
+    const moov = topLevelBoxes(out).find((box) => box.type === 'moov');
+    expect(moov).toBeDefined();
+
+    // mvhd v0 duration is at body + 16; must be zeroed.
+    const mvhd = findBox(out, moov!, 'mvhd');
+    expect(mvhd).toBeDefined();
+    expect(readU32(out, mvhd!.start + 8 + 16)).toBe(0);
+
+    // Every tkhd (v0 duration @ body+20) and mdhd (v0 duration @ body+16)
+    // is zeroed too.
+    const traks = childBoxes(out, moov!).filter((b) => b.type === 'trak');
+    expect(traks.length).toBeGreaterThanOrEqual(1);
+    for (const trak of traks) {
+      const tkhd = findBox(out, trak, 'tkhd');
+      expect(tkhd).toBeDefined();
+      expect(readU32(out, tkhd!.start + 8 + 20)).toBe(0);
+      const mdia = findBox(out, trak, 'mdia');
+      const mdhd = findBox(out, mdia!, 'mdhd');
+      expect(mdhd).toBeDefined();
+      expect(readU32(out, mdhd!.start + 8 + 16)).toBe(0);
+    }
+
+    // mvex carries a v0 mehd whose fragment_duration (@ body+4) is the real
+    // movie total — non-zero.
+    const mvex = findBox(out, moov!, 'mvex');
+    expect(mvex).toBeDefined();
+    const mehd = findBox(out, mvex!, 'mehd');
+    expect(mehd).toBeDefined();
+    expect(out[mehd!.start + 8]).toBe(0); // version 0
+    expect(readU32(out, mehd!.start + 8 + 4)).toBeGreaterThan(0);
+  });
 });
+
+function childBoxes(buf: Uint8Array, parent: Box): Box[] {
+  const boxes: Box[] = [];
+  walkBoxes(buf, parent.start + 8, parent.end, (type, start, end) => {
+    boxes.push({ type, start, end, size: end - start });
+  });
+  return boxes;
+}
+
+function findBox(buf: Uint8Array, parent: Box, type: string): Box | undefined {
+  return childBoxes(buf, parent).find((b) => b.type === type);
+}
 
 interface Box {
   type: string;
