@@ -2,7 +2,7 @@
 
 A Chrome extension (Manifest V3) that detects and downloads streaming video from any website — HLS (`.m3u8`), DASH (`.mpd`), and progressive (`.mp4` / `.webm`) — through a generic media-detection engine plus a pluggable **site-adapter** layer that adds richer metadata, auth handling, and naming for specific sites. It works on most sites out of the box; **YouTube and Hotmart Club have dedicated adapters** today, and support for more sites is added as needed.
 
-> **Current coverage** (v0.11.8):
+> **Current coverage** (v0.11.9):
 > - **HLS** — variant playlists whose segments carry audio and video muxed into MPEG-TS (the common case, including Hotmart). Masters with separate alternate-audio renditions (`#EXT-X-MEDIA TYPE=AUDIO`) are detected but only the video rendition is downloaded — audio-rendition muxing is on the v0.12 roadmap.
 > - **YouTube** — adaptive HD (1080p) and 4K (2160p) for **AVC** and **AV1** codecs. The full pipeline is wired: InnerTube scrape (WEB_CREATOR / MWEB / TVHTML5) for catalog, SAPISIDHASH + visitorData auth, signatureCipher + n-param decipher, OPFS-staged chunked Range fetches, and an OPFS-streaming two-stream combiner that de-fragments video + audio into one plain MP4 (so seeking + A/V sync are correct in VLC). Public non-DRM watch pages only; rentals, age-gated, region-locked, and live content are out of scope. **VP9** variants surface in the picker but stay rejected — they're in fragmented WebM, which needs a different container muxer (deferred, picked up as needed). Multi-dub videos get an audio-track picker; default pairs the original track.
 
@@ -94,12 +94,29 @@ hotmart-downloader/
 
 > The repo root is still named `hotmart-downloader/` for historical reasons; renaming is parked for post-v1.3.
 
-## Installation (development)
+## Install
+
+The extension isn't on the Chrome Web Store — you install it as an **unpacked extension** from a prebuilt zip. It works in Chrome, Edge, Brave, and other Chromium-based browsers.
+
+1. **Download** the latest `video-downloader-vX.Y.Z.zip` from the [**Releases** page](https://github.com/pietrofxq/video-downloader-extension/releases/latest).
+2. **Unzip** it. You'll get a `video-downloader/` folder that contains `manifest.json`.
+3. Open `chrome://extensions` in your browser (or `edge://extensions` / `brave://extensions`).
+4. Turn on **Developer mode** (toggle in the top-right corner).
+5. Click **Load unpacked** and select the unzipped `video-downloader/` folder.
+6. The Video Downloader icon appears in your toolbar — pin it for easy access.
+
+> **Heads-up on permissions:** the browser will warn that the extension can *"read and change all your data on all websites."* That breadth is required — the engine has to watch network requests and fetch video segments on **any** site you download from. It makes **no other network calls**: no analytics, no telemetry, no remote servers ([why](AGENTS.md#5-key-architectural-decisions)). All processing happens locally in your browser.
+
+**To update:** download the newer zip, unzip it (over the old folder or into a new one), then click the **Reload** ↻ button on the extension's card in `chrome://extensions`.
+
+## Build from source (for developers)
 
 1. Clone this repository.
-2. Run `npm install` and `npm run build` (once the build pipeline is in place — see [ROADMAP.md](ROADMAP.md)).
+2. Run `npm install`, then `npm run build` (or `npm run build:prod` for a minified build).
 3. Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the build output (`dist/`).
 4. Open any page with a video and press **Play** for ~2 seconds, then click the extension icon.
+
+Release zips are just the built `dist/` folder, renamed to `video-downloader/` and zipped. See [ROADMAP.md](ROADMAP.md) for milestone status.
 
 ## Usage
 
