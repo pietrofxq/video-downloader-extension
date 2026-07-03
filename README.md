@@ -116,7 +116,7 @@ The extension isn't on the Chrome Web Store — you install it as an **unpacked 
 3. Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the build output (`dist/`).
 4. Open any page with a video and press **Play** for ~2 seconds, then click the extension icon.
 
-Release zips are just the built `dist/` folder, renamed to `video-downloader/` and zipped. See [ROADMAP.md](ROADMAP.md) for milestone status.
+Releases are automated: pushing a `vX.Y.Z` tag triggers the [release workflow](.github/workflows/release.yml), which runs `npm run check`, does a production build, and publishes a GitHub Release with the `video-downloader/` zip attached. See [ROADMAP.md](ROADMAP.md) for milestone status.
 
 ## Usage
 

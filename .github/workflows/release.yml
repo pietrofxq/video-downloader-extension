@@ -1,0 +1,93 @@
+name: Release
+
+# Build the extension and publish the prebuilt zip whenever a version tag is
+# pushed:
+#
+#   git tag v0.12.0 && git push origin v0.12.0
+#
+# Manual runs (Actions ▸ Release ▸ Run workflow) build and upload the zip as a
+# run artifact for inspection, but do NOT publish a GitHub Release — there is no
+# version tag to attach one to.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # required to create the Release and upload its asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      # The repo's own definition of "shippable" (AGENTS.md §12): format, lint,
+      # typecheck, tests, and a build must all pass before we cut a release.
+      - name: Check
+        run: npm run check
+
+      - name: Production build
+        run: npm run build:prod
+
+      - name: Package
+        id: package
+        run: |
+          # Tag push -> ref_name is the tag (e.g. v0.11.9). Manual run -> derive
+          # the version from package.json so the artifact still gets a real name.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="v$(node -p "require('./package.json').version")"
+          fi
+          ZIP="video-downloader-${VERSION}.zip"
+
+          # Stage dist/ under one top-level video-downloader/ folder so unzipping
+          # yields a folder to point Chrome's "Load unpacked" at.
+          rm -rf staging && mkdir -p staging/video-downloader
+          cp -r dist/. staging/video-downloader/
+          (cd staging && zip -r -q "../${ZIP}" video-downloader)
+          ls -lh "${ZIP}"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "zip=${ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.zip }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          sed -e "s|__ZIP__|${ZIP}|g" -e "s|__REPO__|${GITHUB_REPOSITORY}|g" \
+            .github/release-notes-template.md > notes.md
+
+          # Mark tags containing a hyphen (e.g. v1.0.0-beta.1) as pre-releases.
+          PRERELEASE=""
+          [[ "${VERSION}" == *-* ]] && PRERELEASE="--prerelease"
+
+          # Idempotent: refresh the asset if the release already exists (a re-run
+          # of the same tag), otherwise create the release.
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            gh release upload "${VERSION}" "${ZIP}" --clobber
+          else
+            gh release create "${VERSION}" "${ZIP}" \
+              --title "${VERSION}" \
+              --notes-file notes.md \
+              ${PRERELEASE}
+          fi
