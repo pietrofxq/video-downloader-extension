@@ -94,9 +94,9 @@ export function pickDownloadVariantUrl(
   if (typeof chosenSelectValue === 'string' && /^https?:/.test(chosenSelectValue)) {
     return chosenSelectValue;
   }
-  // For a single-bitrate (media playlist) entry, the entry's own URL
-  // is the playable one — no quality picker exists in that case.
-  if (entry.isMaster === false) return entry.url;
+  // Single-URL entries — a confirmed media playlist or a progressive
+  // file (no manifest at all) — download the entry's own URL.
+  if (entry.isMaster === false || entry.kind === 'progressive') return entry.url;
   return null;
 }
 
@@ -234,8 +234,13 @@ export function pickPreferredVariantUrl(
  *  - `parse-error`  — manifest fetch/parse failed (carries the reason).
  *  - `variants`     — one or more downloadable qualities (carries them).
  *  - `no-supported` — has variants but none are muxable (VP9/AV1-only, …).
- *  - `single`       — a confirmed single-bitrate (non-master) playlist.
- *  - `loading`      — still waiting on the manifest parse.
+ *  - `single`       — a confirmed single-bitrate (non-master) playlist,
+ *                     or a progressive file (single URL, no manifest).
+ *  - `loading`      — still waiting on the manifest parse. Only HLS
+ *                     entries can leave this state (ensureParsed is
+ *                     HLS-scoped), so every other kind must map to a
+ *                     terminal state here or the row sticks on
+ *                     "Loading…" with a disabled button forever.
  */
 export type QualityPickerState =
   | { kind: 'parse-error'; reason: string }
@@ -251,6 +256,11 @@ export function qualityPickerState(entry: MediaEntry): QualityPickerState {
     return variants.length === 0 ? { kind: 'no-supported' } : { kind: 'variants', variants };
   }
   if (entry.isMaster === false) return { kind: 'single' };
+  // Progressive = one direct media file; nothing to parse, always ready.
+  if (entry.kind === 'progressive') return { kind: 'single' };
+  // A resolved entry (variants array present) that still has no variant
+  // to offer will never resolve further — 'loading' would stick forever.
+  if (Array.isArray(entry.variants)) return { kind: 'no-supported' };
   return { kind: 'loading' };
 }
 
@@ -259,7 +269,8 @@ export function qualityPickerState(entry: MediaEntry): QualityPickerState {
  * quality dropdown is showing "Loading…"? The popup's watchdog uses this
  * to decide whether to nudge the SW to (re-)parse; the SW can be torn
  * down mid-parse and leave the dropdown stuck otherwise. Scoped to HLS:
- * other kinds arrive with variants already populated.
+ * progressive entries render as 'single' without parsing, and DASH
+ * entries without variants are hidden by filterTopLevel.
  */
 export function isManifestLoading(entry: MediaEntry): boolean {
   return entry.kind === 'hls' && qualityPickerState(entry).kind === 'loading';

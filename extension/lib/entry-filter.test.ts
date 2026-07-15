@@ -11,6 +11,8 @@ import type { MediaEntry } from './types.ts';
 interface EntryStub {
   id: string;
   url: string;
+  kind?: string;
+  drm?: boolean;
   variants?: { url: string }[];
   alternates?: { url: string }[];
 }
@@ -71,5 +73,37 @@ describe('filterTopLevel', () => {
     expect(filterTopLevel([])).toEqual([]);
     expect(filterTopLevel(null as unknown as MediaEntry[])).toEqual([]);
     expect(filterTopLevel(undefined as unknown as MediaEntry[])).toEqual([]);
+  });
+
+  it('hides passive DASH captures (no variants) — nothing can parse or download them', () => {
+    // A page exposing both .m3u8 and .mpd for the same video otherwise
+    // produces a second row permanently stuck on "Loading…".
+    const entries = asEntries([
+      { id: 'hls', url: 'https://cdn.example.com/master.m3u8', kind: 'hls' },
+      { id: 'mpd', url: 'https://cdn.example.com/manifest.mpd', kind: 'dash' },
+      { id: 'mpd2', url: 'https://cdn.example.com/other.mpd', kind: 'dash', variants: [] },
+    ]);
+    expect(filterTopLevel(entries).map((e) => e.id)).toEqual(['hls']);
+  });
+
+  it('keeps adapter-supplied DASH entries (non-empty variants) and DRM-flagged ones', () => {
+    const entries = asEntries([
+      {
+        id: 'yt',
+        url: 'youtube:abc123',
+        kind: 'dash',
+        variants: [{ url: 'https://r1.googlevideo.com/videoplayback?itag=137' }],
+      },
+      { id: 'drm', url: 'https://cdn.example.com/protected.mpd', kind: 'dash', drm: true },
+    ]);
+    expect(filterTopLevel(entries).map((e) => e.id)).toEqual(['yt', 'drm']);
+  });
+
+  it('keeps progressive and unparsed HLS entries', () => {
+    const entries = asEntries([
+      { id: 'mp4', url: 'https://cdn.example.com/clip.mp4', kind: 'progressive' },
+      { id: 'hls', url: 'https://cdn.example.com/master.m3u8', kind: 'hls' },
+    ]);
+    expect(filterTopLevel(entries).map((e) => e.id)).toEqual(['mp4', 'hls']);
   });
 });

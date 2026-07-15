@@ -362,14 +362,13 @@ function renderRow(entry: MediaEntry): string {
   const isDrm = entry.drm === true;
   const downloadState = downloadsByMediaId.get(entry.id) || null;
 
-  // Master playlists need their variant list parsed before we can pick a
-  // concrete media URL. Until then the select shows "Loading…" — clicking
-  // would fall back to entry.url (the master) and the downloader rejects
-  // it with UnsupportedFormatError. Disable the button until a real
-  // variant exists or we've confirmed this is a single-bitrate playlist.
-  const isReady =
-    !!entry.parseError === false &&
-    ((Array.isArray(entry.variants) && entry.variants.length > 0) || entry.isMaster === false);
+  // Readiness comes from the quality picker's state machine so the
+  // button and the dropdown can never disagree: 'variants' / 'single'
+  // are downloadable; 'loading' / 'parse-error' / 'no-supported' keep
+  // the button disabled (clicking would hand the downloader a master
+  // URL it rejects with UnsupportedFormatError, or nothing at all).
+  const pickerState = qualityPickerState(entry);
+  const isReady = pickerState.kind === 'variants' || pickerState.kind === 'single';
   let action: string;
   if (isDrm) {
     action =
@@ -379,8 +378,13 @@ function renderRow(entry: MediaEntry): string {
     // status in place of the Download button.
     action = renderActionForDownload(downloadState);
   } else if (!isReady) {
-    action =
-      '<button type="button" class="download" disabled title="Waiting for the manifest to load.">Download &#x2193;</button>';
+    const reason =
+      pickerState.kind === 'parse-error'
+        ? 'Couldn&#x2019;t read the video manifest.'
+        : pickerState.kind === 'no-supported'
+          ? 'No downloadable quality available.'
+          : 'Waiting for the manifest to load.';
+    action = `<button type="button" class="download" disabled title="${reason}">Download &#x2193;</button>`;
   } else {
     action = '<button type="button" class="download">Download &#x2193;</button>';
   }

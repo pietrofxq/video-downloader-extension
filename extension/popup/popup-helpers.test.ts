@@ -363,6 +363,18 @@ describe('pickDownloadVariantUrl', () => {
     // actual playable URL rather than the sentinel.
     expect(pickDownloadVariantUrl(mediaEntry, 'placeholder-not-a-url')).toBe(mediaEntry.url);
   });
+
+  it('falls back to entry.url for progressive entries (no manifest, no isMaster)', () => {
+    // Passive .mp4/.webm captures never get isMaster set — they have no
+    // manifest to parse. Their own URL is the downloadable file.
+    const prog = entry({
+      id: 'e3',
+      kind: 'progressive',
+      url: 'https://cdn.example.com/media/video.mp4',
+    });
+    expect(pickDownloadVariantUrl(prog, undefined)).toBe(prog.url);
+    expect(pickDownloadVariantUrl(prog, 'single')).toBe(prog.url);
+  });
 });
 
 // ---------- formatVariant ----------
@@ -553,6 +565,25 @@ describe('qualityPickerState', () => {
     expect(qualityPickerState(entry({ id: 'e', isMaster: false })).kind).toBe('single');
   });
 
+  it('single for a progressive entry — a direct file has no manifest to wait on', () => {
+    // Passive .mp4/.webm captures never get variants or isMaster set;
+    // treating them as 'loading' left the row permanently stuck with a
+    // disabled Download button next to the working HLS row for the
+    // same video (the duplicate-row-with-"Loading…" field report).
+    const e = entry({
+      id: 'e',
+      kind: 'progressive',
+      url: 'https://cdn.example.com/media/video.mp4',
+    });
+    expect(qualityPickerState(e).kind).toBe('single');
+  });
+
+  it('no-supported for an empty variants array — it can never resolve further', () => {
+    // ensureParsed early-returns once `variants` is set (even empty),
+    // so 'loading' here would stick forever.
+    expect(qualityPickerState(entry({ id: 'e', variants: [] })).kind).toBe('no-supported');
+  });
+
   it('loading while the manifest is still being parsed', () => {
     expect(qualityPickerState(entry({ id: 'e' })).kind).toBe('loading');
   });
@@ -587,8 +618,10 @@ describe('isManifestLoading', () => {
     expect(isManifestLoading(entry({ id: 'e', kind: 'progressive' }))).toBe(false);
   });
 
-  it('true with an empty variants array (no usable qualities yet)', () => {
-    expect(isManifestLoading(entry({ id: 'e', variants: [] }))).toBe(true);
+  it('false with an empty variants array — terminal, the SW will not re-parse', () => {
+    // ensureParsed skips any entry whose `variants` is already set (even
+    // empty), so nudging can never resolve this; it renders 'no-supported'.
+    expect(isManifestLoading(entry({ id: 'e', variants: [] }))).toBe(false);
   });
 });
 
