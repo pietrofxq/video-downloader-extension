@@ -52,7 +52,7 @@ The player is locked inside a cross-origin iframe behind a signed token, which t
 ## File structure
 
 ```
-hotmart-downloader/
+video-downloader-extension/
 ├── extension/
 │   ├── manifest.json
 │   ├── background/
@@ -92,8 +92,6 @@ hotmart-downloader/
 └── README.md                        # this file
 ```
 
-> The repo root is still named `hotmart-downloader/` for historical reasons; renaming is parked for post-v1.3.
-
 ## Install
 
 The extension isn't on the Chrome Web Store — you install it as an **unpacked extension** from a prebuilt zip. It works in Chrome, Edge, Brave, and other Chromium-based browsers.
@@ -132,7 +130,7 @@ The Hotmart adapter activates automatically on `hotmart.com/*/club/*`. The downl
 
 ## Status
 
-Pre-alpha — see [ROADMAP.md](ROADMAP.md) for the current milestone and remaining work.
+Beta — see [ROADMAP.md](ROADMAP.md) for the current milestone and remaining work.
 
 ## License
 
