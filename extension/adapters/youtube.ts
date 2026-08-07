@@ -244,6 +244,30 @@ function readVisitorDataFromYtInitialData(doc: Document): string | null {
 }
 
 /**
+ * Read `VISITOR_DATA` out of the page's `ytcfg.set({...})` bootstrap
+ * script — the source YouTube's own JS uses.
+ *
+ * This is the reliable location on current watch pages. A v0.12 field
+ * capture showed the value absent from BOTH the player response and
+ * `ytInitialData` while the page carried it in `ytcfg` all along, so
+ * the InnerTube ladder had been running with no visitor fingerprint at
+ * all (`hasVisitorData: false` in the log).
+ *
+ * The content script runs in an isolated world and cannot read
+ * `window.ytcfg`, so the literal is scraped out of the script text —
+ * same approach as the other inline-blob readers here.
+ *
+ * Exported for unit tests.
+ */
+export function readVisitorDataFromYtcfg(doc: Document): string | null {
+  for (const s of doc.querySelectorAll('script')) {
+    const m = /"VISITOR_DATA"\s*:\s*"([^"]+)"/.exec(s.textContent ?? '');
+    if (m?.[1]) return m[1];
+  }
+  return null;
+}
+
+/**
  * Extract ytInitialPlayerResponse from a single inline-script body.
  * YouTube embeds the blob as either `var ytInitialPlayerResponse = {...};`
  * or `window["ytInitialPlayerResponse"] = {...};`. Returns null when the
@@ -356,6 +380,7 @@ function variantFromFormat(f: YtFormat, pairedAudio?: YtFormat): HlsVariant | nu
   const v: HlsVariant = {
     url,
     bandwidth: f.bitrate ?? DEFAULT_BITRATE,
+    ...(typeof f.itag === 'number' ? { itag: f.itag } : {}),
     resolution,
     codecs: mimeCodecs(f.mimeType),
     ...(f.contentLength ? { contentLength: Number(f.contentLength) } : {}),
@@ -630,6 +655,64 @@ function hasAdaptiveStream(streams: DiscoveredStream[]): boolean {
 }
 
 /**
+ * Do two variants describe the same rendition? `itag` is authoritative
+ * when both sides carry it; resolution + codecs is the fallback for
+ * payloads that elided it.
+ */
+function sameRendition(a: HlsVariant, b: HlsVariant): boolean {
+  if (typeof a.itag === 'number' && typeof b.itag === 'number') return a.itag === b.itag;
+  return a.resolution === b.resolution && a.codecs === b.codecs;
+}
+
+/**
+ * Fold the inline (WEB-session) catalog into the InnerTube one,
+ * preferring inline on collisions.
+ *
+ * Field-verified in v0.12: googlevideo serves URLs minted for the
+ * page's own WEB session with no poToken (the n-transform alone is
+ * enough) and refuses the ones our InnerTube calls return. Under SABR
+ * the inline response carries no adaptive URLs, but its progressive
+ * format IS fetchable — so replacing the inline catalog wholesale with
+ * InnerTube's, which is what we used to do, threw away the only
+ * working URL on the page and left the video entirely undownloadable.
+ *
+ * Inline wins collisions precisely because it is the fetchable side.
+ * The InnerTube-only entries (every adaptive quality, including 4K)
+ * are kept — they stay gated until Phase B lands, but they carry the
+ * real format inventory and the popup should keep showing it.
+ *
+ * Exported for unit tests.
+ */
+export function mergeInlineIntoInnerTube(
+  itStreams: DiscoveredStream[],
+  inlineStreams: DiscoveredStream[],
+): DiscoveredStream[] {
+  const inlineVariants = inlineStreams[0]?.variants ?? [];
+  const target = itStreams[0];
+  if (inlineVariants.length === 0 || !target) return itStreams;
+
+  const merged = [...(target.variants ?? [])];
+  let replaced = 0;
+  for (const v of inlineVariants) {
+    const at = merged.findIndex((m) => sameRendition(m, v));
+    if (at >= 0) {
+      merged[at] = v;
+      replaced += 1;
+    } else {
+      merged.push(v);
+    }
+  }
+  merged.sort((a, b) => b.bandwidth - a.bandwidth);
+  log.info('youtube: merged inline WEB variants into the InnerTube catalog', {
+    inlineVariants: inlineVariants.length,
+    replaced,
+    added: inlineVariants.length - replaced,
+    total: merged.length,
+  });
+  return [{ ...target, variants: merged }, ...itStreams.slice(1)];
+}
+
+/**
  * Auth + session context for an InnerTube call. Both fields are
  * optional — when present, they lift the bot-check gates that fire
  * on anonymous requests to non-WEB clients.
@@ -808,7 +891,10 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
   // visitorData usually lives in `ytInitialData`, not the player
   // response — we check both blobs so the value lands either way.
   const visitorData =
-    extractVisitorData(inlinePlayer) ?? readVisitorDataFromYtInitialData(doc) ?? undefined;
+    extractVisitorData(inlinePlayer) ??
+    readVisitorDataFromYtInitialData(doc) ??
+    readVisitorDataFromYtcfg(doc) ??
+    undefined;
   const sapisidhash = (await computeSapisidhash().catch(() => null)) ?? undefined;
   log.info('youtube discoverYouTubeStreams: starting InnerTube ladder', {
     videoId,
@@ -840,7 +926,7 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
   }
   const itStreams = buildStreamsFromPlayerResponse(ladder.player, `innertube:${ladder.clientName}`);
   if (itStreams.length === 0) return inlineStreams;
-  return itStreams;
+  return mergeInlineIntoInnerTube(itStreams, inlineStreams);
 }
 
 /** Winning client's response plus its name, so a URL that later 403s

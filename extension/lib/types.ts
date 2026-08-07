@@ -74,6 +74,13 @@ export interface MediaEntry {
 export interface HlsVariant {
   url: string;
   bandwidth: number;
+  /**
+   * YouTube format id. Identifies the same rendition across two
+   * different discovery paths, which is what lets the adapter prefer a
+   * fetchable URL over a gated one for the same format. Unset for HLS
+   * variants, which have no equivalent concept.
+   */
+  itag?: number;
   /** "1920x1080" or null when not declared. */
   resolution: string | null;
   /** RFC 6381 codec list (`avc1.64...`, `mp4a.40.2`) or null. */

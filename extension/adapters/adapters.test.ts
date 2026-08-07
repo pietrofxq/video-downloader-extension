@@ -7,7 +7,9 @@ import youtube, {
   buildStreamsFromPlayerResponse,
   discoverYouTubeStreams,
   fetchInnerTubePlayer,
+  mergeInlineIntoInnerTube,
   parseYtPlayerResponseFromScript,
+  readVisitorDataFromYtcfg,
 } from './youtube.js';
 import { INNERTUBE_CLIENTS, buildInnerTubePlayerBody } from './youtube-clients.js';
 import { computeSapisidhash, extractVisitorData } from './youtube-auth.js';
@@ -834,6 +836,97 @@ describe('extractVisitorData', () => {
     expect(extractVisitorData({})).toBeNull();
     expect(extractVisitorData(null)).toBeNull();
     expect(extractVisitorData({ responseContext: {} })).toBeNull();
+  });
+});
+
+describe('mergeInlineIntoInnerTube', () => {
+  const stream = (variants: Array<Record<string, unknown>>) =>
+    [{ url: 'youtube:vid', kind: 'dash' as const, variants }] as never;
+
+  it('prefers the inline URL when the same itag exists on both sides', () => {
+    // The whole point: inline is the fetchable side, InnerTube's is gated.
+    const out = mergeInlineIntoInnerTube(
+      stream([
+        { url: 'https://gated/701', bandwidth: 9000, itag: 701, resolution: '3840x2160' },
+        { url: 'https://gated/18', bandwidth: 500, itag: 18, resolution: '640x360' },
+      ]),
+      stream([{ url: 'https://works/18', bandwidth: 500, itag: 18, resolution: '640x360' }]),
+    );
+    const byItag = Object.fromEntries((out[0].variants ?? []).map((v) => [v.itag, v.url]));
+    expect(byItag[18]).toBe('https://works/18');
+    expect(byItag[701]).toBe('https://gated/701');
+  });
+
+  it('keeps the full InnerTube inventory rather than replacing it', () => {
+    const out = mergeInlineIntoInnerTube(
+      stream([
+        { url: 'https://gated/701', bandwidth: 9000, itag: 701 },
+        { url: 'https://gated/18', bandwidth: 500, itag: 18 },
+      ]),
+      stream([{ url: 'https://works/18', bandwidth: 500, itag: 18 }]),
+    );
+    expect(out[0].variants).toHaveLength(2);
+  });
+
+  it('appends an inline-only rendition that InnerTube did not return', () => {
+    const out = mergeInlineIntoInnerTube(
+      stream([{ url: 'https://gated/701', bandwidth: 9000, itag: 701 }]),
+      stream([{ url: 'https://works/18', bandwidth: 500, itag: 18 }]),
+    );
+    expect(out[0].variants).toHaveLength(2);
+    expect((out[0].variants ?? []).some((v) => v.url === 'https://works/18')).toBe(true);
+  });
+
+  it('re-sorts merged variants highest-bandwidth first', () => {
+    const out = mergeInlineIntoInnerTube(
+      stream([{ url: 'https://gated/18', bandwidth: 500, itag: 18 }]),
+      stream([{ url: 'https://works/22', bandwidth: 2000, itag: 22 }]),
+    );
+    expect((out[0].variants ?? []).map((v) => v.bandwidth)).toEqual([2000, 500]);
+  });
+
+  it('falls back to resolution + codecs when itag is absent on both sides', () => {
+    const out = mergeInlineIntoInnerTube(
+      stream([{ url: 'https://gated/a', bandwidth: 500, resolution: '640x360', codecs: 'avc1' }]),
+      stream([{ url: 'https://works/a', bandwidth: 500, resolution: '640x360', codecs: 'avc1' }]),
+    );
+    expect(out[0].variants).toHaveLength(1);
+    expect((out[0].variants ?? [])[0].url).toBe('https://works/a');
+  });
+
+  it('returns the InnerTube catalog untouched when inline has no variants', () => {
+    const it = stream([{ url: 'https://gated/701', bandwidth: 9000, itag: 701 }]);
+    expect(mergeInlineIntoInnerTube(it, [] as never)).toBe(it);
+  });
+});
+
+describe('readVisitorDataFromYtcfg', () => {
+  // Tests run in the `node` environment, so stand in the only surface
+  // the reader actually touches: a list of scripts with text bodies.
+  const docWithScripts = (bodies: string[]): Document =>
+    ({
+      querySelectorAll: () => bodies.map((textContent) => ({ textContent })),
+    }) as unknown as Document;
+
+  it('reads VISITOR_DATA out of the ytcfg bootstrap script', () => {
+    const doc = docWithScripts([
+      'var x = 1;',
+      'ytcfg.set({"INNERTUBE_CLIENT_NAME":"WEB","VISITOR_DATA":"CgtVSVQtVklT","OTHER":1});',
+    ]);
+    expect(readVisitorDataFromYtcfg(doc)).toBe('CgtVSVQtVklT');
+  });
+
+  it('tolerates whitespace around the JSON separator', () => {
+    const doc = docWithScripts(['ytcfg.set({"VISITOR_DATA"  :  "CgtWUw"});']);
+    expect(readVisitorDataFromYtcfg(doc)).toBe('CgtWUw');
+  });
+
+  it('returns null when no script carries the key', () => {
+    expect(readVisitorDataFromYtcfg(docWithScripts(['var a = 2;', '{}']))).toBeNull();
+  });
+
+  it('returns null for an empty document', () => {
+    expect(readVisitorDataFromYtcfg(docWithScripts([]))).toBeNull();
   });
 });
 
