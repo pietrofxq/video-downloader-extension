@@ -616,7 +616,23 @@ So URLs minted for the page's own WEB session are fetchable with **no poToken at
 
 **Fixed along the way:** the InnerTube ladder had been running with `hasVisitorData: false` on every call — the visitor fingerprint was absent from both the player response and `ytInitialData` on current watch pages while `ytcfg` carried it all along. `readVisitorDataFromYtcfg` closes that. Confirmed `hasVisitorData: true` in the field. It did **not** lift the 403 on its own, as expected.
 
-**Phase B — mint a poToken (the actual fix).**
+### RESOLVED — 4K works via ANDROID_VR, no poToken needed
+
+The client ladder was never exhausted; it was mis-tested. Sending the web session's `Authorization: SAPISIDHASH` header to a mobile client produces a bare `400`, which earlier work (AGENTS.md §8 #18) recorded as User-Agent validation and used to write those clients off. It is not the UA. Drop that header, supply `visitorData`, and:
+
+| Client | auth shape | Result |
+|---|---|---|
+| `ANDROID_VR` | SAPISIDHASH sent | `400` |
+| `ANDROID_VR` | anonymous, no visitorData | `LOGIN_REQUIRED` |
+| **`ANDROID_VR`** | **visitorData, no SAPISIDHASH** | **`OK` — 26 adaptive formats, all with URLs, to 2160p** |
+
+And the URLs actually serve: itag 401 (AV1 2160p) and itag 140 (AAC) both returned **HTTP 206 with real `ftypdash` bytes**. They carry no `n` param, so the signature solver is skipped on this path entirely.
+
+itag 401 is AV1-in-MP4 paired with AAC-in-MP4 — exactly what the existing v0.11.5 OPFS-streaming combiner already handles. **No new muxer, no BotGuard, no remote code, no third-party hosts, no new permissions.**
+
+Note the dependency: this only works because of the `visitorData` fix above. Without it ANDROID_VR is refused, which is why the ladder has to skip a `requiresVisitorData` client rather than burn a request on it.
+
+**Phase B — mint a poToken (superseded; kept as a fallback position).**
 
 The extension has an advantage yt-dlp doesn't: it already runs inside a real Chrome on a real youtube.com page, which is exactly the environment BotGuard attests. Evaluate in this order and stop at the first that works:
 

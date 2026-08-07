@@ -785,10 +785,13 @@ export async function fetchInnerTubePlayer(
     'X-YouTube-Client-Name': client.context.clientName ?? '',
     'X-YouTube-Client-Version': client.context.clientVersion ?? '',
   };
-  if (auth.sapisidhash) {
+  if (auth.sapisidhash && !client.omitAccountAuth) {
     // SAPISIDHASH + X-Origin pair is the canonical YouTube auth
     // proof. X-Origin matters because some YouTube auth paths
     // double-check it against the cookies' allowed origins.
+    //
+    // Skipped for clients that reject the web auth shape — sending it
+    // to ANDROID_VR is a bare 400. See `omitAccountAuth`.
     headers['Authorization'] = auth.sapisidhash;
     headers['X-Origin'] = 'https://www.youtube.com';
   }
@@ -963,6 +966,12 @@ async function runInnerTubeLadder(
   auth: InnerTubeAuth,
 ): Promise<LadderResult | null> {
   for (const client of INNERTUBE_CLIENTS) {
+    if (client.requiresVisitorData && !auth.visitorData) {
+      // Without the fingerprint this client answers LOGIN_REQUIRED
+      // every time; skip rather than burn a request that cannot work.
+      log.warn(`youtube innertube ${client.name} skipped — no visitorData available`);
+      continue;
+    }
     const player = await fetchInnerTubePlayer(videoId, client, auth);
     if (!player) continue;
     // Surface the playabilityStatus per-client so a non-OK response

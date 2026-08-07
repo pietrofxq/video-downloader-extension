@@ -18,11 +18,22 @@
 // swapping clients: the only ungated client (WEB) returns zero adaptive
 // URLs under SABR, and every client that does return them is gated.
 //
-// STATUS: seam only. `acquirePoToken` currently always resolves null,
-// which reproduces exactly the pre-v0.12 behavior — the ladder runs
-// unattested and its URLs stay gated. Nothing downstream branches on a
-// token being present, so wiring this in cannot regress anything. The
-// BotGuard implementation lands behind this interface.
+// STATUS: dormant, and probably permanently. `acquirePoToken` always
+// resolves null, which reproduces the pre-v0.12 behavior exactly:
+// the ladder runs unattested and WEB_CREATOR / MWEB URLs stay gated.
+//
+// It is no longer the route to 4K. `ANDROID_VR` returns adaptive URLs
+// (to 2160p) that the CDN serves with no token anywhere in the flow —
+// it just needs `visitorData` and no account-auth header. That client
+// is first in the ladder and is the supported path.
+//
+// This seam is kept, unimplemented, only as a fallback position: if
+// YouTube gates ANDROID_VR the way it gated WEB_CREATOR, the plumbing
+// to attach a token is already threaded and only the minting would be
+// missing. Do not build BotGuard on spec — see the ROADMAP for what
+// that costs (remotely-hosted code from a Google host, plus a second
+// Google endpoint for the exchange, both of which collide with
+// AGENTS.md §5/§10).
 //
 // WHAT REMAINS (the hard part)
 //

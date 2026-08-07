@@ -704,6 +704,12 @@ describe('buildInnerTubePlayerBody', () => {
     expect('serviceIntegrityDimensions' in body).toBe(false);
   });
 
+  it('puts ANDROID_VR first — it is the only client whose URLs the CDN serves', () => {
+    expect(INNERTUBE_CLIENTS[0].name).toBe('ANDROID_VR');
+    expect(INNERTUBE_CLIENTS[0].omitAccountAuth).toBe(true);
+    expect(INNERTUBE_CLIENTS[0].requiresVisitorData).toBe(true);
+  });
+
   it('includes thirdParty.embedUrl for TVHTML5_SIMPLY_EMBEDDED_PLAYER', () => {
     const tv = INNERTUBE_CLIENTS.find((c) => c.name === 'TVHTML5_SIMPLY_EMBEDDED_PLAYER')!;
     const body = buildInnerTubePlayerBody('abc', tv) as {
@@ -725,6 +731,30 @@ describe('fetchInnerTubePlayer', () => {
   });
   afterEach(() => {
     fetchSpy.mockRestore();
+  });
+
+  it('omits the account-auth headers for a client that rejects them', async () => {
+    // Sending SAPISIDHASH to ANDROID_VR is a bare 400. This assertion is
+    // the guard against re-adding it and re-deriving the whole v0.12
+    // wrong turn.
+    const vr = INNERTUBE_CLIENTS.find((c) => c.name === 'ANDROID_VR')!;
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    await fetchInnerTubePlayer('abc', vr, { sapisidhash: 'SAPISIDHASH x_y', visitorData: 'CgtV' });
+    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(headers['Authorization']).toBeUndefined();
+    expect(headers['X-Origin']).toBeUndefined();
+    // visitorData still travels — it is what keeps this client out of
+    // the LOGIN_REQUIRED gate.
+    expect(headers['X-Goog-Visitor-Id']).toBe('CgtV');
+  });
+
+  it('still sends account auth for clients that accept it', async () => {
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    await fetchInnerTubePlayer('abc', wc, { sapisidhash: 'SAPISIDHASH x_y' });
+    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('SAPISIDHASH x_y');
+    expect(headers['X-Origin']).toBe('https://www.youtube.com');
   });
 
   it('POSTs to the right URL with the API key from the client config', async () => {
@@ -1111,8 +1141,11 @@ describe('discoverYouTubeStreams', () => {
     fetchSpy.mockResolvedValue(new Response('nope', { status: 403 }));
     const doc = makeFakeDoc([`var ytInitialPlayerResponse = ${JSON.stringify(inline)};`]);
     const streams = await discoverYouTubeStreams(doc);
-    // Both clients were attempted, then we fell back to inline.
-    expect(fetchSpy).toHaveBeenCalledTimes(INNERTUBE_CLIENTS.length);
+    // Every client that CAN be attempted was, then we fell back to
+    // inline. This fixture supplies no visitorData, so clients that
+    // require it are skipped without burning a request.
+    const attemptable = INNERTUBE_CLIENTS.filter((c) => !c.requiresVisitorData).length;
+    expect(fetchSpy).toHaveBeenCalledTimes(attemptable);
     // Inline progressive itag=18 still surfaces.
     expect(streams[0].variants?.some((v) => v.url.includes('/18'))).toBe(true);
   });

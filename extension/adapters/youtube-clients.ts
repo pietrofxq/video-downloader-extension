@@ -11,16 +11,24 @@
 // currently-working set as a starting point; rotating it should be a
 // data change here, not a code change in the call sites.
 //
-// IMPORTANT — Chrome's content-script `fetch()` cannot set
-// `User-Agent`. The UA header is on the fetch spec's "forbidden
-// headers" list; any attempt to override it is silently dropped. The
-// browser sends its real Chrome UA on every fetch we initiate. This
-// rules out clients that the InnerTube server validates by UA — most
-// notably IOS / ANDROID, where a non-matching UA produces a clean
-// `400 Bad Request`. Our v0.11.2 client list is restricted to clients
-// that either don't validate UA (TVHTML5, embed) or expect a
-// browser-shaped UA (WEB_CREATOR, MWEB). Earlier iterations of this
-// branch tried IOS first and got 400s — see commit history.
+// Chrome's content-script `fetch()` cannot set `User-Agent` — it is on
+// the fetch spec's "forbidden headers" list, so the browser sends its
+// real Chrome UA on every request we make.
+//
+// CORRECTION (v0.12). Earlier notes here concluded that this ruled out
+// the mobile clients, because IOS / ANDROID returned a clean `400`.
+// That diagnosis was wrong and it cost the project a lot: it pointed
+// the whole investigation at BotGuard/poToken work that turned out to
+// be unnecessary. The 400 comes from sending the web session's
+// `Authorization: SAPISIDHASH` header to a non-web client, which
+// rejects that auth shape outright. Drop the header and supply
+// visitorData instead and ANDROID_VR answers `OK` from a plain
+// content-script fetch under the ordinary Chrome UA — see
+// `omitAccountAuth` / `requiresVisitorData` below.
+//
+// The lesson worth keeping: a bare 400 from InnerTube says "malformed
+// for this client", not "wrong User-Agent". Vary the auth shape before
+// concluding a client is unreachable.
 //
 // We don't claim authoritative knowledge of YouTube's internal client
 // roster — only that, as of the v0.11.2 ship date, these contexts
@@ -52,6 +60,23 @@ export interface InnerTubeClient {
    * Setting this here keeps the call shape symmetric across clients.
    */
   thirdPartyEmbedUrl?: string;
+  /**
+   * Send WITHOUT the web account's `Authorization: SAPISIDHASH` /
+   * `X-Origin` headers.
+   *
+   * Non-web clients reject web-session account auth outright: sending
+   * it to ANDROID_VR returns a bare `400`. That 400 is what earlier
+   * work misread as User-Agent validation (see AGENTS.md §8 #18) and
+   * is why these clients were written off. They are not UA-gated at
+   * all — they are auth-shape-gated.
+   */
+  omitAccountAuth?: boolean;
+  /**
+   * Client is refused with `LOGIN_REQUIRED` unless a visitorData
+   * fingerprint is supplied. Skip the client entirely when we don't
+   * have one rather than burning a request that cannot succeed.
+   */
+  requiresVisitorData?: boolean;
 }
 
 // Well-known InnerTube API keys. These are public constants baked
@@ -65,19 +90,52 @@ const INNERTUBE_API_KEY_WEB = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
  * Ordered fallback list. Iteration stops at the first client whose
  * response carries adaptiveFormats with usable URLs. Order matters:
  *
- *  1. WEB_CREATOR — has historically returned adaptive URLs without
- *     a poToken, and the Chrome UA matches what this client expects
- *     (it's a web-platform client variant).
- *  2. MWEB — mobile-web fallback. Lower max bitrate than CREATOR but
- *     unlocks a different set of restrictions on some videos.
- *  3. TVHTML5 — full TV client. Few playback restrictions and the
- *     TV context tolerates any UA. Last because the response shape
- *     is more constrained (fewer codec options on some videos).
- *  4. TVHTML5_SIMPLY_EMBEDDED_PLAYER — the embed-only variant. Last
- *     resort; refuses many videos with `playabilityStatus !== 'OK'`
- *     for non-embed contexts.
+ *  1. ANDROID_VR — the only client whose adaptive URLs the CDN
+ *     actually serves (v0.12 field-verified, including 4K). Needs
+ *     visitorData and no account-auth header; see its entry below.
+ *  2. WEB_CREATOR — returns a full adaptive catalog, but as of v0.12
+ *     every URL from it 403s without a poToken. Kept because it is
+ *     still the richest *inventory* and the popup shows it; if
+ *     ANDROID_VR ever stops answering, this is the fallback that at
+ *     least surfaces what exists.
+ *  3. MWEB — same gated situation as WEB_CREATOR, different
+ *     restriction set on some videos.
+ *  4. TVHTML5 — full TV client. Returns adaptiveFormats with no URLs
+ *     at all under SABR, so it is inventory-only in practice.
+ *  5. TVHTML5_SIMPLY_EMBEDDED_PLAYER — embed-only variant, now
+ *     answering "no longer supported in this application or device"
+ *     for most videos. Last resort.
  */
 export const INNERTUBE_CLIENTS: readonly InnerTubeClient[] = [
+  {
+    // First because it is the only client we've found that returns
+    // adaptive URLs the CDN actually serves. Field-verified on a 4K
+    // HDR video: 26 adaptive formats all carrying URLs, up to 2160p,
+    // and itag 401 (AV1 2160p) + itag 140 (AAC) both fetched 206 with
+    // real `ftypdash` bytes — no poToken anywhere in the flow.
+    //
+    // Two non-obvious requirements, both load-bearing:
+    //   - visitorData is mandatory (without it: LOGIN_REQUIRED).
+    //   - the SAPISIDHASH header must NOT be sent (with it: 400).
+    //
+    // Its URLs also carry no `n` param, so the signature solver is
+    // skipped entirely on this path.
+    name: 'ANDROID_VR',
+    apiKey: INNERTUBE_API_KEY_WEB,
+    omitAccountAuth: true,
+    requiresVisitorData: true,
+    context: {
+      clientName: 'ANDROID_VR',
+      clientVersion: '1.60.19',
+      deviceMake: 'Oculus',
+      deviceModel: 'Quest 3',
+      osName: 'Android',
+      osVersion: '12',
+      androidSdkVersion: '32',
+      hl: 'en',
+      gl: 'US',
+    },
+  },
   {
     name: 'WEB_CREATOR',
     apiKey: INNERTUBE_API_KEY_WEB,
