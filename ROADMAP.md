@@ -555,9 +555,11 @@ Landed so far (incremental QoL fixes from field reports):
 
 ---
 
-## v0.12-yt-potoken - YouTube downloads 403 on every quality (poToken gate)
+## v0.11.11 - YouTube downloads 403 on every quality — shipped
 
-**Status:** diagnosed, not started. This is now the top YouTube priority — it blocks *all* YouTube downloads, not just 4K.
+**Status:** ✅ shipped. Downloads work again at every quality including 4K, verified in the field.
+
+> Numbered in the 0.11.x line where every other YouTube milestone lives. The branch was originally cut as `v0.12-yt-potoken`, which collided with the planned **v0.12 - HLS completeness** below; that milestone keeps the v0.12 number. The `-potoken` slug also stopped describing the work once the fix turned out not to need a poToken at all.
 
 ### Symptom
 
@@ -668,7 +670,13 @@ The extension has an advantage yt-dlp doesn't: it already runs inside a real Chr
 
 - Implementing a full SABR/UMP client. Still a separate multi-week project; poToken is the cheaper unlock and is a prerequisite for SABR anyway.
 
-**Ship criterion:** a public YouTube video downloads end-to-end at 360p, 1080p, and 4K against live YouTube, and no code path reports "token expired" for a failure that isn't one.
+**Ship criterion:** ✅ a public YouTube video downloads end-to-end at 360p, 1080p, and 4K against live YouTube, and no code path reports "token expired" for a failure that isn't one. Confirmed in the field, including a 2h44m 4K download.
+
+**Also shipped in this milestone** (found while chasing the above):
+
+- Real progress on large fetches. Progress used an asymptote assuming ~16 MB remained, which pinned the bar at 79% from ~840 MB to ~2.5 GB on an 8.2 GB download and then at 80% for the rest. `contentLengthFromUrl` reads googlevideo's `clen` so the bar tracks actual bytes, and `fetchToOpfsRanged` takes it as `knownTotalBytes` for a deterministic stop instead of EOF polling.
+- `unlimitedStorage` permission. The adaptive path stages both inputs plus the combined output, needing ~2× the summed stream size — ~17 GB for that video. Without the permission an extension gets the default evictable quota, so this failed on a machine with plenty of free disk. The headroom check reports quota figures and says outright that it is not disk space.
+- Cancel no longer flickers. In-flight progress ticks arriving after a cancel repainted the progress bar over the "Canceled" row, and moved the status off `canceled` so the row could settle on "error" for a deliberate cancel. Terminal states now ignore late progress.
 
 ---
 
