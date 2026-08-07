@@ -7,6 +7,7 @@ import {
   type InnerTubeClient,
 } from './youtube-clients.js';
 import { computeSapisidhash, extractVisitorData } from './youtube-auth.js';
+import { acquirePoToken } from './youtube-potoken.js';
 
 // Per-videoId cache for the InnerTube response. SPA navigation in
 // page-content.ts fires discoverStreams on every title change, which
@@ -728,6 +729,14 @@ export function mergeInlineIntoInnerTube(
 export interface InnerTubeAuth {
   sapisidhash?: string;
   visitorData?: string;
+  /**
+   * BotGuard-derived proof-of-origin token (Phase B). When present it
+   * rides in the request body's `serviceIntegrityDimensions`, which is
+   * what makes the returned media URLs fetchable — see the comment in
+   * `buildInnerTubePlayerBody`. Absent means the pre-v0.12 behavior:
+   * the call still issues, and its URLs come back gated.
+   */
+  poToken?: string;
 }
 
 /**
@@ -759,7 +768,7 @@ export async function fetchInnerTubePlayer(
   // both call shapes carry it. YouTube's own JS does this — the
   // server checks both places and the body is the more reliable
   // signal for some client variants.
-  const body = buildInnerTubePlayerBody(videoId, client) as {
+  const body = buildInnerTubePlayerBody(videoId, client, auth.poToken) as {
     context: { client: Record<string, unknown> };
   } & Record<string, unknown>;
   if (auth.visitorData) {
@@ -896,15 +905,28 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
     readVisitorDataFromYtcfg(doc) ??
     undefined;
   const sapisidhash = (await computeSapisidhash().catch(() => null)) ?? undefined;
+  // Phase B seam. Null today, which is exactly the pre-v0.12 path: the
+  // ladder runs unattested and its URLs come back gated. Prefer a
+  // session binding when visitorData is available, else content.
+  const poToken =
+    (await acquirePoToken({
+      binding: visitorData ? { kind: 'session', visitorData } : { kind: 'content', videoId },
+      doc,
+    }).catch(() => null)) ?? undefined;
   log.info('youtube discoverYouTubeStreams: starting InnerTube ladder', {
     videoId,
     hasVisitorData: !!visitorData,
     hasSapisidhash: !!sapisidhash,
+    hasPoToken: !!poToken,
   });
-  let cached = innerTubeCache.get(videoId);
+  // Attestation state is part of the key: once Phase B starts returning
+  // tokens, an entry cached from an earlier unattested run would
+  // otherwise keep serving gated URLs for the rest of the session.
+  const cacheKey = `${videoId}:${poToken ? 'attested' : 'unattested'}`;
+  let cached = innerTubeCache.get(cacheKey);
   if (!cached) {
-    cached = runInnerTubeLadder(videoId, { sapisidhash, visitorData });
-    innerTubeCache.set(videoId, cached);
+    cached = runInnerTubeLadder(videoId, { sapisidhash, visitorData, poToken });
+    innerTubeCache.set(cacheKey, cached);
   }
   let ladder: LadderResult | null;
   try {
@@ -915,7 +937,7 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
     log.warn('youtube discoverYouTubeStreams: ladder threw', {
       err: err instanceof Error ? err.message : String(err),
     });
-    innerTubeCache.delete(videoId);
+    innerTubeCache.delete(cacheKey);
     return inlineStreams;
   }
   if (!ladder) {

@@ -131,6 +131,7 @@ export const INNERTUBE_CLIENTS: readonly InnerTubeClient[] = [
 export function buildInnerTubePlayerBody(
   videoId: string,
   client: InnerTubeClient,
+  poToken?: string,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {
     client: { ...client.context },
@@ -141,6 +142,15 @@ export function buildInnerTubePlayerBody(
   return {
     context,
     videoId,
+    // Attestation for this player request. v0.12 field work established
+    // that the gate attaches to the ACQUISITION path, not to googlevideo
+    // generally: URLs minted for the page's own WEB session fetch fine
+    // with no token on the URL, while URLs from an unattested InnerTube
+    // call are refused no matter what is appended to them later. So the
+    // token belongs here, on the request that mints the URLs — not on
+    // the media URL. Omitted entirely when unavailable, which is the
+    // pre-v0.12 behavior.
+    ...(poToken ? { serviceIntegrityDimensions: { poToken } } : {}),
     // Tells YouTube "yes I've accepted whatever content gates apply" —
     // matters mostly for embedded clients where the default is to
     // refuse anything age-gated / restricted with a status of

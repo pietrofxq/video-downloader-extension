@@ -555,6 +555,101 @@ Landed so far (incremental QoL fixes from field reports):
 
 ---
 
+## v0.12-yt-potoken - YouTube downloads 403 on every quality (poToken gate)
+
+**Status:** diagnosed, not started. This is now the top YouTube priority — it blocks *all* YouTube downloads, not just 4K.
+
+### Symptom
+
+The popup shows "Token expired. Reload the page and try again." on every YouTube download attempt, at every quality.
+
+### What the message actually means
+
+`throwFromReply` (`extension/offscreen/downloader.ts:527`) maps **any** HTTP 403 to `TokenExpiredError`, and the popup renders that as the expiry copy (`extension/popup/popup.ts:265`). Nothing has expired here — the URLs are minutes old and their `expire` timestamps are ~6 hours in the future. The message is a mis-diagnosis inherited from the Hotmart/Akamai case that motivated the mapping.
+
+### Root cause (verified against live YouTube, player `854a788e`)
+
+YouTube now requires a **poToken** (proof-of-origin token, `pot=` query param) on `googlevideo.com/videoplayback` URLs derived from InnerTube responses. Our URLs carry no `pot`, so the CDN 403s them. Evidence gathered on a real 4K watch page:
+
+- **Not the n-param solver.** The vendored AST extractor compiles cleanly against the current `base.js` and produces a correctly transformed `n` (`XvZVzFD4whqEQmKQ6` → `2xphpkKkwf9kqlh`). Applying it changes nothing — still 403.
+- **Not a 4K problem.** 4K AV1 (itag 701), 4K VP9 (315/337), AAC audio (140), *and* progressive 360p (itag 18) all 403 identically. The itag-18 path that shipped in v0.11 is dead too.
+- **Not origin / referer.** All fetches were issued from the watch page itself with credentials — the exact context AGENTS.md §8 (15/17) prescribes.
+- **The URLs have no `pot` param.** Confirmed by enumerating the query string; `sparams` doesn't cover `pot` either, so it's validated server-side against the session rather than signed in.
+- **The WEB page itself is fully SABR.** Inline `ytInitialPlayerResponse` returns 44 adaptive formats with **zero** URLs plus a `serverAbrStreamingUrl` carrying `sabr=1`. YouTube's own player no longer fetches media by plain GET.
+
+This is the contingency v0.11.2 anticipated ("track separately if every InnerTube client gets gated at once"). It has now fired.
+
+### Current InnerTube client ladder status
+
+| Client | `playabilityStatus` | Adaptive formats w/ URL | Verdict |
+|---|---|---|---|
+| `WEB_CREATOR` | `OK` *(requires SAPISIDHASH; anonymous → `LOGIN_REQUIRED`)* | 36 incl. 2160p | URLs returned, **403 at CDN** |
+| `MWEB` | `OK` | 45 incl. 2160p | URLs returned, **403 at CDN** |
+| `TVHTML5` | `OK` | **0** — SABR-only | dead for our pipeline |
+| `TVHTML5_SIMPLY_EMBEDDED_PLAYER` | `ERROR` | 0 | dead — "no longer supported in this application or device" |
+
+Two of four clients are gone outright; the two that still hand back URLs are gated at the CDN.
+
+### Tasks
+
+**Phase A — stop lying to the user (small, ships independently).**
+
+- [ ] Split the 403 mapping. Keep `TokenExpiredError` for the signed-URL-expiry case it was written for (compare the URL's `expire` param against now — a real expiry is checkable, not guessed). Add a distinct `PlaybackGatedError` in `lib/errors.ts` for a 403 on a fresh URL, with popup copy that names the real situation instead of sending users to reload the page for no reason.
+- [ ] Have the YouTube path attach enough context to the error that the SW log identifies which client produced the dead URL.
+
+### Field results (v0.12 investigation)
+
+**The gate is session-bound, not universal.** Proven on one video, same page load, same n-solver:
+
+| URL source | client tag | n-transform | Result |
+|---|---|---|---|
+| Inline `ytInitialPlayerResponse`, itag 18 | `c=WEB` | as served | 403 |
+| Inline `ytInitialPlayerResponse`, itag 18 | `c=WEB` | **applied** | **HTTP 206, `video/mp4`, `ftypmp42`** |
+| InnerTube, itag 18 | `c=WEB_CREATOR` | applied | 403 |
+| InnerTube, itag 701 (4K AV1) | `c=WEB_CREATOR` | applied | 403 |
+
+So URLs minted for the page's own WEB session are fetchable with **no poToken at all** — the n-transform alone is sufficient. URLs obtained from our InnerTube calls are refused regardless. The poToken requirement attaches to the *acquisition path*, not to googlevideo generally.
+
+**Consequence for 4K: there is no client-swap that reaches it.** The only ungated client (WEB) ships **zero** adaptive URLs — 62 adaptive formats, all URL-less under SABR. Every client that does return adaptive URLs (`WEB_CREATOR`, `MWEB`) is gated. 4K therefore requires either a poToken or a SABR client; no reshuffling of the existing ladder gets there.
+
+**Partial win — taken.** `mergeInlineIntoInnerTube` folds the inline WEB catalog into the InnerTube one instead of letting InnerTube replace it wholesale. Inline wins on rendition collisions (matched by `itag`, falling back to resolution + codecs) precisely because it is the fetchable side; InnerTube-only entries are kept so the picker still shows the real format inventory. Restores 360p downloads today. The higher qualities remain gated until Phase B — the popup will offer one working quality alongside several that error, which is the accepted trade.
+
+**Fixed along the way:** the InnerTube ladder had been running with `hasVisitorData: false` on every call — the visitor fingerprint was absent from both the player response and `ytInitialData` on current watch pages while `ytcfg` carried it all along. `readVisitorDataFromYtcfg` closes that. Confirmed `hasVisitorData: true` in the field. It did **not** lift the 403 on its own, as expected.
+
+**Phase B — mint a poToken (the actual fix).**
+
+The extension has an advantage yt-dlp doesn't: it already runs inside a real Chrome on a real youtube.com page, which is exactly the environment BotGuard attests. Evaluate in this order and stop at the first that works:
+
+- [~] **B1 — reuse the page's own token.** *Investigated; the premise does not hold as scoped.* The plan was to scrape the token off the player's own traffic via the existing main-world hook (AGENTS.md §8 #15). But `main-world-hooks.ts` patches only main-thread `window.fetch` / `XMLHttpRequest`, and an observe-only probe of that same surface on a live watch page recorded **zero** `googlevideo.com` requests during playback — `performance.getEntriesByType('resource')` likewise showed none. The player drives MSE from a `blob:` source with a service worker controlling the page, so its media traffic never crosses the surface our hook owns. Extending the hook into worker scope is a materially bigger change than "read a param off a request we already see."
+  - **Confound identified as a tooling artifact, not a product bug.** The stuck player (`readyState` 0, `buffered` 0) reproduced on every video opened through CDP browser automation, including with no scripted interaction at all — 1 resource entry for a whole watch page. The maintainer confirms playback and the extension behave normally in ordinary use, so the frozen player was the automation harness, not our hook. **The browser-automation channel cannot answer this question and should not be retried for it.**
+  - **In-extension probe added instead** (`probeProofOfOrigin` in `content/frame-content.ts`): logs, from a real playback session, every `googlevideo.com` request that crosses the main-thread fetch/XHR surface, with its param names and whether a `pot` is present. Shape only — `redactUrl` strips the credential, and `pot` was added to the redaction set for this. Reads out in the **page** console (content-script logs land there), not the SW console.
+  - **Decision rule once the probe runs:** requests logged *with* `pot` → B1 is viable, promote the capture behind an adapter hook. Requests logged *without* `pot` → the token lives in the UMP/SABR request body, not the URL, so B1 as scoped is dead. Only the "armed" line and nothing else → the player's media traffic bypasses main-thread fetch/XHR entirely and B1 needs worker-scope hooking to have any chance.
+  - The probe is a throwaway diagnostic and is deliberately site-specific in core code, which AGENTS.md §10 forbids. Remove it or move it behind an adapter hook once the question is settled.
+- [~] **B2 — mint one via BotGuard in-page.** *Started: the plumbing is in, the minting is not.*
+  - **Corrected target.** The original plan said attach `pot=` to the media URLs. The field results above disprove that: nothing appended to an already-gated URL rescues it, and the ungated inline URLs carry no `pot` at all. The token belongs on the `/youtubei/v1/player` request that MINTS the URLs, as `serviceIntegrityDimensions.poToken`. Building it the original way would have failed and been hard to diagnose.
+  - [x] `buildInnerTubePlayerBody` takes an optional `poToken` and emits `serviceIntegrityDimensions`; omitted entirely when absent, so an unattested body stays byte-identical to pre-v0.12. Threaded through `InnerTubeAuth` → `fetchInnerTubePlayer` → the ladder. Tested both ways.
+  - [x] `innerTubeCache` is keyed on attestation state, so an entry cached from an unattested run can't keep serving gated URLs once tokens start flowing.
+  - [x] Acquisition seam at `adapters/youtube-potoken.ts` (`acquirePoToken`). Returns null today — exactly the pre-v0.12 path — so wiring it in cannot regress discovery. Callers must treat null as "proceed unattested", never as a hard failure: an unattested ladder still surfaces the inventory and the merged inline progressive still downloads.
+  - [ ] **Run the BotGuard challenge in the page's MAIN world.** `window.trayride` is a page global and the content script is isolated, so this needs a main-world injection plus a postMessage bridge. `content/main-world-hooks.ts` is the precedent and the natural host.
+  - [ ] Exchange the attestation for an integrity token, then mint the poToken.
+  - [ ] **Verify the binding against a real request before building on it.** A session-bound token uses `visitorData`, a content-bound one uses the `videoId`; the wrong binding is rejected. `acquirePoToken` already takes a `PoTokenBinding` so both are expressible — do not guess which one, test it.
+  - [ ] Cache per binding, refresh on expiry.
+  - **Verification loop is cheap now:** attach a token, re-run a 4K download, check whether the URLs come back ungated. That single test settles whether the whole approach works.
+- [ ] Thread `pot` through `DiscoveredStream` / `DownloadRequest` so both the video and paired-audio fetches carry it, and make `range-fetch` preserve it across every chunk request.
+- [ ] Re-verify the full ladder after the token lands: progressive 360p, 1080p AVC, and 4K AV1 all fetching 200s.
+
+**Phase C — decision needed from the maintainer (do not proceed unilaterally).**
+
+- [ ] The `IOS` / `ANDROID` InnerTube clients have historically been the poToken-free fallback, but they validate `User-Agent`, and a content-script `fetch` cannot set it (AGENTS.md §8 #18 — earlier attempts got clean 400s). The only in-extension way to override UA is `declarativeNetRequest`, which AGENTS.md §8 #10 currently rules out on the grounds that we only observe traffic. If B1/B2 fail, that convention needs an explicit revisit rather than a quiet exception.
+
+### Out of scope
+
+- Implementing a full SABR/UMP client. Still a separate multi-week project; poToken is the cheaper unlock and is a prerequisite for SABR anyway.
+
+**Ship criterion:** a public YouTube video downloads end-to-end at 360p, 1080p, and 4K against live YouTube, and no code path reports "token expired" for a failure that isn't one.
+
+---
+
 ## v0.11.10 - YouTube 4K via VP9 (WebM container muxer) — deferred (as-needed)
 
 > **Deferred.** AVC + AV1 already cover HD + 4K for the vast majority of YouTube videos. VP9-only 4K is rare enough that this is picked up only when a user actually hits a video with no AVC/AV1 fallback. Sits below the v0.11.9 quality-of-life work in priority.

@@ -686,6 +686,24 @@ describe('buildInnerTubePlayerBody', () => {
     expect(body.context.thirdParty).toBeUndefined();
   });
 
+  it('carries a poToken in serviceIntegrityDimensions when one is supplied', () => {
+    // The token has to land on the request that MINTS the URLs — v0.12
+    // established that appending it to an already-gated URL is useless.
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    const body = buildInnerTubePlayerBody('abc', wc, 'TOKENVALUE') as {
+      serviceIntegrityDimensions?: { poToken?: string };
+    };
+    expect(body.serviceIntegrityDimensions?.poToken).toBe('TOKENVALUE');
+  });
+
+  it('omits serviceIntegrityDimensions entirely when no poToken is available', () => {
+    // Unattested must stay byte-identical to the pre-v0.12 body, so the
+    // seam cannot regress discovery while Phase B is unimplemented.
+    const wc = INNERTUBE_CLIENTS.find((c) => c.name === 'WEB_CREATOR')!;
+    const body = buildInnerTubePlayerBody('abc', wc) as Record<string, unknown>;
+    expect('serviceIntegrityDimensions' in body).toBe(false);
+  });
+
   it('includes thirdParty.embedUrl for TVHTML5_SIMPLY_EMBEDDED_PLAYER', () => {
     const tv = INNERTUBE_CLIENTS.find((c) => c.name === 'TVHTML5_SIMPLY_EMBEDDED_PLAYER')!;
     const body = buildInnerTubePlayerBody('abc', tv) as {
