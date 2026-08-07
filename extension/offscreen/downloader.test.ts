@@ -5,8 +5,10 @@ import {
   isRetryableReply,
   parsePlaylist,
   proxyFetchWithRetry,
+  throwFromReply,
 } from './downloader.js';
 import type { ProxyFetch, ProxyFetchReply } from './downloader.js';
+import { PlaybackGatedError, TokenExpiredError } from '../lib/errors.js';
 
 // The five scenarios from the v0.8.1 ship criterion. These exercise the
 // downloader's parse step — the gate that decides whether a playlist can
@@ -243,6 +245,35 @@ describe('isRetryableReply — transient-failure policy', () => {
     expect(isRetryableReply({ ok: false, status: 403 })).toBe(false);
     expect(isRetryableReply({ ok: false, status: 404 })).toBe(false);
     expect(isRetryableReply({ ok: false, status: 401 })).toBe(false);
+  });
+});
+
+describe('throwFromReply — 403 is expiry only when the URL says so', () => {
+  const nowS = Math.floor(Date.now() / 1000);
+
+  it('throws TokenExpiredError when the URL’s deadline has passed', () => {
+    const url = `https://cdn.example.com/seg.ts?hdntl=exp=${nowS - 60}~hmac=abc`;
+    expect(() => throwFromReply({ ok: false, status: 403, error: 'forbidden' }, url)).toThrow(
+      TokenExpiredError,
+    );
+  });
+
+  // The v0.12 poToken gate: hours left on `expire`, refused anyway.
+  it('throws PlaybackGatedError when the URL is still within its window', () => {
+    const url = `https://x.googlevideo.com/videoplayback?itag=701&expire=${nowS + 21600}`;
+    expect(() => throwFromReply({ ok: false, status: 403, error: 'forbidden' }, url)).toThrow(
+      PlaybackGatedError,
+    );
+  });
+
+  it('throws PlaybackGatedError when the URL declares no deadline', () => {
+    const url = 'https://x.googlevideo.com/videoplayback?itag=18';
+    expect(() => throwFromReply({ ok: false, status: 403 }, url)).toThrow(PlaybackGatedError);
+  });
+
+  it('leaves non-403 failures as a plain Error carrying the status', () => {
+    const url = 'https://cdn.example.com/seg.ts';
+    expect(() => throwFromReply({ ok: false, status: 404, error: 'nope' }, url)).toThrow(/404/);
   });
 });
 

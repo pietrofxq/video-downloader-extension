@@ -3,11 +3,14 @@ import { runWithConcurrency } from '../lib/concurrency.js';
 import { uint8ArrayToBase64, base64ToUint8Array } from '../lib/base64.js';
 import {
   TokenExpiredError,
+  PlaybackGatedError,
   ManifestParseError,
   DecryptionError,
   DRMProtectedError,
   UnsupportedFormatError,
 } from '../lib/errors.js';
+import { log, redactUrl } from '../lib/log.js';
+import { urlExpiresAt } from '../lib/url-expiry.js';
 import { ivFromSequence, toUint8, importAesKey, decryptSegment } from './hls-decrypt.js';
 import { remuxTsToMp4ToOpfs, type RemuxSegmentSource } from './remux.js';
 import { getSettings } from '../lib/settings.js';
@@ -531,7 +534,18 @@ function throwFromReply(reply: ProxyFetchReply | undefined, url: string): never 
   // whose path contained "token" (e.g. /token-validation-error.png) or
   // "403" (e.g. a 404 on a path with "403" in it).
   if (status === 403) {
-    throw new TokenExpiredError(message);
+    // Only claim expiry when the URL actually says it expired. A 403 on
+    // a URL still inside its validity window is a gate, not a stale
+    // credential, and telling the user to reload wastes their time.
+    const expiresAt = urlExpiresAt(url);
+    if (expiresAt !== null && expiresAt <= Date.now()) {
+      throw new TokenExpiredError(message);
+    }
+    log.warn('403 on a URL that has not expired — treating as gated', {
+      url: redactUrl(url),
+      expiresAt: expiresAt === null ? 'not declared' : new Date(expiresAt).toISOString(),
+    });
+    throw new PlaybackGatedError(message);
   }
   throw new Error(`${message} (HTTP ${status})`);
 }

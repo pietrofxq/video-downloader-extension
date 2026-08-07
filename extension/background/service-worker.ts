@@ -702,6 +702,7 @@ async function handleStreamsDiscovered({
       // multi-quality the same way it treats parsed HLS masters.
       ...(s.variants ? { variants: s.variants, isMaster: true } : {}),
       ...(s.audioTracks ? { audioTracks: s.audioTracks } : {}),
+      ...(s.discoverySource ? { discoverySource: s.discoverySource } : {}),
     };
     const stored = await addEntry(tabId, entry);
     if (stored) anyAdded = true;
@@ -994,11 +995,13 @@ async function handleStartDownload(payload: {
     // signatureCipher, forward the encoded triple so the offscreen
     // can re-decipher the signature before fetching. Skipped for
     // variants whose `url` is already directly fetchable.
+    ...(pickedVariant?.contentLength ? { variantContentLength: pickedVariant.contentLength } : {}),
     ...(pickedVariant?.signatureCipher ? { signatureCipher: pickedVariant.signatureCipher } : {}),
     ...(resolvedPairedSignatureCipher
       ? { pairedSignatureCipher: resolvedPairedSignatureCipher }
       : {}),
     ...(resolvedAudioTrackId ? { audioTrackId: resolvedAudioTrackId } : {}),
+    ...(entry.discoverySource ? { discoverySource: entry.discoverySource } : {}),
   };
 
   // Slim snapshot of the parent entry + picked variant for the popup's
@@ -1196,6 +1199,18 @@ async function handleProxyFetch({
 // restored state normally.
 const downloadStates = new Map<string, DownloadState>();
 
+// Final states. Once a download reaches one, late messages from the
+// offscreen document must not move it back to a live state.
+const TERMINAL_STATUSES: ReadonlySet<DownloadState['status']> = new Set([
+  'saved',
+  'error',
+  'canceled',
+]);
+
+function isTerminalStatus(status: DownloadState['status']): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
 const DOWNLOAD_STATES_KEY = 'downloadStates';
 const DOWNLOAD_QUEUE_KEY = 'downloadQueue';
 
@@ -1260,6 +1275,15 @@ function handleDownloadProgress(payload: unknown): void {
     segmentTotal?: unknown;
   };
   if (typeof p.requestId !== 'string') return;
+  // Cancelling doesn't stop the chunk already in flight, so the
+  // offscreen emits a few more progress ticks after the state is
+  // already final. Applying them repaints the progress bar over the
+  // "Canceled" row — the flicker — and worse, it moves the status off
+  // 'canceled', so the guard in handleDownloadError no longer matches
+  // and the row settles on "error" for a download the user cancelled
+  // deliberately.
+  const existing = downloadStates.get(p.requestId);
+  if (existing && isTerminalStatus(existing.status)) return;
   setDownloadState(p.requestId, {
     status: 'progress',
     stage: p.stage as DownloadState['stage'],

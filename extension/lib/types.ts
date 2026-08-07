@@ -65,6 +65,8 @@ export interface MediaEntry {
    * `pairedAudioUrl` at download time.
    */
   audioTracks?: AudioTrack[];
+  /** Diagnostic provenance from the adapter. See `DiscoveredStream.discoverySource`. */
+  discoverySource?: string;
 }
 
 // ---------- HLS parsing ----------
@@ -72,6 +74,13 @@ export interface MediaEntry {
 export interface HlsVariant {
   url: string;
   bandwidth: number;
+  /**
+   * YouTube format id. Identifies the same rendition across two
+   * different discovery paths, which is what lets the adapter prefer a
+   * fetchable URL over a gated one for the same format. Unset for HLS
+   * variants, which have no equivalent concept.
+   */
+  itag?: number;
   /** "1920x1080" or null when not declared. */
   resolution: string | null;
   /** RFC 6381 codec list (`avc1.64...`, `mp4a.40.2`) or null. */
@@ -183,6 +192,13 @@ export interface DownloadRequest {
   /** Byte length of the paired audio stream when known. */
   pairedAudioContentLength?: number;
   /**
+   * Byte length of the chosen video stream when known. Gives the
+   * adaptive path a real progress denominator and a storage-headroom
+   * figure; YouTube URLs also carry it as `clen`, so this is the
+   * fallback for sources that don't.
+   */
+  variantContentLength?: number;
+  /**
    * YouTube signatureCipher blobs forwarded from the picked variant.
    * The adaptive downloader (v0.11.1) hands these to yt-sig's solver
    * so the deciphered signature lands on the URL before fetch. Unset
@@ -198,6 +214,9 @@ export interface DownloadRequest {
    * so the offscreen downloader doesn't need to inspect this.
    */
   audioTrackId?: string;
+  /** Diagnostic provenance carried from the MediaEntry so a failed
+   *  fetch can name the discovery path that produced the URL. */
+  discoverySource?: string;
 }
 
 export interface DownloadOutcome {
@@ -361,6 +380,14 @@ export interface DiscoveredStream {
    * `MediaEntry.audioTracks` for the consumer side.
    */
   audioTracks?: AudioTrack[];
+  /**
+   * Where this catalog came from, for diagnosis only — e.g. `inline`
+   * or `innertube:WEB_CREATOR`. When a download 403s, this is what
+   * identifies which discovery path handed us the dead URL; without it
+   * the log shows a failing URL with no way to tell which InnerTube
+   * client minted it. Never used for control flow.
+   */
+  discoverySource?: string;
 }
 
 /**

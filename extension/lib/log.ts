@@ -2,6 +2,9 @@ const REDACTED_PARAMS = new Set([
   'hdntl',
   'hdnts',
   'token',
+  // YouTube proof-of-origin credential. Bearer-equivalent — it is what
+  // authorizes a googlevideo fetch, so it must never reach a log.
+  'pot',
   'signature',
   'sig',
   'policy',

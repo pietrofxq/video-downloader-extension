@@ -263,11 +263,15 @@ function renderEmpty() {
 // popup maps it here so future error types only need one tweak.
 const ERROR_MESSAGES: Record<string, string> = {
   TokenExpiredError: 'Token expired. Reload the page and try again.',
+  PlaybackGatedError: "Blocked by the server (403). Reloading won't help — this stream is gated.",
   ManifestParseError: "Couldn't read the video manifest.",
   DecryptionError: 'Decryption failed. Try reloading the page.',
   RemuxError: "Couldn't repackage the video.",
   DRMProtectedError: "This stream is DRM-protected and can't be downloaded.",
   UnsupportedFormatError: 'Unsupported stream format.',
+  // InsufficientStorageError is deliberately absent: its thrown message
+  // carries the actual quota figures, which is the whole diagnostic
+  // value. friendlyErrorMessage falls through to errorMessage.
 };
 
 function friendlyErrorMessage(state: DownloadState): string {

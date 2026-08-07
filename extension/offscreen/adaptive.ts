@@ -23,7 +23,7 @@
 // pass — no materialization of the full file in heap on either
 // side. Required for 4K (1-3 GB per side).
 
-import { UnsupportedFormatError } from '../lib/errors.js';
+import { InsufficientStorageError, UnsupportedFormatError } from '../lib/errors.js';
 import { log, redactUrl } from '../lib/log.js';
 import { type ProxyFetch } from './downloader.js';
 import { fetchToOpfsRanged } from './range-fetch.js';
@@ -36,6 +36,69 @@ import type { DownloadRequest } from '../lib/types.ts';
 const OUTPUT_FILE_NAME = 'out.mp4';
 const VIDEO_STAGE_FILE = 'video.in';
 const AUDIO_STAGE_FILE = 'audio.in';
+
+/**
+ * Declared byte length of a googlevideo stream, read from the URL's
+ * `clen` param. Present on every adaptive URL YouTube hands out, and it
+ * survives the signature/n rewrite, so it is a more reliable total than
+ * anything the response headers expose — CORS strips `Content-Range`
+ * cross-origin.
+ *
+ * Exported for unit tests.
+ */
+export function contentLengthFromUrl(url: string): number | undefined {
+  try {
+    const raw = new URL(url).searchParams.get('clen');
+    if (!raw) return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Refuse up-front when the staged download cannot fit.
+ *
+ * The adaptive path writes both input streams to OPFS and then the
+ * combined output alongside them, so peak usage is roughly twice the
+ * summed input size — a 2h44m 4K stream is ~8 GB of video, so ~17 GB of
+ * quota. Hitting that limit mid-write fails gigabytes and many minutes
+ * in, which reads as a hang; checking first turns it into an immediate,
+ * actionable message.
+ *
+ * Silent when the total is unknown or the platform doesn't implement
+ * `storage.estimate` — never block a download on a missing estimate.
+ */
+async function assertStorageHeadroom(totalInputBytes: number, requestId: string): Promise<void> {
+  if (totalInputBytes <= 0) return;
+  let estimate: StorageEstimate | undefined;
+  try {
+    estimate = await navigator.storage?.estimate?.();
+  } catch {
+    return;
+  }
+  const quota = estimate?.quota;
+  if (typeof quota !== 'number' || quota <= 0) return;
+  const available = quota - (estimate?.usage ?? 0);
+  const needed = totalInputBytes * 2;
+  log.info('downloadAdaptive: storage preflight', {
+    requestId,
+    neededMB: Math.round(needed / 1048576),
+    availableMB: Math.round(available / 1048576),
+  });
+  if (available >= needed) return;
+  const gb = (n: number): string => (n / 1073741824).toFixed(1);
+  // Report the real figures. This limit is the browser's storage quota
+  // for the extension, which is unrelated to free disk — the first
+  // report of this error came from a machine with plenty of room. A
+  // bare "not enough space" sends people to check the wrong thing.
+  throw new InsufficientStorageError(
+    `Needs ~${gb(needed)} GB of browser storage but only ${gb(available)} GB of the ` +
+      `${gb(quota)} GB quota is free. This is the browser's quota for the extension, not your disk. ` +
+      `Try a lower quality, or clear space by removing other downloads.`,
+  );
+}
 
 function isYouTubeMediaUrl(url: string): boolean {
   try {
@@ -67,6 +130,7 @@ export async function downloadAdaptive(
     pairedAudioUrl: redactUrl(req.pairedAudioUrl),
     hasSignatureCipher: !!req.signatureCipher,
     hasPairedSignatureCipher: !!req.pairedSignatureCipher,
+    discoverySource: req.discoverySource ?? 'unknown',
   });
 
   signal?.throwIfAborted();
@@ -139,6 +203,24 @@ export async function downloadAdaptive(
   const FETCH_PORTION = 80;
   const REMUX_PORTION = 20;
   const ESTIMATED_MORE_BYTES = 16 * 1024 * 1024; // two more 8 MB chunks (video + audio)
+  // Real totals when the platform declares them. The asymptotic
+  // estimate below is only a fallback now: it assumes ~16 MB remain, so
+  // on a multi-GB download it pins the bar near the top of the fetch
+  // portion and leaves it there for gigabytes. That is what "stuck at
+  // 79%" was — the fetch was still running with hours of bytes to go.
+  const videoTotalBytes = contentLengthFromUrl(videoUrl) ?? req.variantContentLength;
+  const audioTotalBytes = contentLengthFromUrl(audioUrl) ?? req.pairedAudioContentLength;
+  const fetchTotalBytes =
+    videoTotalBytes && audioTotalBytes ? videoTotalBytes + audioTotalBytes : 0;
+  log.info('downloadAdaptive: fetch totals', {
+    requestId,
+    videoMB: videoTotalBytes ? Math.round(videoTotalBytes / 1048576) : null,
+    audioMB: audioTotalBytes ? Math.round(audioTotalBytes / 1048576) : null,
+    knownTotal: fetchTotalBytes > 0,
+  });
+
+  await assertStorageHeadroom(fetchTotalBytes, requestId);
+
   let videoBytesFetched = 0;
   let audioBytesFetched = 0;
   let fetchTotalAtCompletion = 0; // 0 while fetching; set when both sides finish
@@ -150,8 +232,15 @@ export async function downloadAdaptive(
     let virtualCurrent: number;
     let segmentCurrent: number;
     let segmentTotal: number;
-    if (fetchTotalAtCompletion === 0) {
-      // Still fetching. Use the asymptotic estimate.
+    if (fetchTotalAtCompletion === 0 && fetchTotalBytes > 0) {
+      // Real denominator — the bar tracks actual bytes for the whole
+      // fetch, however large.
+      virtualCurrent = FETCH_PORTION * Math.min(1, fetched / fetchTotalBytes);
+      segmentCurrent = fetched;
+      segmentTotal = fetchTotalBytes;
+    } else if (fetchTotalAtCompletion === 0) {
+      // Fallback for sources that declare no length. Known to saturate
+      // on large files; see the note where fetchTotalBytes is computed.
       virtualCurrent =
         fetched > 0 ? (FETCH_PORTION * fetched) / (fetched + ESTIMATED_MORE_BYTES) : 0;
       segmentCurrent = fetched;
@@ -213,6 +302,13 @@ export async function downloadAdaptive(
         headers: mergedHeaders,
         signal,
         outputHandle: handle,
+        ...(side === 'video'
+          ? videoTotalBytes
+            ? { knownTotalBytes: videoTotalBytes }
+            : {}
+          : audioTotalBytes
+            ? { knownTotalBytes: audioTotalBytes }
+            : {}),
         onProgress: (written) => {
           if (side === 'video') videoBytesFetched = written;
           else audioBytesFetched = written;
@@ -230,6 +326,7 @@ export async function downloadAdaptive(
         requestId,
         video: redactUrl(videoUrl),
         audio: redactUrl(audioUrl),
+        discoverySource: req.discoverySource ?? 'unknown',
         err: err instanceof Error ? err.message : String(err),
       });
       throw err;

@@ -7,6 +7,7 @@ import {
   type InnerTubeClient,
 } from './youtube-clients.js';
 import { computeSapisidhash, extractVisitorData } from './youtube-auth.js';
+import { acquirePoToken } from './youtube-potoken.js';
 
 // Per-videoId cache for the InnerTube response. SPA navigation in
 // page-content.ts fires discoverStreams on every title change, which
@@ -16,7 +17,7 @@ import { computeSapisidhash, extractVisitorData } from './youtube-auth.js';
 //
 // Type-quirky on purpose: the value is a Promise so concurrent callers
 // share one in-flight request rather than racing.
-const innerTubeCache = new Map<string, Promise<YtPlayerResponse | null>>();
+const innerTubeCache = new Map<string, Promise<LadderResult | null>>();
 
 /** Test hook — drop the per-videoId InnerTube cache between cases. */
 export function _clearInnerTubeCacheForTests(): void {
@@ -244,6 +245,30 @@ function readVisitorDataFromYtInitialData(doc: Document): string | null {
 }
 
 /**
+ * Read `VISITOR_DATA` out of the page's `ytcfg.set({...})` bootstrap
+ * script — the source YouTube's own JS uses.
+ *
+ * This is the reliable location on current watch pages. A v0.12 field
+ * capture showed the value absent from BOTH the player response and
+ * `ytInitialData` while the page carried it in `ytcfg` all along, so
+ * the InnerTube ladder had been running with no visitor fingerprint at
+ * all (`hasVisitorData: false` in the log).
+ *
+ * The content script runs in an isolated world and cannot read
+ * `window.ytcfg`, so the literal is scraped out of the script text —
+ * same approach as the other inline-blob readers here.
+ *
+ * Exported for unit tests.
+ */
+export function readVisitorDataFromYtcfg(doc: Document): string | null {
+  for (const s of doc.querySelectorAll('script')) {
+    const m = /"VISITOR_DATA"\s*:\s*"([^"]+)"/.exec(s.textContent ?? '');
+    if (m?.[1]) return m[1];
+  }
+  return null;
+}
+
+/**
  * Extract ytInitialPlayerResponse from a single inline-script body.
  * YouTube embeds the blob as either `var ytInitialPlayerResponse = {...};`
  * or `window["ytInitialPlayerResponse"] = {...};`. Returns null when the
@@ -356,6 +381,7 @@ function variantFromFormat(f: YtFormat, pairedAudio?: YtFormat): HlsVariant | nu
   const v: HlsVariant = {
     url,
     bandwidth: f.bitrate ?? DEFAULT_BITRATE,
+    ...(typeof f.itag === 'number' ? { itag: f.itag } : {}),
     resolution,
     codecs: mimeCodecs(f.mimeType),
     ...(f.contentLength ? { contentLength: Number(f.contentLength) } : {}),
@@ -550,6 +576,7 @@ export function buildStreamsFromPlayerResponse(
       ...(lengthSecs > 0 ? { totalDuration: lengthSecs } : {}),
       variants,
       ...(audioTracks ? { audioTracks } : {}),
+      discoverySource: source,
     },
   ];
 }
@@ -629,6 +656,64 @@ function hasAdaptiveStream(streams: DiscoveredStream[]): boolean {
 }
 
 /**
+ * Do two variants describe the same rendition? `itag` is authoritative
+ * when both sides carry it; resolution + codecs is the fallback for
+ * payloads that elided it.
+ */
+function sameRendition(a: HlsVariant, b: HlsVariant): boolean {
+  if (typeof a.itag === 'number' && typeof b.itag === 'number') return a.itag === b.itag;
+  return a.resolution === b.resolution && a.codecs === b.codecs;
+}
+
+/**
+ * Fold the inline (WEB-session) catalog into the InnerTube one,
+ * preferring inline on collisions.
+ *
+ * Field-verified in v0.12: googlevideo serves URLs minted for the
+ * page's own WEB session with no poToken (the n-transform alone is
+ * enough) and refuses the ones our InnerTube calls return. Under SABR
+ * the inline response carries no adaptive URLs, but its progressive
+ * format IS fetchable — so replacing the inline catalog wholesale with
+ * InnerTube's, which is what we used to do, threw away the only
+ * working URL on the page and left the video entirely undownloadable.
+ *
+ * Inline wins collisions precisely because it is the fetchable side.
+ * The InnerTube-only entries (every adaptive quality, including 4K)
+ * are kept — they stay gated until Phase B lands, but they carry the
+ * real format inventory and the popup should keep showing it.
+ *
+ * Exported for unit tests.
+ */
+export function mergeInlineIntoInnerTube(
+  itStreams: DiscoveredStream[],
+  inlineStreams: DiscoveredStream[],
+): DiscoveredStream[] {
+  const inlineVariants = inlineStreams[0]?.variants ?? [];
+  const target = itStreams[0];
+  if (inlineVariants.length === 0 || !target) return itStreams;
+
+  const merged = [...(target.variants ?? [])];
+  let replaced = 0;
+  for (const v of inlineVariants) {
+    const at = merged.findIndex((m) => sameRendition(m, v));
+    if (at >= 0) {
+      merged[at] = v;
+      replaced += 1;
+    } else {
+      merged.push(v);
+    }
+  }
+  merged.sort((a, b) => b.bandwidth - a.bandwidth);
+  log.info('youtube: merged inline WEB variants into the InnerTube catalog', {
+    inlineVariants: inlineVariants.length,
+    replaced,
+    added: inlineVariants.length - replaced,
+    total: merged.length,
+  });
+  return [{ ...target, variants: merged }, ...itStreams.slice(1)];
+}
+
+/**
  * Auth + session context for an InnerTube call. Both fields are
  * optional — when present, they lift the bot-check gates that fire
  * on anonymous requests to non-WEB clients.
@@ -644,6 +729,14 @@ function hasAdaptiveStream(streams: DiscoveredStream[]): boolean {
 export interface InnerTubeAuth {
   sapisidhash?: string;
   visitorData?: string;
+  /**
+   * BotGuard-derived proof-of-origin token (Phase B). When present it
+   * rides in the request body's `serviceIntegrityDimensions`, which is
+   * what makes the returned media URLs fetchable — see the comment in
+   * `buildInnerTubePlayerBody`. Absent means the pre-v0.12 behavior:
+   * the call still issues, and its URLs come back gated.
+   */
+  poToken?: string;
 }
 
 /**
@@ -675,7 +768,7 @@ export async function fetchInnerTubePlayer(
   // both call shapes carry it. YouTube's own JS does this — the
   // server checks both places and the body is the more reliable
   // signal for some client variants.
-  const body = buildInnerTubePlayerBody(videoId, client) as {
+  const body = buildInnerTubePlayerBody(videoId, client, auth.poToken) as {
     context: { client: Record<string, unknown> };
   } & Record<string, unknown>;
   if (auth.visitorData) {
@@ -692,10 +785,13 @@ export async function fetchInnerTubePlayer(
     'X-YouTube-Client-Name': client.context.clientName ?? '',
     'X-YouTube-Client-Version': client.context.clientVersion ?? '',
   };
-  if (auth.sapisidhash) {
+  if (auth.sapisidhash && !client.omitAccountAuth) {
     // SAPISIDHASH + X-Origin pair is the canonical YouTube auth
     // proof. X-Origin matters because some YouTube auth paths
     // double-check it against the cookies' allowed origins.
+    //
+    // Skipped for clients that reject the web auth shape — sending it
+    // to ANDROID_VR is a bare 400. See `omitAccountAuth`.
     headers['Authorization'] = auth.sapisidhash;
     headers['X-Origin'] = 'https://www.youtube.com';
   }
@@ -807,46 +903,75 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
   // visitorData usually lives in `ytInitialData`, not the player
   // response — we check both blobs so the value lands either way.
   const visitorData =
-    extractVisitorData(inlinePlayer) ?? readVisitorDataFromYtInitialData(doc) ?? undefined;
+    extractVisitorData(inlinePlayer) ??
+    readVisitorDataFromYtInitialData(doc) ??
+    readVisitorDataFromYtcfg(doc) ??
+    undefined;
   const sapisidhash = (await computeSapisidhash().catch(() => null)) ?? undefined;
+  // Phase B seam. Null today, which is exactly the pre-v0.12 path: the
+  // ladder runs unattested and its URLs come back gated. Prefer a
+  // session binding when visitorData is available, else content.
+  const poToken =
+    (await acquirePoToken({
+      binding: visitorData ? { kind: 'session', visitorData } : { kind: 'content', videoId },
+      doc,
+    }).catch(() => null)) ?? undefined;
   log.info('youtube discoverYouTubeStreams: starting InnerTube ladder', {
     videoId,
     hasVisitorData: !!visitorData,
     hasSapisidhash: !!sapisidhash,
+    hasPoToken: !!poToken,
   });
-  let cached = innerTubeCache.get(videoId);
+  // Attestation state is part of the key: once Phase B starts returning
+  // tokens, an entry cached from an earlier unattested run would
+  // otherwise keep serving gated URLs for the rest of the session.
+  const cacheKey = `${videoId}:${poToken ? 'attested' : 'unattested'}`;
+  let cached = innerTubeCache.get(cacheKey);
   if (!cached) {
-    cached = runInnerTubeLadder(videoId, { sapisidhash, visitorData });
-    innerTubeCache.set(videoId, cached);
+    cached = runInnerTubeLadder(videoId, { sapisidhash, visitorData, poToken });
+    innerTubeCache.set(cacheKey, cached);
   }
-  let itPlayer: YtPlayerResponse | null;
+  let ladder: LadderResult | null;
   try {
-    itPlayer = await cached;
+    ladder = await cached;
   } catch (err) {
     // runInnerTubeLadder catches per-client failures internally, so a
     // throw here would be unexpected. Log and fall back to inline.
     log.warn('youtube discoverYouTubeStreams: ladder threw', {
       err: err instanceof Error ? err.message : String(err),
     });
-    innerTubeCache.delete(videoId);
+    innerTubeCache.delete(cacheKey);
     return inlineStreams;
   }
-  if (!itPlayer) {
+  if (!ladder) {
     log.warn('youtube discoverStreams: all InnerTube clients failed; using inline', {
       videoId,
     });
     return inlineStreams;
   }
-  const itStreams = buildStreamsFromPlayerResponse(itPlayer, 'innertube');
+  const itStreams = buildStreamsFromPlayerResponse(ladder.player, `innertube:${ladder.clientName}`);
   if (itStreams.length === 0) return inlineStreams;
-  return itStreams;
+  return mergeInlineIntoInnerTube(itStreams, inlineStreams);
+}
+
+/** Winning client's response plus its name, so a URL that later 403s
+ *  can be traced back to the client that minted it. */
+interface LadderResult {
+  player: YtPlayerResponse;
+  clientName: string;
 }
 
 async function runInnerTubeLadder(
   videoId: string,
   auth: InnerTubeAuth,
-): Promise<YtPlayerResponse | null> {
+): Promise<LadderResult | null> {
   for (const client of INNERTUBE_CLIENTS) {
+    if (client.requiresVisitorData && !auth.visitorData) {
+      // Without the fingerprint this client answers LOGIN_REQUIRED
+      // every time; skip rather than burn a request that cannot work.
+      log.warn(`youtube innertube ${client.name} skipped — no visitorData available`);
+      continue;
+    }
     const player = await fetchInnerTubePlayer(videoId, client, auth);
     if (!player) continue;
     // Surface the playabilityStatus per-client so a non-OK response
@@ -867,7 +992,7 @@ async function runInnerTubeLadder(
     const streams = buildStreamsFromPlayerResponse(player, `probe:${client.name}`);
     if (hasAdaptiveStream(streams)) {
       log.info(`youtube discoverStreams: client=${client.name} succeeded`);
-      return player;
+      return { player, clientName: client.name };
     }
     log.warn(`youtube innertube ${client.name} returned OK but no adaptive variants`);
   }

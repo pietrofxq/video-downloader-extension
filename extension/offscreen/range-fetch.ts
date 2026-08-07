@@ -40,6 +40,18 @@ export interface RangeFetchArgs {
   signal?: AbortSignal;
   /** Override the per-chunk size (testing). */
   chunkBytes?: number;
+  /**
+   * Total size when the caller already knows it from out-of-band
+   * metadata — googlevideo publishes it as the URL's `clen`, and
+   * YouTube's format list carries `contentLength`.
+   *
+   * Worth supplying: cross-origin responses have `Content-Range`
+   * stripped by CORS, so this fetcher otherwise cannot see the total
+   * and has to poll for EOF while reporting a progress denominator it
+   * is guessing at. On a multi-GB download that guess is what makes
+   * the popup appear frozen.
+   */
+  knownTotalBytes?: number;
 }
 
 /**
@@ -256,7 +268,13 @@ export async function fetchToOpfsRanged(args: RangeFetchToOpfsArgs): Promise<{ b
       throw new Error(`proxy fetch for ${url} returned non-string body on initial Range request`);
     }
     const firstBytes = base64ToUint8Array(firstReply.body);
-    const sizeInfo = parseTotalSize(firstReply, firstBytes.byteLength);
+    // A caller-supplied total beats sniffing the response: CORS strips
+    // Content-Range on googlevideo, so parseTotalSize would report
+    // "unknown" and fall back to EOF polling with a guessed denominator.
+    const sizeInfo =
+      args.knownTotalBytes && args.knownTotalBytes > 0
+        ? { total: args.knownTotalBytes, known: true }
+        : parseTotalSize(firstReply, firstBytes.byteLength);
 
     log.info('range-fetch-opfs: first chunk received', {
       url: redactUrl(url),
@@ -295,6 +313,10 @@ export async function fetchToOpfsRanged(args: RangeFetchToOpfsArgs): Promise<{ b
           signal,
         );
         if (!reply.ok) {
+          // A caller-supplied total can overshoot what the server will
+          // actually serve. Treat the past-EOF signal as completion
+          // rather than failing a download that already has its bytes.
+          if (reply.status === 416) break;
           throwFromReply(reply, url);
         }
         if (typeof reply.body !== 'string') {
@@ -303,6 +325,9 @@ export async function fetchToOpfsRanged(args: RangeFetchToOpfsArgs): Promise<{ b
           );
         }
         const chunk = base64ToUint8Array(reply.body);
+        // Same reasoning as the 416 above; without this an overshooting
+        // total spins forever on zero-length replies.
+        if (chunk.byteLength === 0) break;
         await writeChunk(chunk);
         onProgress?.(written, sizeInfo.total);
       }
