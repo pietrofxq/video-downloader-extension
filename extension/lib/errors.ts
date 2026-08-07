@@ -23,3 +23,12 @@ export class DecryptionError extends NamedError {}
 export class RemuxError extends NamedError {}
 export class DRMProtectedError extends NamedError {}
 export class UnsupportedFormatError extends NamedError {}
+/**
+ * Not enough browser storage to stage the download. The adaptive path
+ * writes both input streams to OPFS and then the combined output, so a
+ * long 4K video can need well over twice its final size in free quota.
+ * Raised up-front from the declared content lengths, because the
+ * failure it replaces — running out mid-write, gigabytes in — is slow
+ * and looks like a hang.
+ */
+export class InsufficientStorageError extends NamedError {}

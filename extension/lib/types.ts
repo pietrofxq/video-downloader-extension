@@ -192,6 +192,13 @@ export interface DownloadRequest {
   /** Byte length of the paired audio stream when known. */
   pairedAudioContentLength?: number;
   /**
+   * Byte length of the chosen video stream when known. Gives the
+   * adaptive path a real progress denominator and a storage-headroom
+   * figure; YouTube URLs also carry it as `clen`, so this is the
+   * fallback for sources that don't.
+   */
+  variantContentLength?: number;
+  /**
    * YouTube signatureCipher blobs forwarded from the picked variant.
    * The adaptive downloader (v0.11.1) hands these to yt-sig's solver
    * so the deciphered signature lands on the URL before fetch. Unset

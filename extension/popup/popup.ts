@@ -269,6 +269,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   RemuxError: "Couldn't repackage the video.",
   DRMProtectedError: "This stream is DRM-protected and can't be downloaded.",
   UnsupportedFormatError: 'Unsupported stream format.',
+  InsufficientStorageError: 'Not enough free space to stage this download. Try a lower quality.',
 };
 
 function friendlyErrorMessage(state: DownloadState): string {
