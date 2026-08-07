@@ -525,7 +525,7 @@ Tactical fix (not a planned milestone) that took the v0.11.8 version number when
 
 ## v0.11.9 - UI, settings & quality-of-life
 
-Goal: the download pipeline is solid across HLS / YouTube AVC+AV1 / progressive, so the next focus is making the extension pleasant to use rather than adding more codecs or sites. This pulls the settings/options work forward from v1.0 (which becomes the release-gate milestone) and folds in popup polish. VP9 and broader site/codec support are deferred and picked up as needed (see v0.11.10, v0.12, v1.4).
+Goal: the download pipeline is solid across HLS / YouTube AVC+AV1 / progressive, so the next focus is making the extension pleasant to use rather than adding more codecs or sites. This pulls the settings/options work forward from v1.0 (which becomes the release-gate milestone) and folds in popup polish. VP9 and broader site/codec support are deferred and picked up as needed (see v0.13, v0.12, v1.4).
 
 Landed so far (incremental QoL fixes from field reports):
 
@@ -552,6 +552,18 @@ Landed so far (incremental QoL fixes from field reports):
 - [x] ~~First-run disclaimer modal~~ — **dropped** at the maintainer's request. The README already carries the use-only-content-you-have-rights-to disclaimer; a blocking modal on every fresh profile wasn't worth the friction. The `disclaimerAccepted` setting was removed.
 
 **Ship criterion:** ✅ a user can set defaults (quality, concurrency, filename template), silence detection per origin / per adapter, and the popup remembers their last-picked quality — no functionality regresses and `npm run check` passes (321 tests).
+
+---
+
+## v0.11.10 - Install path + popup row fix — shipped
+
+Reconstructed from the commit history: this milestone had no ROADMAP entry, which is how the v0.13 numbering collision below went unnoticed. Recorded so the version line has no gaps.
+
+- [x] Release workflow: `npm run check` + production build + publish the zip as a GitHub Release on any `v*` tag push (`.github/workflows/release.yml`).
+- [x] README Install section pointing at the latest release zip, since the extension is installed unpacked rather than from the Web Store.
+- [x] Popup: non-HLS captures no longer render as stuck "Loading…" rows.
+
+**Ship criterion:** ✅ tagging a version publishes an installable zip, and the popup shows no phantom loading rows.
 
 ---
 
@@ -680,29 +692,6 @@ The extension has an advantage yt-dlp doesn't: it already runs inside a real Chr
 
 ---
 
-## v0.11.10 - YouTube 4K via VP9 (WebM container muxer) — deferred (as-needed)
-
-> **Deferred.** AVC + AV1 already cover HD + 4K for the vast majority of YouTube videos. VP9-only 4K is rare enough that this is picked up only when a user actually hits a video with no AVC/AV1 fallback. Sits below the v0.11.9 quality-of-life work in priority.
-
-Goal: lift the codec gate's remaining hole. YouTube serves some 4K content as VP9-only (no AV1 fallback) — those videos surface in the picker today as "No supported variants" or hide their highest qualities behind the `isVariantDownloadable` filter. This milestone lights up the VP9 path by adding a WebM container muxer.
-
-Constraints retained from v0.11.5:
-- **No re-encoding.** Pure byte-level stream-copy.
-- **Memory bound.** Same OPFS-streaming pattern as v0.11.5's mp4-combine; just a different container.
-- **`.webm` output for VP9.** Matches what YouTube sends (no transmux). Chrome's `downloads.download` accepts both extensions; VLC + modern players handle WebM.
-
-Tasks:
-
-- [ ] Add `extension/offscreen/webm-combine.ts`: an EBML/Matroska segment stitcher. YouTube serves VP9 as fragmented WebM (one EBML Cluster per network segment). The combiner writes a fresh EBML header + Segment / Info / Tracks (one video, one audio) + the cluster sequence concatenated, with cluster timestamps rebased to the global timeline. Same `Fmp4Source`-shaped abstraction (renamed appropriately) so the streaming/memory invariants stay consistent.
-- [ ] Extend `pickDefaultAudioFormat` in `extension/adapters/youtube.ts` to be codec-aware: VP9 pairs with Opus (in WebM); AVC + AV1 keep AAC (in m4a). The codec switch is what avoids the container mismatch that motivated splitting VP9 out of v0.11.5.
-- [ ] Plumb output container through the pipeline: `DownloadRequest.outputContainer: 'mp4' | 'webm'` defaulting to `'mp4'`. SW sets it from the chosen variant's codec; the offscreen dispatch routes `req.kind === 'dash'` to `combineFmp4` vs `combineWebm` accordingly. The filename extension follows.
-- [ ] Loosen the `isVariantDownloadable` codec gate for `vp09.*` (only when the variant has Opus paired audio available).
-- [ ] WebM fixtures + tests for the segment stitcher (mirroring `mp4-combine.test.ts`'s shape: small synthetic Clusters + a large-Cluster regression case).
-- [ ] Manual verify: a public YouTube 1440p / 2160p VP9 download produces a playable `.webm` in VLC + Chrome with correct duration + accurate seek.
-
-**Ship criterion:** a public VP9 YouTube video at 1440p+ downloads to a playable `.webm` with correct duration / audio-video sync. AV1, AVC, and audio-only paths unchanged.
-
----
 
 ## v0.12 - HLS completeness
 
@@ -730,6 +719,32 @@ Goal: make the HLS claim accurate before calling the extension broadly usable. P
   - DRM/encrypted unsupported cases
 
 **Ship criterion:** the extension handles common VOD HLS variants intentionally and fails unsupported variants with clear, typed errors.
+
+---
+
+## v0.13 - YouTube 4K via VP9 (WebM container muxer) — deferred (as-needed)
+
+> **Renumbered.** This previously claimed v0.11.10, which shipped as an unrelated patch while this sat deferred. A deferred item should not hold the next sequential patch number — that is exactly how the collision happened. Parked after v0.12 instead: it is a feature-sized change (a new container muxer) and it does not gate v1.0.
+
+> **Deferred.** AVC + AV1 already cover HD + 4K for the vast majority of YouTube videos. VP9-only 4K is rare enough that this is picked up only when a user actually hits a video with no AVC/AV1 fallback. Sits below the v0.11.9 quality-of-life work in priority.
+
+Goal: lift the codec gate's remaining hole. YouTube serves some 4K content as VP9-only (no AV1 fallback) — those videos surface in the picker today as "No supported variants" or hide their highest qualities behind the `isVariantDownloadable` filter. This milestone lights up the VP9 path by adding a WebM container muxer.
+
+Constraints retained from v0.11.5:
+- **No re-encoding.** Pure byte-level stream-copy.
+- **Memory bound.** Same OPFS-streaming pattern as v0.11.5's mp4-combine; just a different container.
+- **`.webm` output for VP9.** Matches what YouTube sends (no transmux). Chrome's `downloads.download` accepts both extensions; VLC + modern players handle WebM.
+
+Tasks:
+
+- [ ] Add `extension/offscreen/webm-combine.ts`: an EBML/Matroska segment stitcher. YouTube serves VP9 as fragmented WebM (one EBML Cluster per network segment). The combiner writes a fresh EBML header + Segment / Info / Tracks (one video, one audio) + the cluster sequence concatenated, with cluster timestamps rebased to the global timeline. Same `Fmp4Source`-shaped abstraction (renamed appropriately) so the streaming/memory invariants stay consistent.
+- [ ] Extend `pickDefaultAudioFormat` in `extension/adapters/youtube.ts` to be codec-aware: VP9 pairs with Opus (in WebM); AVC + AV1 keep AAC (in m4a). The codec switch is what avoids the container mismatch that motivated splitting VP9 out of v0.11.5.
+- [ ] Plumb output container through the pipeline: `DownloadRequest.outputContainer: 'mp4' | 'webm'` defaulting to `'mp4'`. SW sets it from the chosen variant's codec; the offscreen dispatch routes `req.kind === 'dash'` to `combineFmp4` vs `combineWebm` accordingly. The filename extension follows.
+- [ ] Loosen the `isVariantDownloadable` codec gate for `vp09.*` (only when the variant has Opus paired audio available).
+- [ ] WebM fixtures + tests for the segment stitcher (mirroring `mp4-combine.test.ts`'s shape: small synthetic Clusters + a large-Cluster regression case).
+- [ ] Manual verify: a public YouTube 1440p / 2160p VP9 download produces a playable `.webm` in VLC + Chrome with correct duration + accurate seek.
+
+**Ship criterion:** a public VP9 YouTube video at 1440p+ downloads to a playable `.webm` with correct duration / audio-video sync. AV1, AVC, and audio-only paths unchanged.
 
 ---
 
