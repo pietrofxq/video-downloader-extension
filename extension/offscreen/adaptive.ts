@@ -89,8 +89,14 @@ async function assertStorageHeadroom(totalInputBytes: number, requestId: string)
   });
   if (available >= needed) return;
   const gb = (n: number): string => (n / 1073741824).toFixed(1);
+  // Report the real figures. This limit is the browser's storage quota
+  // for the extension, which is unrelated to free disk — the first
+  // report of this error came from a machine with plenty of room. A
+  // bare "not enough space" sends people to check the wrong thing.
   throw new InsufficientStorageError(
-    `needs about ${gb(needed)} GB of browser storage to stage this download but only ${gb(available)} GB is free`,
+    `Needs ~${gb(needed)} GB of browser storage but only ${gb(available)} GB of the ` +
+      `${gb(quota)} GB quota is free. This is the browser's quota for the extension, not your disk. ` +
+      `Try a lower quality, or clear space by removing other downloads.`,
   );
 }
 
