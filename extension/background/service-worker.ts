@@ -702,6 +702,7 @@ async function handleStreamsDiscovered({
       // multi-quality the same way it treats parsed HLS masters.
       ...(s.variants ? { variants: s.variants, isMaster: true } : {}),
       ...(s.audioTracks ? { audioTracks: s.audioTracks } : {}),
+      ...(s.discoverySource ? { discoverySource: s.discoverySource } : {}),
     };
     const stored = await addEntry(tabId, entry);
     if (stored) anyAdded = true;
@@ -999,6 +1000,7 @@ async function handleStartDownload(payload: {
       ? { pairedSignatureCipher: resolvedPairedSignatureCipher }
       : {}),
     ...(resolvedAudioTrackId ? { audioTrackId: resolvedAudioTrackId } : {}),
+    ...(entry.discoverySource ? { discoverySource: entry.discoverySource } : {}),
   };
 
   // Slim snapshot of the parent entry + picked variant for the popup's

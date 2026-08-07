@@ -65,6 +65,8 @@ export interface MediaEntry {
    * `pairedAudioUrl` at download time.
    */
   audioTracks?: AudioTrack[];
+  /** Diagnostic provenance from the adapter. See `DiscoveredStream.discoverySource`. */
+  discoverySource?: string;
 }
 
 // ---------- HLS parsing ----------
@@ -198,6 +200,9 @@ export interface DownloadRequest {
    * so the offscreen downloader doesn't need to inspect this.
    */
   audioTrackId?: string;
+  /** Diagnostic provenance carried from the MediaEntry so a failed
+   *  fetch can name the discovery path that produced the URL. */
+  discoverySource?: string;
 }
 
 export interface DownloadOutcome {
@@ -361,6 +366,14 @@ export interface DiscoveredStream {
    * `MediaEntry.audioTracks` for the consumer side.
    */
   audioTracks?: AudioTrack[];
+  /**
+   * Where this catalog came from, for diagnosis only — e.g. `inline`
+   * or `innertube:WEB_CREATOR`. When a download 403s, this is what
+   * identifies which discovery path handed us the dead URL; without it
+   * the log shows a failing URL with no way to tell which InnerTube
+   * client minted it. Never used for control flow.
+   */
+  discoverySource?: string;
 }
 
 /**

@@ -16,7 +16,7 @@ import { computeSapisidhash, extractVisitorData } from './youtube-auth.js';
 //
 // Type-quirky on purpose: the value is a Promise so concurrent callers
 // share one in-flight request rather than racing.
-const innerTubeCache = new Map<string, Promise<YtPlayerResponse | null>>();
+const innerTubeCache = new Map<string, Promise<LadderResult | null>>();
 
 /** Test hook — drop the per-videoId InnerTube cache between cases. */
 export function _clearInnerTubeCacheForTests(): void {
@@ -550,6 +550,7 @@ export function buildStreamsFromPlayerResponse(
       ...(lengthSecs > 0 ? { totalDuration: lengthSecs } : {}),
       variants,
       ...(audioTracks ? { audioTracks } : {}),
+      discoverySource: source,
     },
   ];
 }
@@ -819,9 +820,9 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
     cached = runInnerTubeLadder(videoId, { sapisidhash, visitorData });
     innerTubeCache.set(videoId, cached);
   }
-  let itPlayer: YtPlayerResponse | null;
+  let ladder: LadderResult | null;
   try {
-    itPlayer = await cached;
+    ladder = await cached;
   } catch (err) {
     // runInnerTubeLadder catches per-client failures internally, so a
     // throw here would be unexpected. Log and fall back to inline.
@@ -831,21 +832,28 @@ export async function discoverYouTubeStreams(doc: Document): Promise<DiscoveredS
     innerTubeCache.delete(videoId);
     return inlineStreams;
   }
-  if (!itPlayer) {
+  if (!ladder) {
     log.warn('youtube discoverStreams: all InnerTube clients failed; using inline', {
       videoId,
     });
     return inlineStreams;
   }
-  const itStreams = buildStreamsFromPlayerResponse(itPlayer, 'innertube');
+  const itStreams = buildStreamsFromPlayerResponse(ladder.player, `innertube:${ladder.clientName}`);
   if (itStreams.length === 0) return inlineStreams;
   return itStreams;
+}
+
+/** Winning client's response plus its name, so a URL that later 403s
+ *  can be traced back to the client that minted it. */
+interface LadderResult {
+  player: YtPlayerResponse;
+  clientName: string;
 }
 
 async function runInnerTubeLadder(
   videoId: string,
   auth: InnerTubeAuth,
-): Promise<YtPlayerResponse | null> {
+): Promise<LadderResult | null> {
   for (const client of INNERTUBE_CLIENTS) {
     const player = await fetchInnerTubePlayer(videoId, client, auth);
     if (!player) continue;
@@ -867,7 +875,7 @@ async function runInnerTubeLadder(
     const streams = buildStreamsFromPlayerResponse(player, `probe:${client.name}`);
     if (hasAdaptiveStream(streams)) {
       log.info(`youtube discoverStreams: client=${client.name} succeeded`);
-      return player;
+      return { player, clientName: client.name };
     }
     log.warn(`youtube innertube ${client.name} returned OK but no adaptive variants`);
   }

@@ -67,6 +67,7 @@ export async function downloadAdaptive(
     pairedAudioUrl: redactUrl(req.pairedAudioUrl),
     hasSignatureCipher: !!req.signatureCipher,
     hasPairedSignatureCipher: !!req.pairedSignatureCipher,
+    discoverySource: req.discoverySource ?? 'unknown',
   });
 
   signal?.throwIfAborted();
@@ -230,6 +231,7 @@ export async function downloadAdaptive(
         requestId,
         video: redactUrl(videoUrl),
         audio: redactUrl(audioUrl),
+        discoverySource: req.discoverySource ?? 'unknown',
         err: err instanceof Error ? err.message : String(err),
       });
       throw err;
