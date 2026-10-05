@@ -49,7 +49,8 @@ $gear?.addEventListener('click', () => chrome.runtime.openOptionsPage?.());
 // Reset clears the SW-side tab state for the active tab. The SW pushes
 // the resulting empty STATE through the popup port, so the row list
 // blanks out and the badge clears. PageMeta is preserved on the SW
-// side, so any newly-detected videos still get titled correctly.
+// side, so any newly-detected videos still get titled correctly. Live
+// downloads are untouched and re-render as "Active downloads" rows.
 $reset?.addEventListener('click', async () => {
   const tabId = await activeTabId();
   if (tabId == null) return;

@@ -409,14 +409,14 @@ chrome.runtime.onMessage.addListener((rawMsg, sender, sendResponse) => {
     case MSG.RESET_TAB: {
       const tabId = msg.payload?.tabId;
       if (typeof tabId === 'number') {
-        // Drop this tab's entries + download states (any status), plus
-        // every finished download across all tabs so saved rows in the
-        // cross-tab "Active downloads" section clear too. In-progress
-        // downloads in OTHER tabs keep running. adapterMeta is preserved
-        // by clearTab so the next detection lands with the right title.
-        const cleared = clearDownloadStatesForTab(tabId);
-        for (const id of clearFinishedDownloadStatesAllTabs()) cleared.add(id);
-        broadcastDownloadDismissed(cleared);
+        // Drop this tab's entries plus every finished download across all
+        // tabs so saved rows in the cross-tab "Active downloads" section
+        // clear too. Live (queued / in-progress) downloads are left alone,
+        // including this tab's: with their entry gone they surface as
+        // orphan rows in that section, still cancellable, and the queue
+        // keeps draining. adapterMeta is preserved by clearTab so the
+        // next detection lands with the right title.
+        broadcastDownloadDismissed(clearFinishedDownloadStatesAllTabs());
         clearTab(tabId)
           .then(async () => {
             await updateBadge(tabId);
@@ -1493,14 +1493,15 @@ function clearDownloadStatesForTab(tabId: number): Set<string> {
 }
 
 // Drop finished (saved / error / canceled) download states across ALL
-// tabs. Used by Reset so the cross-tab "Active downloads" section is
-// wiped of completed rows; in-progress / queued downloads in other tabs
-// are left running. Returns the affected mediaIds.
+// tabs. Used by Reset and the options-page clear so the cross-tab
+// "Active downloads" section is wiped of completed rows; live (queued /
+// in-progress) downloads on any tab keep running and stay visible.
+// Returns the affected mediaIds.
 function clearFinishedDownloadStatesAllTabs(): Set<string> {
   const clearedMediaIds = new Set<string>();
   let mutated = false;
   for (const [requestId, state] of downloadStates) {
-    if (state.status === 'saved' || state.status === 'error' || state.status === 'canceled') {
+    if (isTerminalStatus(state.status)) {
       clearedMediaIds.add(state.mediaId);
       downloadStates.delete(requestId);
       mutated = true;

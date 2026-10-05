@@ -693,6 +693,14 @@ The extension has an advantage yt-dlp doesn't: it already runs inside a real Chr
 ---
 
 
+## v0.11.12 - In progress
+
+Landed so far (incremental fixes from field reports):
+
+- [x] **Reset no longer kills in-progress downloads.** The header Reset button dropped every download state for the current tab regardless of status, so a download that was still running (or queued behind one) vanished from the popup: the offscreen kept working but its progress ticks had no state to patch, it could no longer be cancelled, and queued runs for the tab were deleted outright. `RESET_TAB` now only drops finished (saved / error / canceled) states; live downloads keep their state and queue slot and, with their entry gone, re-render as orphan rows in the cross-tab "Active downloads" section until they finish and are dismissed.
+
+---
+
 ## v0.12 - HLS completeness
 
 Goal: make the HLS claim accurate before calling the extension broadly usable. Parked behind v0.11 so YouTube support ships first; the muxer module v0.11 introduces also lights up the alt-audio + fMP4 work below.

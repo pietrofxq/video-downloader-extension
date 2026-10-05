@@ -158,7 +158,9 @@ export interface CancelDownloadMessage extends MessageBase<typeof MSG.CANCEL_DOW
 // Popup → SW: empty the detected-media list for this tab. Keeps the
 // per-adapter PageMeta so freshly-detected entries land with proper
 // titles. Used by the header "Reset" button when the user wants the
-// popup to forget stale captures and start observing fresh.
+// popup to forget stale captures and start observing fresh. Finished
+// download rows are dropped too; live downloads keep running and stay
+// visible in the "Active downloads" section.
 export interface ResetTabMessage extends MessageBase<typeof MSG.RESET_TAB> {
   payload: { tabId: number };
 }
