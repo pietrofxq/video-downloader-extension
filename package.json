@@ -15,9 +15,13 @@
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit",
     "probe-mp4": "node scripts/probe-mp4.mjs",
+    "harness": "node scripts/harness/launch.mjs",
+    "harness:fixtures": "node scripts/harness/make-fixtures.mjs",
+    "e2e": "npm run build && playwright test",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/chrome": "^0.1.42",
     "@types/node": "^25.9.1",
     "@vitest/web-worker": "^2.1.8",
@@ -25,6 +29,7 @@
     "esbuild": "^0.24.0",
     "eslint": "^9.16.0",
     "globals": "^15.13.0",
+    "hls.js": "^1.7.4",
     "prettier": "^3.4.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.4",
