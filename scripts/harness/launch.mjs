@@ -1,19 +1,6 @@
 #!/usr/bin/env node
 // launch.mjs — open the extension in a real Chromium and, optionally, download.
-//
-// Usage:
-//   npm run harness -- [--url <url|fixture>] [--headless] [--download] [--variant <height>]
-//                      [--keep-open] [--profile <name>] [--fresh] [--port <n>] [--wait <ms>]
-//                      [--out <dir>]
-//
-// Examples:
-//   npm run harness -- --url hls-aes-seq --headless --download
-//   npm run harness -- --url https://www.youtube.com/watch?v=... --profile login --download
-//   npm run harness -- --profile login --keep-open   # sign in to sites once; cookies persist
-//
-// A bare --url such as `hls-plain` opens that fixture page from the local
-// server; a full URL opens that site. Output (screenshots, downloads) lands in
-// scripts/harness/out/ unless --out is given.
+// `--help` lists the flags; README.md § Testing has the walkthrough.
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -30,7 +17,33 @@ import {
 } from './lib.mjs';
 import { makeFixtures } from './make-fixtures.mjs';
 
+const USAGE = `Usage: npm run harness -- [options]
+
+  --url <url|fixture>   page to open: a fixture name (hls-plain, hls-aes-iv, hls-aes-seq,
+                        hls-master, progressive-mp4, progressive-webm) or a full http(s) URL.
+                        Default: the fixture index.
+  --headless            no browser window
+  --download            download the first detected entry and validate the file
+  --variant <height>    rendition to download from a master playlist (default: highest)
+  --filename <name>     override the download filename
+  --profile <name>      persistent profile under scripts/harness/profiles/ (default: scratch);
+                        use "login" for a profile you have signed in to real sites with
+  --fresh               wipe the profile before launch
+  --keep-open           leave the browser open until Ctrl+C (sign in, poke around)
+  --wait <ms>           how long to wait for detection (default: 15000)
+  --port <n>            fixture server port (default: random)
+  --out <dir>           where screenshots and downloads go (default: scripts/harness/out)
+
+Examples:
+  npm run harness -- --url hls-aes-seq --headless --download
+  npm run harness -- --url https://www.youtube.com/watch?v=... --profile login --download
+  npm run harness -- --profile login --keep-open`;
+
 const args = parseArgs(process.argv.slice(2));
+if (args.help) {
+  console.log(USAGE);
+  process.exit(0);
+}
 const headless = Boolean(args.headless);
 const profile = typeof args.profile === 'string' ? args.profile : 'scratch';
 const outDir = typeof args.out === 'string' ? path.resolve(args.out) : OUT_DIR;

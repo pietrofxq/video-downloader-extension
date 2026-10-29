@@ -235,6 +235,7 @@ mux.js was built for `SourceBuffer.appendBuffer()` — it expects the player to 
 `scripts/harness/` launches a real Chromium with `dist/` loaded unpacked and drives the extension end to end: detection → popup → `START_DOWNLOAD` → saved file. Use it to reproduce issues and to verify a change in the real pipeline, not only in unit tests.
 
 ```
+npx playwright install chromium                             # once per machine; needs ffmpeg on PATH too
 npm run build                                               # the harness loads dist/, so build first
 npm run harness -- --url hls-aes-seq --headless --download  # one fixture, end to end
 npm run harness -- --url https://example.com/watch --profile login --download
