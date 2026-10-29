@@ -151,6 +151,8 @@ npm run build        # or: npm run build:prod  (minified)
 
 Then load `dist/` as an unpacked extension. `npm run check` runs the full gate — format, lint, typecheck, tests, build — and must pass before anything ships.
 
+To see a change working in a real browser, `npm run harness -- --url hls-plain --download` opens Playwright's Chromium with `dist/` loaded and downloads a local fixture; `npm run e2e` runs the browser smoke suite. Both need ffmpeg on PATH. Details in [AGENTS.md §9a](./AGENTS.md).
+
 Releases are automated: pushing a `vX.Y.Z` tag triggers the [release workflow](.github/workflows/release.yml), which runs the check, does a production build, and publishes a GitHub Release with the zip attached.
 
 ## Status

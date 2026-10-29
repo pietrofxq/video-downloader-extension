@@ -24,7 +24,7 @@ This document covers the project's architecture and engineering conventions.
 | HLS parsing | **m3u8-parser** (npm) | Bundled, runs in offscreen document. |
 | DASH parsing | **mpd-parser** (npm) | Same context as m3u8-parser. |
 | Crypto | **Web Crypto API** (`crypto.subtle`) | AES-128-CBC for HLS, AES-CTR for DASH ClearKey. No external crypto libraries. **No DRM (Widevine/PlayReady/FairPlay).** |
-| Tests | **Vitest** + **@vitest/web-worker** | Unit tests for parsers, filename sanitizer, IV derivation, message-bus shape, adapter matching. E2E later via Playwright with `chrome.launch` against fixture pages. |
+| Tests | **Vitest** + **@vitest/web-worker** | Unit tests for parsers, filename sanitizer, IV derivation, message-bus shape, adapter matching. Browser-level smoke tests via **Playwright** (`npm run e2e`) and a driving harness (`npm run harness`) — see §9a. |
 | Lint/format | **ESLint** (flat config) + **Prettier** | Run on pre-commit via a simple npm script. |
 
 ---
@@ -227,7 +227,33 @@ mux.js was built for `SourceBuffer.appendBuffer()` — it expects the player to 
 - **Unit tests** (`vitest`): m3u8/mpd parsing, IV derivation, filename sanitization, adapter matching priority, message-envelope validation, AES decrypt against fixture key+segment, URL redaction.
 - **Integration tests** for the offscreen pipeline using recorded fixtures (a short test course's manifest + 2–3 encrypted segments + key for Hotmart, plus a public DASH-IF reference stream snippet). Redact tokens from fixture URLs before committing.
 - **Manual smoke test** before each tagged release: load unpacked, open both a Hotmart lesson and a public HLS test page, capture, download, play the resulting MP4 in VLC and confirm audio + video sync.
+- **Browser-level smoke tests** (`npm run e2e`, Playwright): the local fixtures through the real extension in Chromium — detection, popup, download, container check. Not part of `npm run check`; needs ffmpeg. See §9a.
 - **No real network in CI** — fixtures only.
+
+### 9a. Browser harness (Playwright)
+
+`scripts/harness/` launches a real Chromium with `dist/` loaded unpacked and drives the extension end to end: detection → popup → `START_DOWNLOAD` → saved file. Use it to reproduce issues and to verify a change in the real pipeline, not only in unit tests.
+
+```
+npm run build                                               # the harness loads dist/, so build first
+npm run harness -- --url hls-aes-seq --headless --download  # one fixture, end to end
+npm run harness -- --url https://example.com/watch --profile login --download
+npm run harness -- --profile login --keep-open              # sign in to sites once; cookies persist
+npm run e2e                                                 # the smoke suite in e2e/ (builds first)
+```
+
+- **Fixtures** are generated locally by ffmpeg (`npm run harness:fixtures`, automatic on first run) into `scripts/harness/fixtures/generated/` (gitignored): plain HLS, AES-128 with explicit IV, AES-128 with sequence-derived IV (`MEDIA-SEQUENCE:7`, so an index-vs-sequence bug decrypts to noise), a two-rendition master playlist, and progressive MP4 / WebM. The pages in `fixtures/*.html` play them through hls.js so the frame hooks see real player traffic. Nothing is fetched from the network.
+- **Profiles** live in `scripts/harness/profiles/<name>/` (gitignored). `scratch` is the default; `login` is meant for a one-time manual sign-in to Hotmart / YouTube with `--keep-open`, after which real-site repros run with `--profile login`. `@temp` is a throwaway (what e2e uses).
+- **Output** (screenshots, downloads, e2e artifacts) goes to `scripts/harness/out/` (gitignored). `scripts/probe-mp4.mjs` and `ffprobe` are the tools for checking a result.
+- **Library API** (`scripts/harness/lib.mjs`): `launchExtension()` returns `{ open, tabState, waitForEntries, openPopupFor, send, startDownload, waitForDownload, download, close }`; `startFixtureServer()` serves the fixtures with Range support. Ad-hoc repro scripts and e2e specs build on these.
+
+Things that are not obvious and cost time to find out:
+
+1. **Google Chrome ignores `--load-extension` since Chrome 137.** No service worker ever appears under `channel: 'chrome'`, headed or headless. The harness always uses Playwright's Chromium (`channel: 'chromium'`), which also loads extensions headless. If an exact Chrome version matters, point Playwright at a Chrome for Testing build.
+2. **The popup can't be opened from the toolbar by automation.** `openPopupFor(page)` opens `popup/popup.html` in a tab, brings the target tab to the front, then reloads the popup tab so its `tabs.query({ active, currentWindow })` lands on the target. No popup code change is needed.
+3. **Protocol messages are sent from a `manifest.json` tab.** Any resource document at the extension origin is a full extension context (`chrome.runtime` / `tabs` / `downloads`) with no popup side effects. The SW does _not_ receive its own `chrome.runtime.sendMessage`, so `sw.evaluate` can't be used for that.
+4. **Playwright intercepts `chrome.downloads`** into a temp `playwright-artifacts-*` dir under a random name, deleted on `context.close()`. `download()` copies the file out first, naming it from the SW's `downloadStates` (the `START_DOWNLOAD` response guesses `.mp4` even for WebM). Persistent profiles keep download history, so `clearDownloads()` runs before each download.
+5. **The offscreen document is a `background_page` target** to Playwright; its console is relayed via `context.on('backgroundpage')`. Master entries need a `variantUrl` in `START_DOWNLOAD`; the harness defaults to the highest rendition, like the popup.
 
 ---
 
