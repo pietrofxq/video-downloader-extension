@@ -4,3 +4,7 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+# Browser harness (scripts/harness): generated media, browser profiles, run output
+scripts/harness/fixtures/generated/
+scripts/harness/profiles/
+scripts/harness/out/

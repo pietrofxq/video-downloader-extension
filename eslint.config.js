@@ -50,11 +50,11 @@ export default [
     },
   })),
   {
-    files: ['build.mjs', '*.config.js'],
+    files: ['build.mjs', '*.config.js', 'scripts/**/*.{js,mjs}'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
-      globals: { ...globals.node },
+      globals: { ...globals.node, ...globals.browser },
     },
     rules: {
       'no-console': 'off',

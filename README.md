@@ -153,6 +153,86 @@ Then load `dist/` as an unpacked extension. `npm run check` runs the full gate �
 
 Releases are automated: pushing a `vX.Y.Z` tag triggers the [release workflow](.github/workflows/release.yml), which runs the check, does a production build, and publishes a GitHub Release with the zip attached.
 
+## Testing
+
+Three layers, from cheapest to most realistic.
+
+### Unit tests
+
+```bash
+npm test             # vitest, about a second
+npm run check        # format + lint + typecheck + tests + build — the gate for every commit
+```
+
+The unit suite covers the pure parts: manifest parsing, IV derivation, AES decryption against fixture segments, filename sanitizing, adapter matching, the remux post-patcher, URL redaction. It runs in Node with no browser and no network.
+
+### Browser smoke suite
+
+The real pipeline — detection in the service worker, the popup, the download and remux in the offscreen document — only exists inside a browser. `npm run e2e` runs it in a headless Chromium against local fixtures.
+
+One-time setup:
+
+```bash
+npm install
+npx playwright install chromium   # Playwright's own Chromium — Google Chrome no longer loads unpacked extensions from the command line
+```
+
+You also need **ffmpeg** on your PATH (`winget install Gyan.FFmpeg`, `brew install ffmpeg`, `apt install ffmpeg`). The fixtures are synthetic media generated locally on first run, so nothing copyrighted lives in the repo and the suite never touches the network.
+
+```bash
+npm run e2e                         # builds dist/, then runs e2e/ headless — under 10 s
+npx cross-env HEADED=1 npm run e2e  # same, but watch the browser
+```
+
+Six tests, one per fixture: plain HLS, AES-128 with an explicit IV, AES-128 with the IV derived from the media sequence, an HLS master with two renditions, a progressive MP4, and a progressive WebM. Each loads the page, waits for the extension to detect and parse the stream, triggers the download through the extension's own message protocol, and checks the saved file's container. A failing test attaches the full extension log — service worker, popup, offscreen document, page — to the report.
+
+### Reproducing an issue in a real browser
+
+`npm run harness` is the same machinery as a command-line tool. It launches Chromium with `dist/` loaded, opens a page, prints what the extension detected and what the popup shows, screenshots both, and optionally downloads and validates the result — with every console line from every extension context relayed to your terminal.
+
+```bash
+npm run build                                                  # the harness loads dist/, so build first
+npm run harness -- --url hls-plain                             # open a fixture; show detection + popup
+npm run harness -- --url hls-aes-seq --headless --download     # ...and download it, headless
+npm run harness -- --url hls-master --download --variant 180   # pick a rendition of a master playlist
+npm run harness -- --help                                      # every flag
+```
+
+Fixture names: `hls-plain`, `hls-aes-iv`, `hls-aes-seq`, `hls-master`, `progressive-mp4`, `progressive-webm`. A full `http(s)://` URL opens that site instead.
+
+Output lands in `scripts/harness/out/`: `popup-<time>.png`, `page-<time>.png`, and the downloaded file under its real name. The terminal shows the detected entries, the popup's text, the saved file's top-level MP4 boxes (expect `ftyp moov` followed by `moof mdat` pairs), and an `ffprobe` summary. Log lines carry the seconds since launch and the context they came from: `[sw]`, `[popup]`, `[offscreen]`, `[page]`.
+
+**Sites that need a login** (Hotmart, your YouTube account) use a persistent browser profile that you sign in to once:
+
+```bash
+npm run harness -- --profile login --keep-open        # a window opens; sign in, then Ctrl+C
+npm run harness -- --profile login --url https://www.youtube.com/watch?v=... --download
+```
+
+Profiles live in `scripts/harness/profiles/<name>/` and are gitignored. Your everyday Chrome profile can't be reused here — Chrome refuses both remote debugging on it and command-line extension loading — so this one is separate on purpose. `--fresh` wipes a profile before launch.
+
+**Scripted repros.** For anything the flags don't cover, `scripts/harness/lib.mjs` is a small library:
+
+```js
+import { launchExtension, startFixtureServer } from './scripts/harness/lib.mjs';
+
+const server = await startFixtureServer();
+const h = await launchExtension({ headless: true, profile: '@temp' });
+const page = await h.open(`${server.url}hls-master.html`);
+const entries = await h.waitForEntries(page); // what the service worker detected on that tab
+const popup = await h.openPopupFor(page); // the real popup UI, targeted at that tab
+await popup.screenshot({ path: 'popup.png' });
+const { path } = await h.download(page, { variant: 360 }); // START_DOWNLOAD → saved file
+await h.close();
+await server.close();
+```
+
+`h.send(type, payload)` sends any protocol message from the extension's own origin, `h.sw` is the service-worker handle for `evaluate()`, and `h.context` is the Playwright context when you need the rest of its API. [AGENTS.md §9a](./AGENTS.md) explains the non-obvious parts — why Chromium rather than Chrome, how the popup is targeted, where downloads land — for anyone extending the harness.
+
+### Manually, in your own browser
+
+Load `dist/` through **Load unpacked** as described under *Install*, and hit **Reload** on the extension card after each `npm run build`. For verbose logs, open the service worker console from `chrome://extensions` → *Inspect views* and run `chrome.storage.local.set({ logLevel: 'debug' })` — it takes effect immediately in every context, no reload needed, and the offscreen document gets its own *Inspect views* entry while a download runs. URLs in logs are redacted, so signed tokens never appear. When a player misbehaves on a finished file, `node scripts/probe-mp4.mjs <file>` prints its box tree.
+
 ## Status
 
 Beta, and used daily. See [ROADMAP.md](ROADMAP.md) for what's next.

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Harness HLS master</title>
+  </head>
+  <body>
+    <h1>HLS master playlist with two renditions</h1>
+    <video
+      muted
+      autoplay
+      playsinline
+      controls
+      width="640"
+      data-hls="/generated/hls-master/master.m3u8"
+    ></video>
+    <p id="status">loading…</p>
+    <script src="/vendor/hls.min.js"></script>
+    <script src="/player.js"></script>
+  </body>
+</html>

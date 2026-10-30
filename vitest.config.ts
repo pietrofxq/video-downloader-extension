@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { dirname, resolve as pathResolve } from 'node:path';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Test sources import sibling modules with explicit `.js` extensions
 // (e.g. `import { foo } from './foo.js'`) because that matches Chrome's
@@ -32,5 +32,6 @@ export default defineConfig({
   ],
   test: {
     environment: 'node',
+    exclude: [...configDefaults.exclude, 'e2e/**'],
   },
 });
