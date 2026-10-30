@@ -9,18 +9,19 @@ async function downloadFixture(name: string) {
   const info = test.info();
   const lines: string[] = [];
   const server = await startFixtureServer();
-  const h = await launchExtension({
-    headless: HEADLESS,
-    profile: '@temp',
-    onLog: (...args: unknown[]) => lines.push(args.join(' ')),
-  });
+  let h: Awaited<ReturnType<typeof launchExtension>> | undefined;
   try {
+    h = await launchExtension({
+      headless: HEADLESS,
+      profile: '@temp',
+      onLog: (...args: unknown[]) => lines.push(args.join(' ')),
+    });
     const page = await h.open(`${server.url}${name}.html`);
     const result = await h.download(page, { dir: info.outputPath() });
     return { ...result, info: await describeMediaFile(result.path) };
   } finally {
     await info.attach('harness-log', { body: lines.join('\n'), contentType: 'text/plain' });
-    await h.close();
+    await h?.close();
     await server.close();
   }
 }

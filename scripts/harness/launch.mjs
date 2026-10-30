@@ -103,7 +103,9 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) continue;
-    const [key, inline] = arg.slice(2).split('=', 2);
+    const eq = arg.indexOf('=');
+    const key = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+    const inline = eq === -1 ? undefined : arg.slice(eq + 1);
     if (inline !== undefined) out[key] = inline;
     else if (argv[i + 1] && !argv[i + 1].startsWith('--')) out[key] = argv[++i];
     else out[key] = true;
